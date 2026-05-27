@@ -1,0 +1,6 @@
+[submodule "SoftHier"]
+	path = SoftHier
+	url = https://github.com/gvsoc/gvsoc.git
+[submodule "3D-ICE"]
+	path = 3D-ICE
+	url = https://github.com/esl-epfl/3d-ice.git
