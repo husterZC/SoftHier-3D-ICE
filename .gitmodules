@@ -3,4 +3,4 @@
 	url = https://github.com/gvsoc/gvsoc.git
 [submodule "3D-ICE"]
 	path = 3D-ICE
-	url = https://github.com/esl-epfl/3d-ice.git
+	url = git@github.com:kaizhu657/3d-ice_softhier_interface.git
