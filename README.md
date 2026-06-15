@@ -1,11 +1,11 @@
-# SoftHier-3D-ICE
+# 🧊 SoftHier-3D-ICE
 
 SoftHier-3D-ICE generates 3D-ICE inputs from the default SoftHier architecture and
 runs them through the 3D-ICE server/client workflow.
 
 Unless noted otherwise, run commands from the repository root.
 
-## Setup
+## 🚀 Setup
 
 Initialize the submodules and set up the SoftHier environment:
 
@@ -13,7 +13,7 @@ Initialize the submodules and set up the SoftHier environment:
 source init.sh
 ```
 
-## Generate 3D-ICE Inputs
+## 🧩 Generate 3D-ICE Inputs
 
 1. Generate the geometry file:
 
@@ -45,7 +45,7 @@ python 3D-ICE/test_interface_softhier/scripts/roi2ice_stk.py \
 
 This writes `3D-ICE/test_interface_softhier/example_transient_test_server.stk`.
 
-## Build 3D-ICE
+## 🧩 Build 3D-ICE
 
 Install the Python requirements:
 
@@ -62,7 +62,7 @@ make
 cd ..
 ```
 
-## Run the Simulation
+## 🧩 Run the Simulation
 
 ### 1. Start the 3D-ICE Server
 
@@ -93,7 +93,7 @@ From `3D-ICE/test_interface_softhier`, run:
 ../bin/3D-ICE-Client 127.0.0.1 54322 power_traces.txt --follow --until-minus-one
 ```
 
-## Optional: Plot Runtime Temperature
+### Optional: Plot Runtime Temperature
 
 Install the plotting requirements:
 
