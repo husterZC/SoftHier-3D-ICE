@@ -64,7 +64,7 @@ check_host_tools() {
     local missing=()
     local cmd
 
-    for cmd in git make cmake gcc bison flex unzip awk "$PYTHON"; do
+    for cmd in git make cmake gcc bison flex unzip awk tail "$PYTHON"; do
         if ! need_cmd "$cmd"; then
             missing+=("$cmd")
         fi

@@ -39,6 +39,7 @@ BUILD_SOFTHIER="${BUILD_SOFTHIER:-1}"
 BUILD_3DICE="${BUILD_3DICE:-1}"
 WAIT_TIMEOUT="${WAIT_TIMEOUT:-180}"
 EXIT_TIMEOUT="${EXIT_TIMEOUT:-120}"
+SOFTHIER_LOG_TAIL_LINES="${SOFTHIER_LOG_TAIL_LINES:-5}"
 PYTHON="${PYTHON:-python3}"
 MAKE_CMD="${MAKE:-make}"
 AUTO_BOOTSTRAP="${AUTO_BOOTSTRAP:-0}"
@@ -84,6 +85,7 @@ Environment overrides:
   OTHERS_POWER=$OTHERS_POWER
   BUILD_SOFTHIER=$BUILD_SOFTHIER
   BUILD_3DICE=$BUILD_3DICE
+  SOFTHIER_LOG_TAIL_LINES=$SOFTHIER_LOG_TAIL_LINES
 USAGE
 }
 
@@ -145,6 +147,15 @@ effective_step_seconds() {
     fi
 }
 
+nonnegative_integer() {
+    [[ "$1" =~ ^[0-9]+$ ]]
+}
+
+validate_softhier_log_tail_lines() {
+    nonnegative_integer "$SOFTHIER_LOG_TAIL_LINES" ||
+        die "SOFTHIER_LOG_TAIL_LINES must be a non-negative integer"
+}
+
 write_pid() {
     local name="$1"
     local pid="$2"
@@ -190,6 +201,7 @@ reset_runtime_files() {
         "$PID_DIR/3dice_client.pid" \
         "$PID_DIR/adapter.pid" \
         "$PID_DIR/softhier.pid" \
+        "$PID_DIR/softhier_log_tail.pid" \
         "$RUN_3DICE_DIR/output_top_die_flp_avg.txt" \
         "$RUN_3DICE_DIR/output_top_die_flp_max.txt" \
         "$RUN_3DICE_DIR/output_top_die_flp_min.txt" \
@@ -271,6 +283,7 @@ write_manifest() {
         kv OTHERS_POWER "$OTHERS_POWER"
         kv BUILD_SOFTHIER "$BUILD_SOFTHIER"
         kv BUILD_3DICE "$BUILD_3DICE"
+        kv SOFTHIER_LOG_TAIL_LINES "$SOFTHIER_LOG_TAIL_LINES"
         kv GEO_FILE "$GEO_FILE"
         kv ICE_FLOORPLAN_FILE "$ICE_FLOORPLAN_FILE"
         kv ICE_STK_FILE "$ICE_STK_FILE"
@@ -311,6 +324,37 @@ build_softhier() {
         source_softhier_env
         "$MAKE_CMD" hw sw "${args[@]}"
     )
+}
+
+start_softhier_log_tail() {
+    local softhier_pid="$1"
+    local logfile="$LOG_DIR/softhier.log"
+
+    validate_softhier_log_tail_lines
+
+    if ((SOFTHIER_LOG_TAIL_LINES == 0)); then
+        return 0
+    fi
+
+    log "Showing latest $SOFTHIER_LOG_TAIL_LINES SoftHier log line(s); full log: $logfile"
+
+    if tail --help 2>/dev/null | grep -q -- '--pid'; then
+        tail --pid="$softhier_pid" -n "$SOFTHIER_LOG_TAIL_LINES" -F "$logfile" &
+    else
+        tail -n "$SOFTHIER_LOG_TAIL_LINES" -F "$logfile" &
+    fi
+
+    write_pid softhier_log_tail "$!"
+}
+
+stop_softhier_log_tail() {
+    local pid
+
+    pid="$(read_pid softhier_log_tail || true)"
+    if [[ -n "$pid" && "$pid" != "$$" ]] && pid_is_running "$pid"; then
+        kill "$pid" >/dev/null 2>&1 || true
+        wait "$pid" 2>/dev/null || true
+    fi
 }
 
 start_server() {
@@ -379,11 +423,13 @@ run_softhier() {
 
     local pid=$!
     write_pid softhier "$pid"
+    start_softhier_log_tail "$pid"
 
     set +e
     wait "$pid"
     local status=$?
     set -e
+    stop_softhier_log_tail
 
     : > "$DONE_FILE"
     log "SoftHier exited with status $status; signaled adapter with $DONE_FILE"
@@ -515,6 +561,7 @@ write_summary() {
 }
 
 run_all() {
+    validate_softhier_log_tail_lines
     make_dirs
     write_latest_link
     reset_runtime_files
@@ -576,9 +623,11 @@ case "$cmd" in
         status_pid_name adapter
         status_pid_name 3dice_client
         status_pid_name softhier
+        status_pid_name softhier_log_tail
         ;;
     stop)
         stop_pid_name softhier
+        stop_pid_name softhier_log_tail
         stop_pid_name 3dice_client
         stop_pid_name adapter
         stop_pid_name 3dice_server

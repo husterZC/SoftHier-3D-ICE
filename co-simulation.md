@@ -97,6 +97,20 @@ The latest run for each `RUN_NAME` is also linked at:
 runs/default_app/latest
 ```
 
+While SoftHier is running, the coupled runner mirrors the latest 5 SoftHier log
+lines to the terminal. The full output is still stored in:
+
+```text
+runs/default_app/latest/logs/softhier.log
+```
+
+Change or disable the live view with:
+
+```bash
+make coupled-run RUN_NAME=default_app SOFTHIER_LOG_TAIL_LINES=10
+make coupled-run RUN_NAME=default_app SOFTHIER_LOG_TAIL_LINES=0
+```
+
 ## One-Command First Run
 
 If you want the setup and run in one command:
