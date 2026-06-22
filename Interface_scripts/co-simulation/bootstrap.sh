@@ -161,9 +161,8 @@ if ((CHECK_ONLY)); then
 fi
 
 init_submodules
-apply_softhier_patches
-require_power_hook
 prepare_softhier_env
+require_power_hook
 build_or_verify_3dice
 
 log "Bootstrap complete"
