@@ -345,13 +345,67 @@ start_softhier_log_tail() {
 
     (
         lines="$SOFTHIER_LOG_TAIL_LINES"
-        window_lines=$((lines + 1))
+        window_lines=$((lines + 2))
         printed=0
+        green=$'\033[32m'
+        reset=$'\033[0m'
 
         trap 'exit 0' INT TERM
 
+        repeat_char() {
+            local char="$1"
+            local count="$2"
+            local result=""
+            local i
+
+            for ((i = 0; i < count; i++)); do
+                result+="$char"
+            done
+            printf '%s' "$result"
+        }
+
+        print_box_border() {
+            local width="$1"
+            local title="${2:-}"
+            local inner_width=$((width - 2))
+            local fill
+
+            if [[ -n "$title" ]]; then
+                title=" $title "
+                title="${title:0:inner_width}"
+                fill=$((inner_width - ${#title}))
+                printf '\r\033[2K%s+%s%s+%s\n' \
+                    "$green" \
+                    "$title" \
+                    "$(repeat_char '-' "$fill")" \
+                    "$reset"
+            else
+                printf '\r\033[2K%s+%s+%s\n' \
+                    "$green" \
+                    "$(repeat_char '-' "$inner_width")" \
+                    "$reset"
+            fi
+        }
+
+        print_box_row() {
+            local width="$1"
+            local content_width=$((width - 4))
+            local content="$2"
+
+            content="${content//$'\r'/}"
+            content="${content//$'\t'/    }"
+            printf '\r\033[2K%s|%s %-*.*s %s|%s\n' \
+                "$green" \
+                "$reset" \
+                "$content_width" \
+                "$content_width" \
+                "$content" \
+                "$green" \
+                "$reset"
+        }
+
         render_window() {
-            local columns max_width i pad line
+            local columns i pad line width
             local recent=()
 
             columns="${COLUMNS:-}"
@@ -359,15 +413,18 @@ start_softhier_log_tail() {
                 columns="$(tput cols 2>/dev/null || printf '120')"
             fi
             if ((columns < 20)); then
-                columns=120
+                columns=20
             fi
-            max_width=$((columns - 1))
+            width=$((columns - 1))
+            if ((width > 120)); then
+                width=120
+            fi
 
             if ((printed)); then
                 printf '\033[%dA' "$window_lines"
             fi
 
-            printf '\r\033[2K%s\n' "[coupled] SoftHier live log: last $lines line(s)"
+            print_box_border "$width" "SoftHier live log: last $lines line(s)"
 
             if [[ -f "$logfile" ]]; then
                 mapfile -t recent < <(tail -n "$lines" "$logfile" 2>/dev/null || true)
@@ -375,13 +432,14 @@ start_softhier_log_tail() {
 
             pad=$((lines - ${#recent[@]}))
             for ((i = 0; i < pad; i++)); do
-                printf '\r\033[2K%s\n' ""
+                print_box_row "$width" ""
             done
 
             for line in "${recent[@]}"; do
-                line="${line//$'\r'/}"
-                printf '\r\033[2K%s\n' "${line:0:max_width}"
+                print_box_row "$width" "$line"
             done
+
+            print_box_border "$width"
 
             printed=1
         }

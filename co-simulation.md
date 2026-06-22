@@ -97,8 +97,8 @@ The latest run for each `RUN_NAME` is also linked at:
 runs/default_app/latest
 ```
 
-While SoftHier is running, the coupled runner redraws a fixed live window with
-the latest 5 SoftHier log lines. The full output is still stored in:
+While SoftHier is running, the coupled runner redraws a green framed live window
+with the latest 5 SoftHier log lines. The full output is still stored in:
 
 ```text
 runs/default_app/latest/logs/softhier.log
