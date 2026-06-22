@@ -336,13 +336,62 @@ start_softhier_log_tail() {
         return 0
     fi
 
-    log "Showing latest $SOFTHIER_LOG_TAIL_LINES SoftHier log line(s); full log: $logfile"
-
-    if tail --help 2>/dev/null | grep -q -- '--pid'; then
-        tail --pid="$softhier_pid" -n "$SOFTHIER_LOG_TAIL_LINES" -F "$logfile" &
-    else
-        tail -n "$SOFTHIER_LOG_TAIL_LINES" -F "$logfile" &
+    if [[ ! -t 1 ]]; then
+        log "SoftHier live log window disabled because stdout is not a terminal; full log: $logfile"
+        return 0
     fi
+
+    log "Showing latest $SOFTHIER_LOG_TAIL_LINES SoftHier log line(s) in a fixed window; full log: $logfile"
+
+    (
+        lines="$SOFTHIER_LOG_TAIL_LINES"
+        window_lines=$((lines + 1))
+        printed=0
+
+        trap 'exit 0' INT TERM
+
+        render_window() {
+            local columns max_width i pad line
+            local recent=()
+
+            columns="${COLUMNS:-}"
+            if ! [[ "$columns" =~ ^[0-9]+$ ]]; then
+                columns="$(tput cols 2>/dev/null || printf '120')"
+            fi
+            if ((columns < 20)); then
+                columns=120
+            fi
+            max_width=$((columns - 1))
+
+            if ((printed)); then
+                printf '\033[%dA' "$window_lines"
+            fi
+
+            printf '\r\033[2K%s\n' "[coupled] SoftHier live log: last $lines line(s)"
+
+            if [[ -f "$logfile" ]]; then
+                mapfile -t recent < <(tail -n "$lines" "$logfile" 2>/dev/null || true)
+            fi
+
+            pad=$((lines - ${#recent[@]}))
+            for ((i = 0; i < pad; i++)); do
+                printf '\r\033[2K%s\n' ""
+            done
+
+            for line in "${recent[@]}"; do
+                line="${line//$'\r'/}"
+                printf '\r\033[2K%s\n' "${line:0:max_width}"
+            done
+
+            printed=1
+        }
+
+        while pid_is_running "$softhier_pid"; do
+            render_window
+            sleep 1
+        done
+        render_window
+    ) &
 
     write_pid softhier_log_tail "$!"
 }

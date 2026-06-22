@@ -104,9 +104,9 @@ starts the trace adapter, starts the 3D-ICE client with
 `--follow --until-minus-one`, runs SoftHier, and writes results under
 `runs/<run-name>/<timestamp>/`.
 
-During the SoftHier phase, the terminal shows a live tail of the latest 5
-SoftHier log lines. Change the window size with `SOFTHIER_LOG_TAIL_LINES=10`,
-or disable it with `SOFTHIER_LOG_TAIL_LINES=0`.
+During the SoftHier phase, the terminal shows a fixed live window with the
+latest 5 SoftHier log lines. Change the window size with
+`SOFTHIER_LOG_TAIL_LINES=10`, or disable it with `SOFTHIER_LOG_TAIL_LINES=0`.
 
 For isolated 3D-ICE debugging, use the generated stack file from a run directory
 with the binaries in `3D-ICE/bin/` and a compatible 3D-ICE power trace.
