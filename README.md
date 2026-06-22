@@ -5,6 +5,24 @@ runs them through the 3D-ICE server/client workflow.
 
 Unless noted otherwise, run commands from the repository root.
 
+## Recommended Co-Simulation Flow
+
+For the current root-level SoftHier + 3D-ICE coupled flow, start with:
+
+```bash
+make bootstrap
+make coupled-run RUN_NAME=default_app
+```
+
+For one-command first setup and run:
+
+```bash
+make cosim RUN_NAME=default_app
+```
+
+See [cosim.md](cosim.md) for the detailed tutorial, run directory layout,
+alternate config/app examples, and cleanup targets.
+
 ## 🚀 Setup
 
 Initialize the submodules and set up the SoftHier environment:
@@ -18,7 +36,7 @@ source init.sh
 1. Generate the geometry file:
 
 ```bash
-python Interface_scripts/geometery_generator/geogen.py
+python Interface_scripts/geometry_generator/geogen.py
 ```
 
 This uses `SoftHier/soft_hier/flex_cluster/flex_cluster_arch.py` and writes
@@ -27,7 +45,7 @@ This uses `SoftHier/soft_hier/flex_cluster/flex_cluster_arch.py` and writes
 2. Generate the 3D-ICE floorplan:
 
 ```bash
-python Interface_scripts/geometery_generator/roi2ice_floorplan_no_power.py \
+python Interface_scripts/geometry_generator/roi2ice_floorplan_no_power.py \
   SoftHier/soft_hier/flex_cluster/flex_cluster_arch.py \
   SoftHier/geo.json \
   3D-ICE/test_interface_softhier

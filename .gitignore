@@ -1,0 +1,6 @@
+runs/
+plan.md
+
+# Python/script caches.
+__pycache__/
+*.py[cod]
