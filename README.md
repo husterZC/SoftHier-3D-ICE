@@ -17,10 +17,10 @@ make coupled-run RUN_NAME=default_app
 For one-command first setup and run:
 
 ```bash
-make cosim RUN_NAME=default_app
+make co-simulation RUN_NAME=default_app
 ```
 
-See [cosim.md](cosim.md) for the detailed tutorial, run directory layout,
+See [co-simulation.md](co-simulation.md) for the detailed tutorial, run directory layout,
 alternate config/app examples, and cleanup targets.
 
 ## 🚀 Setup
@@ -33,35 +33,40 @@ source init.sh
 
 ## 🧩 Generate 3D-ICE Inputs
 
-1. Generate the geometry file:
+For run-local generated files, use the root target:
 
 ```bash
-python Interface_scripts/geometry_generator/geogen.py
+make ice-inputs RUN_NAME=default_app PWR_INTERVAL_PS=100000000
 ```
 
-This uses `SoftHier/soft_hier/flex_cluster/flex_cluster_arch.py` and writes
-`SoftHier/geo.json`.
+This writes timestamped files under:
 
-2. Generate the 3D-ICE floorplan:
+```text
+runs/default_app/<timestamp>/generated/
+  geo.json
+  3dice/
+    floorplan_nopower.flp
+    ice.stk
+```
+
+The target uses `Interface_scripts/geometry_generator/generate_3dice_inputs.py`,
+which runs the root geometry, floorplan, and stack generators. It does not call
+SoftHier's `ice_prepare` target.
+
+Equivalent direct command:
 
 ```bash
-python Interface_scripts/geometry_generator/roi2ice_floorplan_no_power.py \
-  SoftHier/soft_hier/flex_cluster/flex_cluster_arch.py \
-  SoftHier/geo.json \
-  3D-ICE/test_interface_softhier
+python Interface_scripts/geometry_generator/generate_3dice_inputs.py \
+  --arch SoftHier/soft_hier/flex_cluster/flex_cluster_arch.py \
+  --geo runs/manual/generated/geo.json \
+  --floorplan runs/manual/generated/3dice/floorplan_nopower.flp \
+  --stk runs/manual/generated/3dice/ice.stk \
+  --pwr-interval-ps 100000000
 ```
 
-This writes `3D-ICE/test_interface_softhier/floorplan_nopower.flp`.
-
-3. Generate the 3D-ICE stack file:
-
-```bash
-python 3D-ICE/test_interface_softhier/scripts/roi2ice_stk.py \
-  3D-ICE/test_interface_softhier/floorplan_nopower.flp \
-  3D-ICE/test_interface_softhier/example_transient_test_server.stk
-```
-
-This writes `3D-ICE/test_interface_softhier/example_transient_test_server.stk`.
+The stack slot duration is generated from `PWR_INTERVAL_PS * 1e-12` by default,
+so one SoftHier power row corresponds to one 3D-ICE thermal slot. The transient
+solver step defaults to one tenth of that slot.
 
 ## 🧩 Build 3D-ICE
 
@@ -82,41 +87,41 @@ cd ..
 
 ## 🧩 Run the Simulation
 
-### 1. Start the 3D-ICE Server
-
-On the server machine, run:
+For normal co-simulation, use the root target:
 
 ```bash
-cd 3D-ICE/test_interface_softhier
-../bin/3D-ICE-Server ./example_transient_test_server.stk 54322
+make co-simulation RUN_NAME=default_app
 ```
 
-Keep this terminal open and wait until the server is waiting for a client.
-
-### 2. Start the 3D-ICE Client
-
-#### 2.1 Open an SSH tunnel:
+Or, after `make bootstrap` has completed:
 
 ```bash
-ssh -N -L 54322:127.0.0.1:54322 <user>@<server>
+make coupled-run RUN_NAME=default_app
 ```
 
-Keep this tunnel terminal open while the simulation is running.
+The root runner generates run-local 3D-ICE inputs, starts the 3D-ICE server,
+starts the trace adapter, starts the 3D-ICE client with
+`--follow --until-minus-one`, runs SoftHier, and writes results under
+`runs/<run-name>/<timestamp>/`.
 
-#### 2.2 Open a second terminal, and launch 3D-ICE client:
+For isolated 3D-ICE debugging, use the generated stack file from a run directory
+with the binaries in `3D-ICE/bin/` and a compatible 3D-ICE power trace.
 
-From `3D-ICE/test_interface_softhier`, run:
+Example:
 
 ```bash
-../bin/3D-ICE-Client 127.0.0.1 54322 power_traces.txt --follow --until-minus-one
+RUN_DIR=$PWD/runs/manual make ice-inputs PWR_INTERVAL_PS=100000000
 ```
+
+Then run `3D-ICE/bin/3D-ICE-Server` with
+`runs/manual/generated/3dice/ice.stk`.
 
 ### Optional: Plot Runtime Temperature
 
 Install the plotting requirements:
 
 ```bash
-python -m pip install -r 3D-ICE/test_interface_softhier/requirements_tmap_plot.txt
+python -m pip install -r Interface_scripts/plot_runtime_temperature_map/requirements_tmap_plot.txt
 ```
 
 The stack file must include a `Tmap` output for the live map files to be produced:
@@ -125,8 +130,10 @@ The stack file must include a `Tmap` output for the live map files to be produce
 Tmap( TOP_DIE,    "output_top_die_map.txt",                 slot );
 ```
 
-From `3D-ICE/test_interface_softhier`, run:
+From the repository root, run:
 
 ```bash
-python plot_runtime_tmap.py --coords output_top_die_map.coords.txt --map output_top_die_map.txt
+python Interface_scripts/plot_runtime_temperature_map/plot_runtime_tmap.py \
+  --coords runs/<run-name>/latest/results/3dice/output_top_die_map.coords.txt \
+  --map runs/<run-name>/latest/results/3dice/output_top_die_map.txt
 ```

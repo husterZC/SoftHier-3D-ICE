@@ -11,10 +11,10 @@ make coupled-run RUN_NAME=default_app
 For a single first-time command, use:
 
 ```bash
-make cosim RUN_NAME=default_app
+make co-simulation RUN_NAME=default_app
 ```
 
-`make cosim` runs `bootstrap` first and then launches the coupled simulation.
+`make co-simulation` runs `bootstrap` first and then launches the coupled simulation.
 
 ## What The Flow Does
 
@@ -24,8 +24,9 @@ The co-simulation flow:
 2. applies/verifies the SoftHier GVSOC/PULP patches;
 3. verifies the runtime power-capture hook needed by the coupled flow;
 4. builds or verifies the 3D-ICE server/client binaries;
-5. generates a 3D-ICE floorplan and stack file from the selected SoftHier
-   architecture;
+5. generates 3D-ICE geometry, floorplan, and stack files from the selected
+   SoftHier architecture using the root `Interface_scripts/geometry_generator`
+   tools;
 6. builds SoftHier with the selected runtime power trace path;
 7. starts 3D-ICE server mode;
 8. starts a root-owned adapter that follows SoftHier power rows and writes
@@ -67,7 +68,7 @@ This target:
 - builds or verifies `3D-ICE/bin/3D-ICE-Server`;
 - builds or verifies `3D-ICE/bin/3D-ICE-Client`.
 
-If 3D-ICE is not initialized yet, `Interface_scripts/cosim/3dice_client_server.sh`
+If 3D-ICE is not initialized yet, `Interface_scripts/co-simulation/3dice_client_server.sh`
 initializes the `3D-ICE` submodule and builds in place:
 
 ```text
@@ -101,7 +102,7 @@ runs/default_app/latest
 If you want the setup and run in one command:
 
 ```bash
-make cosim RUN_NAME=default_app
+make co-simulation RUN_NAME=default_app
 ```
 
 This is the closest "push a button" path. It may still take a long time on a
@@ -144,6 +145,8 @@ runs/<run-name>/<timestamp>/
 Important files:
 
 - `run.env`: exact configuration, paths, ports, and git commits for the run.
+  It also records `EFFECTIVE_ICE_SLOT_SECONDS` and
+  `EFFECTIVE_ICE_STEP_SECONDS`, the values written into the generated `.stk`.
 - `summary.txt`: process statuses, trace row counts, thermal row count, and max
   temperature.
 - `traces/softhier_power_raw.txt`: SoftHier raw runtime power rows.
@@ -192,7 +195,7 @@ Bootstrap and run:
 ```bash
 make bootstrap
 make coupled-run RUN_NAME=default_app
-make cosim RUN_NAME=default_app
+make co-simulation RUN_NAME=default_app
 ```
 
 Inspect or stop the latest run for a run name:
@@ -281,3 +284,23 @@ make coupled-run RUN_NAME=my_run PWR_INTERVAL_PS=100000000
 
 The value is in picoseconds. Smaller values produce more SoftHier power rows
 and more 3D-ICE thermal slots.
+
+The generated `.stk` file uses the same slot duration by default:
+
+```text
+3D-ICE slot seconds = PWR_INTERVAL_PS * 1e-12
+3D-ICE transient step seconds = slot seconds / 10
+```
+
+This alignment matters because SoftHier appends one power row per
+`PWR_INTERVAL_PS`; the 3D-ICE client consumes one appended line as one thermal
+slot.
+
+Override these only when you intentionally want a different 3D-ICE time base:
+
+```bash
+make coupled-run RUN_NAME=my_run \
+  PWR_INTERVAL_PS=100000000 \
+  ICE_SLOT_SECONDS=0.0001 \
+  ICE_STEP_SECONDS=0.00001
+```

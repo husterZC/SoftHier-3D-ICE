@@ -7,6 +7,7 @@ ROOT_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
 SOFTHIER_DIR="${SOFTHIER_DIR:-$ROOT_DIR/SoftHier}"
 DICE_DIR="${DICE_DIR:-$ROOT_DIR/3D-ICE}"
 DICE_BIN_DIR="${DICE_BIN_DIR:-$DICE_DIR/bin}"
+GEOMETRY_SCRIPT_DIR="${GEOMETRY_SCRIPT_DIR:-$ROOT_DIR/Interface_scripts/geometry_generator}"
 RUN_NAME="${RUN_NAME:-default}"
 RUN_ROOT="${RUN_ROOT:-$ROOT_DIR/runs}"
 if [[ -z "${RUN_ID:-}" ]]; then
@@ -31,6 +32,8 @@ PLD="${PLD:-}"
 PORT="${PORT:-54322}"
 SERVER_HOST="${SERVER_HOST:-127.0.0.1}"
 PWR_INTERVAL_PS="${PWR_INTERVAL_PS:-100000000}"
+ICE_SLOT_SECONDS="${ICE_SLOT_SECONDS:-}"
+ICE_STEP_SECONDS="${ICE_STEP_SECONDS:-}"
 OTHERS_POWER="${OTHERS_POWER:-0.0}"
 BUILD_SOFTHIER="${BUILD_SOFTHIER:-1}"
 BUILD_3DICE="${BUILD_3DICE:-1}"
@@ -65,7 +68,7 @@ die() {
 
 usage() {
     cat <<USAGE
-Usage: Interface_scripts/cosim/coupled_run.sh [run|status|stop]
+Usage: Interface_scripts/co-simulation/coupled_run.sh [run|status|stop]
 
 Environment overrides:
   RUN_NAME=$RUN_NAME
@@ -76,6 +79,8 @@ Environment overrides:
   PLD=$PLD
   PORT=$PORT
   PWR_INTERVAL_PS=$PWR_INTERVAL_PS
+  ICE_SLOT_SECONDS=$ICE_SLOT_SECONDS
+  ICE_STEP_SECONDS=$ICE_STEP_SECONDS
   OTHERS_POWER=$OTHERS_POWER
   BUILD_SOFTHIER=$BUILD_SOFTHIER
   BUILD_3DICE=$BUILD_3DICE
@@ -117,6 +122,27 @@ kv() {
     local key="$1"
     local value="$2"
     printf '%s=%q\n' "$key" "$value"
+}
+
+format_seconds() {
+    local value="$1"
+    awk -v value="$value" 'BEGIN { printf "%.15g", value }'
+}
+
+effective_slot_seconds() {
+    if [[ -n "$ICE_SLOT_SECONDS" ]]; then
+        format_seconds "$ICE_SLOT_SECONDS"
+    else
+        awk -v ps="$PWR_INTERVAL_PS" 'BEGIN { printf "%.15g", ps * 1e-12 }'
+    fi
+}
+
+effective_step_seconds() {
+    if [[ -n "$ICE_STEP_SECONDS" ]]; then
+        format_seconds "$ICE_STEP_SECONDS"
+    else
+        awk -v slot="$(effective_slot_seconds)" 'BEGIN { printf "%.15g", slot / 10.0 }'
+    fi
 }
 
 write_pid() {
@@ -186,11 +212,25 @@ build_or_verify_3dice() {
 generate_ice_inputs() {
     require_file "$CFG"
     log "Generating 3D-ICE inputs under $RUN_3DICE_GEN_DIR"
-    "$MAKE_CMD" -C "$SOFTHIER_DIR" ice_prepare \
-        cfg="$CFG" \
-        ice_geo_file="$GEO_FILE" \
-        ice_floorplan_file="$ICE_FLOORPLAN_FILE" \
-        ice_stk_file="$ICE_STK_FILE"
+
+    local args=(
+        "$GEOMETRY_SCRIPT_DIR/generate_3dice_inputs.py"
+        "--arch" "$CFG"
+        "--geo" "$GEO_FILE"
+        "--floorplan" "$ICE_FLOORPLAN_FILE"
+        "--stk" "$ICE_STK_FILE"
+        "--pwr-interval-ps" "$PWR_INTERVAL_PS"
+    )
+
+    if [[ -n "$ICE_SLOT_SECONDS" ]]; then
+        args+=("--slot-seconds" "$ICE_SLOT_SECONDS")
+    fi
+
+    if [[ -n "$ICE_STEP_SECONDS" ]]; then
+        args+=("--step-seconds" "$ICE_STEP_SECONDS")
+    fi
+
+    "$PYTHON" "${args[@]}"
 }
 
 prepare_runtime_3dice_inputs() {
@@ -224,6 +264,10 @@ write_manifest() {
         kv PORT "$PORT"
         kv SERVER_HOST "$SERVER_HOST"
         kv PWR_INTERVAL_PS "$PWR_INTERVAL_PS"
+        kv ICE_SLOT_SECONDS "$ICE_SLOT_SECONDS"
+        kv ICE_STEP_SECONDS "$ICE_STEP_SECONDS"
+        kv EFFECTIVE_ICE_SLOT_SECONDS "$(effective_slot_seconds)"
+        kv EFFECTIVE_ICE_STEP_SECONDS "$(effective_step_seconds)"
         kv OTHERS_POWER "$OTHERS_POWER"
         kv BUILD_SOFTHIER "$BUILD_SOFTHIER"
         kv BUILD_3DICE "$BUILD_3DICE"
@@ -234,6 +278,7 @@ write_manifest() {
         kv ICE_RUNTIME_STK_FILE "$ICE_RUNTIME_STK_FILE"
         kv RAW_POWER_TRACE "$RAW_POWER_TRACE"
         kv DICE_POWER_TRACE "$DICE_POWER_TRACE"
+        kv GEOMETRY_SCRIPT_DIR "$GEOMETRY_SCRIPT_DIR"
         kv ROOT_GIT_COMMIT "$(git_commit "$ROOT_DIR")"
         kv SOFTHIER_GIT_COMMIT "$(git_commit "$SOFTHIER_DIR")"
         kv SOFTHIER_CORE_GIT_COMMIT "$(git_commit "$SOFTHIER_DIR/core")"
@@ -442,6 +487,8 @@ write_summary() {
         printf 'cfg: %s\n' "$CFG"
         printf 'app: %s\n' "${APP:-<SoftHier default>}"
         printf 'pwr_interval_ps: %s\n' "$PWR_INTERVAL_PS"
+        printf '3dice_slot_seconds: %s\n' "$(effective_slot_seconds)"
+        printf '3dice_step_seconds: %s\n' "$(effective_step_seconds)"
         printf '\n'
         printf '%s\n' 'Process statuses'
         printf '%s\n' '----------------'

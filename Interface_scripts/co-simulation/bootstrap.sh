@@ -22,7 +22,7 @@ die() {
 
 usage() {
     cat <<USAGE
-Usage: Interface_scripts/cosim/bootstrap.sh [--check-only]
+Usage: Interface_scripts/co-simulation/bootstrap.sh [--check-only]
 
 Initializes the coupled SoftHier/3D-ICE environment:
   - initializes SoftHier and nested submodules;
@@ -64,7 +64,7 @@ check_host_tools() {
     local missing=()
     local cmd
 
-    for cmd in git make cmake gcc bison flex unzip "$PYTHON"; do
+    for cmd in git make cmake gcc bison flex unzip awk "$PYTHON"; do
         if ! need_cmd "$cmd"; then
             missing+=("$cmd")
         fi
