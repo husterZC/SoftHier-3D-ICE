@@ -23,7 +23,7 @@ The co-simulation flow:
 1. initializes SoftHier and its nested submodules;
 2. applies/verifies the SoftHier GVSOC/PULP patches;
 3. verifies the runtime power-capture hook needed by the coupled flow;
-4. builds or verifies the 3D-ICE server/client binaries;
+4. builds or verifies the required 3D-ICE binaries;
 5. generates 3D-ICE geometry, floorplan, and stack files from the selected
    SoftHier architecture using the root `Interface_scripts/geometry_generator`
    tools;
@@ -31,10 +31,15 @@ The co-simulation flow:
 7. starts 3D-ICE server mode;
 8. starts a root-owned adapter that follows SoftHier power rows and writes
    complete 3D-ICE power slots;
-9. starts the 3D-ICE client with `--follow --until-minus-one`;
-10. runs SoftHier;
-11. sends the all-`-1` termination slot when SoftHier exits;
-12. writes per-run metadata and summary files.
+9. in the default `DICE_RUN_MODE=local-server` mode, has the 3D-ICE server read
+   those power slots directly from `traces/3dice_power_traces.txt`;
+10. in `DICE_RUN_MODE=client-server` mode, starts the 3D-ICE client with
+    `--follow --until-minus-one` to feed power slots to the server over
+    localhost;
+11. runs SoftHier;
+12. has the 3D-ICE server write stack-declared thermal outputs after each slot;
+13. sends the all-`-1` termination slot when SoftHier exits;
+14. writes per-run metadata and summary files.
 
 ## Host Dependencies
 
@@ -66,7 +71,7 @@ This target:
 - runs SoftHier's environment preparation;
 - initializes the `3D-ICE` submodule;
 - builds or verifies `3D-ICE/bin/3D-ICE-Server`;
-- builds or verifies `3D-ICE/bin/3D-ICE-Client`.
+- builds or verifies `3D-ICE/bin/3D-ICE-Client` for the optional socket mode.
 
 If 3D-ICE is not initialized yet, `Interface_scripts/co-simulation/3dice_client_server.sh`
 initializes the `3D-ICE` submodule and builds in place:
@@ -111,6 +116,36 @@ make coupled-run RUN_NAME=default_app SOFTHIER_LOG_TAIL_LINES=10
 make coupled-run RUN_NAME=default_app SOFTHIER_LOG_TAIL_LINES=0
 ```
 
+## Choosing The 3D-ICE Run Mode
+
+The default mode is local server-only mode:
+
+```bash
+make coupled-run RUN_NAME=default_app DICE_RUN_MODE=local-server
+```
+
+In this mode, the runner starts no 3D-ICE client. The server command is shaped
+like this inside the run-local 3D-ICE result directory:
+
+```bash
+3D-ICE-Server ice.stk --power-trace trace.txt --follow --until-minus-one
+```
+
+The server follows the adapter output file, consumes one complete power row per
+thermal slot, writes the stack-declared output files itself, and exits after the
+adapter appends an all-`-1` termination row.
+
+Use the older socket mode only when you specifically want to debug the network
+client/server split:
+
+```bash
+make coupled-run RUN_NAME=default_app DICE_RUN_MODE=client-server
+```
+
+In that mode, the client reads `traces/3dice_power_traces.txt` and sends each
+power row to the server over localhost. The server still owns thermal output
+file generation.
+
 ## One-Command First Run
 
 If you want the setup and run in one command:
@@ -148,7 +183,7 @@ runs/<run-name>/<timestamp>/
       thermal_map.txt
   logs/
     3dice_server.log
-    3dice_client.log
+    3dice_client.log        # only present in DICE_RUN_MODE=client-server
     adapter.log
     softhier.log
   pids/
@@ -164,12 +199,31 @@ Important files:
 - `summary.txt`: process statuses, trace row counts, thermal row count, and max
   temperature.
 - `traces/softhier_power_raw.txt`: SoftHier raw runtime power rows.
-- `traces/3dice_power_traces.txt`: adapter output consumed by 3D-ICE client.
+- `traces/3dice_power_traces.txt`: adapter output consumed directly by the
+  3D-ICE server in local-server mode, or by the 3D-ICE client in client-server
+  mode.
 - `results/3dice/output_top_die_flp_avg.txt`: average floorplan temperatures
-  produced by 3D-ICE.
+  written directly by the 3D-ICE server.
 
 `thermal_map.txt` may be empty. The current generated stack file emits a `Tflp`
-average temperature output, not a live `Tmap` output.
+average temperature output, not a live `Tmap` output. For SSH/headless runs,
+render that `Tflp` data as a self-contained HTML dashboard:
+
+```bash
+python3 Interface_scripts/plot_runtime_temperature_map/plot_runtime_tmap.py \
+  --floorplan runs/<run-name>/latest/results/3dice/floorplan_nopower.flp \
+  --tflp runs/<run-name>/latest/results/3dice/output_top_die_flp_avg.txt \
+  --html runs/<run-name>/latest/results/3dice/temperature_map.html \
+  --once
+```
+
+For live monitoring while 3D-ICE is still appending rows, use `--follow --poll 2`
+instead of `--once`. The generated HTML includes a browser refresh tag in follow
+mode, so it can be opened through a browser, downloaded from the SSH server, or
+served from the run directory.
+
+The older GUI `Tmap` viewer is still available through `--coords/--map` when a
+stack emits Tmap files and coordinate output is available.
 
 ## Running Other Config + App Pairs
 
@@ -253,7 +307,7 @@ If dependencies are missing, install the host packages listed above and rerun:
 make bootstrap
 ```
 
-### 3D-ICE client waits forever for slot 0
+### 3D-ICE waits forever for slot 0
 
 Check whether SoftHier is emitting raw power rows:
 
@@ -307,8 +361,10 @@ The generated `.stk` file uses the same slot duration by default:
 ```
 
 This alignment matters because SoftHier appends one power row per
-`PWR_INTERVAL_PS`; the 3D-ICE client consumes one appended line as one thermal
-slot.
+`PWR_INTERVAL_PS`; the 3D-ICE server consumes one appended line as one thermal
+slot in local-server mode. In client-server mode, the 3D-ICE client consumes
+that line and forwards it to the server. In both modes, the server writes the
+corresponding thermal outputs.
 
 Override these only when you intentionally want a different 3D-ICE time base:
 

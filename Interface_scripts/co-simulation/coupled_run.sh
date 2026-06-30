@@ -31,6 +31,7 @@ APP="${APP:-}"
 PLD="${PLD:-}"
 PORT="${PORT:-54322}"
 SERVER_HOST="${SERVER_HOST:-127.0.0.1}"
+DICE_RUN_MODE="${DICE_RUN_MODE:-local-server}"
 PWR_INTERVAL_PS="${PWR_INTERVAL_PS:-100000000}"
 ICE_SLOT_SECONDS="${ICE_SLOT_SECONDS:-}"
 ICE_STEP_SECONDS="${ICE_STEP_SECONDS:-}"
@@ -79,6 +80,7 @@ Environment overrides:
   APP=$APP
   PLD=$PLD
   PORT=$PORT
+  DICE_RUN_MODE=$DICE_RUN_MODE
   PWR_INTERVAL_PS=$PWR_INTERVAL_PS
   ICE_SLOT_SECONDS=$ICE_SLOT_SECONDS
   ICE_STEP_SECONDS=$ICE_STEP_SECONDS
@@ -156,6 +158,16 @@ validate_softhier_log_tail_lines() {
         die "SOFTHIER_LOG_TAIL_LINES must be a non-negative integer"
 }
 
+validate_dice_run_mode() {
+    case "$DICE_RUN_MODE" in
+        local-server|client-server)
+            ;;
+        *)
+            die "DICE_RUN_MODE must be local-server or client-server"
+            ;;
+    esac
+}
+
 write_pid() {
     local name="$1"
     local pid="$2"
@@ -212,13 +224,31 @@ reset_runtime_files() {
 }
 
 build_or_verify_3dice() {
-    if [[ "$BUILD_3DICE" == "1" && (! -x "$SERVER_BIN" || ! -x "$CLIENT_BIN") ]]; then
-        log "Building 3D-ICE client/server binaries"
+    local need_build=0
+    local need_client=0
+
+    if [[ "$DICE_RUN_MODE" == "client-server" ]]; then
+        need_client=1
+    fi
+
+    if [[ ! -x "$SERVER_BIN" ]]; then
+        need_build=1
+    fi
+
+    if [[ "$need_client" == "1" && ! -x "$CLIENT_BIN" ]]; then
+        need_build=1
+    fi
+
+    if [[ "$BUILD_3DICE" == "1" && "$need_build" == "1" ]]; then
+        log "Building 3D-ICE binaries"
         SRC_DIR="$DICE_DIR" "$SCRIPT_DIR/3dice_client_server.sh" install
     fi
 
     require_executable "$SERVER_BIN"
-    require_executable "$CLIENT_BIN"
+
+    if [[ "$need_client" == "1" ]]; then
+        require_executable "$CLIENT_BIN"
+    fi
 }
 
 generate_ice_inputs() {
@@ -275,6 +305,7 @@ write_manifest() {
         kv PLD "$PLD"
         kv PORT "$PORT"
         kv SERVER_HOST "$SERVER_HOST"
+        kv DICE_RUN_MODE "$DICE_RUN_MODE"
         kv PWR_INTERVAL_PS "$PWR_INTERVAL_PS"
         kv ICE_SLOT_SECONDS "$ICE_SLOT_SECONDS"
         kv ICE_STEP_SECONDS "$ICE_STEP_SECONDS"
@@ -465,18 +496,33 @@ stop_softhier_log_tail() {
 }
 
 start_server() {
-    log "Starting 3D-ICE server on port $PORT"
-    (
-        cd "$RUN_3DICE_DIR"
-        "$SERVER_BIN" "$(basename "$ICE_RUNTIME_STK_FILE")" "$PORT"
-    ) > "$LOG_DIR/3dice_server.log" 2>&1 &
+    local wait_pattern
+
+    if [[ "$DICE_RUN_MODE" == "local-server" ]]; then
+        log "Starting 3D-ICE server in local power-trace mode"
+        (
+            cd "$RUN_3DICE_DIR"
+            "$SERVER_BIN" "$(basename "$ICE_RUNTIME_STK_FILE")" \
+                --power-trace "$DICE_POWER_TRACE" \
+                --follow \
+                --until-minus-one
+        ) > "$LOG_DIR/3dice_server.log" 2>&1 &
+        wait_pattern="Running local power trace mode."
+    else
+        log "Starting 3D-ICE server on port $PORT"
+        (
+            cd "$RUN_3DICE_DIR"
+            "$SERVER_BIN" "$(basename "$ICE_RUNTIME_STK_FILE")" "$PORT"
+        ) > "$LOG_DIR/3dice_server.log" 2>&1 &
+        wait_pattern="Waiting for client"
+    fi
 
     local pid=$!
     write_pid 3dice_server "$pid"
 
     "$PYTHON" "$SCRIPT_DIR/wait_for_log.py" \
         --file "$LOG_DIR/3dice_server.log" \
-        --pattern "Waiting for client" \
+        --pattern "$wait_pattern" \
         --pid "$pid" \
         --timeout "$WAIT_TIMEOUT"
 }
@@ -640,6 +686,7 @@ write_summary() {
         printf 'cfg: %s\n' "$CFG"
         printf 'app: %s\n' "${APP:-<SoftHier default>}"
         printf 'pwr_interval_ps: %s\n' "$PWR_INTERVAL_PS"
+        printf '3dice_mode: %s\n' "$DICE_RUN_MODE"
         printf '3dice_slot_seconds: %s\n' "$(effective_slot_seconds)"
         printf '3dice_step_seconds: %s\n' "$(effective_step_seconds)"
         printf '\n'
@@ -669,6 +716,7 @@ write_summary() {
 
 run_all() {
     validate_softhier_log_tail_lines
+    validate_dice_run_mode
     make_dirs
     write_latest_link
     reset_runtime_files
@@ -695,19 +743,28 @@ run_all() {
 
     start_server
     start_adapter
-    start_client
+
+    if [[ "$DICE_RUN_MODE" == "client-server" ]]; then
+        start_client
+    fi
 
     local softhier_status=0
     run_softhier || softhier_status=$?
 
     local adapter_pid client_pid server_pid
     adapter_pid="$(read_pid adapter)"
-    client_pid="$(read_pid 3dice_client)"
     server_pid="$(read_pid 3dice_server)"
 
     local adapter_status=0 client_status=0 server_status=0
     wait_for_exit adapter "$adapter_pid" "$EXIT_TIMEOUT" || adapter_status=$?
-    wait_for_exit 3dice_client "$client_pid" "$EXIT_TIMEOUT" || client_status=$?
+
+    if [[ "$DICE_RUN_MODE" == "client-server" ]]; then
+        client_pid="$(read_pid 3dice_client)"
+        wait_for_exit 3dice_client "$client_pid" "$EXIT_TIMEOUT" || client_status=$?
+    else
+        client_status="skipped"
+    fi
+
     wait_for_exit 3dice_server "$server_pid" "$EXIT_TIMEOUT" || server_status=$?
 
     write_summary "$softhier_status" "$adapter_status" "$client_status" "$server_status"
