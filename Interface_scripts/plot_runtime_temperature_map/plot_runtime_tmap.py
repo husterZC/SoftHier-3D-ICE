@@ -83,6 +83,7 @@ TURBO_STOPS = [
     (122, 4, 3),
 ]
 COLORBAR_TICK_COUNT = 7
+STABLE_TMAP_GEOMETRY_MISMATCH_POLLS = 30
 
 
 def rgb_css(stop):
@@ -1254,21 +1255,22 @@ def render_gif_once(args, floorplan_path, tflp_path, gif_path):
     return len(gif_data["frame_indices"])
 
 
-def load_tmap_geometry_cells(coords_path):
+def load_tmap_geometry_cells(coords_path, follow=False, allow_empty=False):
     cells = []
     min_x = None
     min_y = None
     max_x = None
     max_y = None
+    line_number = 0
 
-    with coords_path.open("r", encoding="utf-8") as stream:
-        for line_number, line in enumerate(stream, start=1):
-            stripped = line.strip()
+    with coords_path.open("rb") as stream:
+        while True:
+            raw_line, line_number = read_complete_data_line(stream, line_number, follow=follow)
 
-            if not stripped or stripped.startswith(("#", "%")):
-                continue
+            if raw_line is None:
+                break
 
-            parts = stripped.split()
+            parts = raw_line.split()
             if len(parts) != 4:
                 raise ValueError(f"{coords_path}:{line_number}: expected 4 coordinate fields, got {len(parts)}")
 
@@ -1283,6 +1285,8 @@ def load_tmap_geometry_cells(coords_path):
             max_y = y + height if max_y is None else max(max_y, y + height)
 
     if not cells:
+        if allow_empty:
+            return None
         raise ValueError(f"{coords_path}: no coordinate cells found")
 
     return {
@@ -1297,6 +1301,18 @@ def load_tmap_geometry_cells(coords_path):
             "height": max_y - min_y,
         },
     }
+
+
+def read_first_tmap_row_width(map_path, follow=False):
+    line_number = 0
+
+    with map_path.open("rb") as stream:
+        raw_line, line_number = read_complete_data_line(stream, line_number, follow=follow)
+
+    if raw_line is None:
+        return None, line_number
+
+    return len(raw_line.split()), line_number
 
 
 def parse_tmap_values(raw_line, expected_count, map_path, line_number):
@@ -1844,7 +1860,7 @@ def load_optional_floorplan_regions(coords_path):
     return load_floorplan_regions(floorplan_path)
 
 
-def build_tmap_html_dashboard(
+def build_tmap_payload(
     args,
     coords_path,
     map_path,
@@ -1854,7 +1870,8 @@ def build_tmap_html_dashboard(
     row_count,
     data_min,
     data_max,
-    refresh_seconds,
+    live_version=None,
+    run_token=None,
 ):
     floorplan_regions = load_optional_floorplan_regions(coords_path)
 
@@ -1868,10 +1885,10 @@ def build_tmap_html_dashboard(
     if vmax <= vmin:
         vmax = vmin + 1.0
 
-    slot_index = slots[-1]["slot"] if slots else -1
-    generated_at = time.strftime("%Y-%m-%d %H:%M:%S")
+    latest_slot = slots[-1] if slots else None
+    slot_index = latest_slot["slot"] if latest_slot else -1
     payload = {
-        "generatedAt": generated_at,
+        "generatedAt": time.strftime("%Y-%m-%d %H:%M:%S"),
         "coordsPath": str(coords_path),
         "mapPath": str(map_path),
         "htmlPath": str(html_path),
@@ -1888,10 +1905,95 @@ def build_tmap_html_dashboard(
         "cmap": args.cmap,
         "turboStops": TURBO_STOPS,
     }
+
+    if live_version is not None:
+        payload["liveVersion"] = live_version
+
+    if run_token is not None:
+        payload["runToken"] = run_token
+
+    return payload
+
+
+def tmap_initial_metrics(payload):
+    slots = payload["slots"]
+    latest_slot = slots[-1] if slots else None
+    slot_index = latest_slot["slot"] if latest_slot else -1
+    latest_values = latest_slot["values"] if latest_slot else []
+    latest_min = min(latest_values) if latest_values else None
+    latest_max = max(latest_values) if latest_values else None
+
+    return {
+        "rowCount": str(payload["rowCount"]),
+        "slotMetric": str(slot_index + 1) if latest_slot else "n/a",
+        "minMetric": f"{latest_min:.1f} K" if latest_min is not None else "n/a",
+        "maxMetric": f"{latest_max:.1f} K" if latest_max is not None else "n/a",
+        "slotStatus": (
+            f"Slot {slot_index + 1} of {payload['rowCount']} ({len(slots)}/{len(slots)} loaded), following latest"
+            if latest_slot
+            else "No complete Tmap slots loaded yet."
+        ),
+    }
+
+
+def tmap_sidecar_paths(html_path):
+    return (
+        html_path.with_name(f"{html_path.stem}.manifest.js"),
+        html_path.with_name(f"{html_path.stem}.payload.js"),
+    )
+
+
+def javascript_assignment(name, value):
+    return f"window.{name} = {json.dumps(value, separators=(',', ':'))};\n"
+
+
+def write_tmap_sidecars(manifest_path, payload_path, payload):
+    manifest = {
+        "version": payload.get("liveVersion", payload["rowCount"]),
+        "rowCount": payload["rowCount"],
+        "slotIndex": payload["slotIndex"],
+        "runToken": payload.get("runToken", ""),
+        "payloadScript": payload_path.name,
+        "generatedAt": payload["generatedAt"],
+    }
+
+    write_text_atomic(payload_path, javascript_assignment("__tmapPayload", payload))
+    write_text_atomic(manifest_path, javascript_assignment("__tmapManifest", manifest))
+
+
+def build_tmap_html_dashboard(
+    args,
+    coords_path,
+    map_path,
+    html_path,
+    geometry,
+    slots,
+    row_count,
+    data_min,
+    data_max,
+    refresh_seconds,
+    live_config=None,
+    payload=None,
+):
+    if payload is None:
+        payload = build_tmap_payload(
+            args,
+            coords_path,
+            map_path,
+            html_path,
+            geometry,
+            slots,
+            row_count,
+            data_min,
+            data_max,
+        )
+
+    initial_metrics = tmap_initial_metrics(payload)
     payload_json = json.dumps(payload, separators=(",", ":"))
+    live_config_json = "null" if live_config is None else json.dumps(live_config, separators=(",", ":"))
     refresh_tag = ""
 
-    if refresh_seconds and refresh_seconds > 0.0:
+    if live_config is None and refresh_seconds and refresh_seconds > 0.0:
         refresh_tag = f'<meta http-equiv="refresh" content="{html.escape(html_number(refresh_seconds))}">'
 
     template = """<!doctype html>
@@ -1936,13 +2038,13 @@ canvas { width: 100%; height: auto; display: block; background: #fbfcfe; }
 <main>
 <header>
   <h1>3D-ICE Tmap</h1>
-  <div class="meta">Generated __GENERATED_AT__ from <code>__MAP_PATH__</code></div>
+  <div class="meta" id="generatedMeta">Generated __GENERATED_AT__ from <code>__MAP_PATH__</code></div>
 </header>
 <section class="summary">
-  <div class="metric">Loaded Slots<strong id="rowCount">0</strong></div>
-  <div class="metric">Displayed Slot<strong id="slotMetric">n/a</strong></div>
-  <div class="metric">Minimum<strong id="minMetric">n/a</strong></div>
-  <div class="metric">Maximum<strong id="maxMetric">n/a</strong></div>
+  <div class="metric">Loaded Slots<strong id="rowCount">__INITIAL_ROW_COUNT__</strong></div>
+  <div class="metric">Displayed Slot<strong id="slotMetric">__INITIAL_SLOT_METRIC__</strong></div>
+  <div class="metric">Minimum<strong id="minMetric">__INITIAL_MIN_METRIC__</strong></div>
+  <div class="metric">Maximum<strong id="maxMetric">__INITIAL_MAX_METRIC__</strong></div>
 </section>
 <section class="map-wrap">
   <div class="slot-controls" aria-label="Tmap slot controls">
@@ -1952,7 +2054,7 @@ canvas { width: 100%; height: auto; display: block; background: #fbfcfe; }
       <button id="nextSlot" type="button">Next</button>
       <button id="latestSlot" type="button">Latest</button>
     </div>
-    <div class="slot-status" id="slotStatus">No slots loaded</div>
+    <div class="slot-status" id="slotStatus">__INITIAL_SLOT_STATUS__</div>
   </div>
   <canvas id="mapCanvas"></canvas>
   __COLORBAR_HTML__
@@ -1961,10 +2063,12 @@ canvas { width: 100%; height: auto; display: block; background: #fbfcfe; }
 </main>
 <script id="temperature-data" type="application/json">__PAYLOAD_JSON__</script>
 <script>
-const data = JSON.parse(document.getElementById('temperature-data').textContent);
-const slots = Array.isArray(data.slots) ? data.slots : [];
+let data = JSON.parse(document.getElementById('temperature-data').textContent);
+let slots = Array.isArray(data.slots) ? data.slots : [];
+const liveConfig = __LIVE_CONFIG_JSON__;
 const canvas = document.getElementById('mapCanvas');
 const ctx = canvas.getContext('2d');
+const generatedMeta = document.getElementById('generatedMeta');
 const rowCount = document.getElementById('rowCount');
 const slotMetric = document.getElementById('slotMetric');
 const minMetric = document.getElementById('minMetric');
@@ -1975,11 +2079,15 @@ const prevSlot = document.getElementById('prevSlot');
 const nextSlot = document.getElementById('nextSlot');
 const latestSlot = document.getElementById('latestSlot');
 const slotStatus = document.getElementById('slotStatus');
+const legendLabels = document.querySelector('.legend-labels');
 const storageKey = `3dice-tmap-html:${data.mapPath}`;
 let cssWidth = 0;
 let cssHeight = 0;
 let selectedIndex = slots.length ? slots.length - 1 : -1;
 let followingLatest = true;
+let liveVersion = Number.isFinite(data.liveVersion) ? data.liveVersion : 0;
+let liveRunToken = data.runToken || '';
+let livePollInFlight = false;
 
 function fmt(value, digits = 1) {
   if (!Number.isFinite(value)) return 'n/a';
@@ -2082,6 +2190,27 @@ function currentMinMax(values) {
   return [minValue, maxValue];
 }
 
+function colorbarTickValues(vmin, vmax, count = 7) {
+  if (count <= 1) return [vmin];
+  const values = [];
+  for (let index = 0; index < count; index += 1) {
+    values.push(vmin + (vmax - vmin) * index / (count - 1));
+  }
+  return values;
+}
+
+function updateLegendLabels() {
+  if (!legendLabels) return;
+  legendLabels.innerHTML = colorbarTickValues(data.vmin, data.vmax)
+    .map(value => `<span>${fmt(value)} K</span>`)
+    .join('');
+}
+
+function updateGeneratedMeta() {
+  if (!generatedMeta) return;
+  generatedMeta.textContent = `Generated ${data.generatedAt} from ${data.mapPath}`;
+}
+
 function colorFor(value) {
   const t = Math.max(0, Math.min(1, (value - data.vmin) / (data.vmax - data.vmin)));
   const stops = data.turboStops;
@@ -2182,6 +2311,91 @@ function updateView() {
   drawMap();
 }
 
+function applyPayload(nextData) {
+  if (!nextData || !Array.isArray(nextData.slots) || nextData.slots.length === 0) return;
+  const previousSlotNumber = slotNumberAt(selectedIndex);
+  data = nextData;
+  slots = Array.isArray(data.slots) ? data.slots : [];
+  liveVersion = Number.isFinite(data.liveVersion) ? data.liveVersion : liveVersion;
+  liveRunToken = data.runToken || liveRunToken;
+
+  if (followingLatest) {
+    selectedIndex = slots.length ? slots.length - 1 : -1;
+  } else {
+    selectedIndex = indexForSlotNumber(previousSlotNumber);
+  }
+
+  updateGeneratedMeta();
+  updateLegendLabels();
+  updateView();
+}
+
+function sidecarUrl(path, version) {
+  const separator = path.includes('?') ? '&' : '?';
+  return `${path}${separator}v=${encodeURIComponent(version)}&t=${Date.now()}`;
+}
+
+function loadSidecarScript(path, version, onload, onerror) {
+  const script = document.createElement('script');
+  script.async = true;
+  script.src = sidecarUrl(path, version);
+  script.onload = () => {
+    script.remove();
+    onload();
+  };
+  script.onerror = () => {
+    script.remove();
+    if (onerror) onerror();
+  };
+  document.head.appendChild(script);
+}
+
+function payloadIsNewer(payload) {
+  const payloadVersion = Number.isFinite(payload.liveVersion) ? payload.liveVersion : 0;
+  const payloadRunToken = payload.runToken || '';
+  if (payloadRunToken !== liveRunToken) return true;
+  return payloadVersion !== liveVersion;
+}
+
+function pollLiveManifest() {
+  if (!liveConfig || !liveConfig.manifestScript) return;
+  if (livePollInFlight) return;
+  livePollInFlight = true;
+  const finishPoll = () => {
+    livePollInFlight = false;
+  };
+  loadSidecarScript(liveConfig.manifestScript, liveVersion, () => {
+    const manifest = window.__tmapManifest;
+    if (!manifest) {
+      finishPoll();
+      return;
+    }
+    const manifestVersion = Number.isFinite(manifest.version) ? manifest.version : 0;
+    const manifestRunToken = manifest.runToken || '';
+    if (manifestVersion === liveVersion && manifestRunToken === liveRunToken) {
+      finishPoll();
+      return;
+    }
+    const payloadScript = manifest.payloadScript || liveConfig.payloadScript;
+    if (!payloadScript) {
+      finishPoll();
+      return;
+    }
+    loadSidecarScript(payloadScript, manifestVersion, () => {
+      const payload = window.__tmapPayload;
+      if (payload && payloadIsNewer(payload)) applyPayload(payload);
+      finishPoll();
+    }, finishPoll);
+  }, finishPoll);
+}
+
+function startLivePolling() {
+  if (!liveConfig || !liveConfig.manifestScript) return;
+  const refreshMs = Math.max(250, Number(liveConfig.refreshMs) || 1000);
+  window.setTimeout(pollLiveManifest, 100);
+  window.setInterval(pollLiveManifest, refreshMs);
+}
+
 function setSelectedIndex(index, followLatest, persist) {
   selectedIndex = clampIndex(index);
   followingLatest = followLatest;
@@ -2212,6 +2426,7 @@ function inspectCell(event) {
 
 applyInitialState();
 updateMetrics();
+updateLegendLabels();
 resizeCanvas();
 slotSlider.addEventListener('input', () => setSelectedIndex(Number.parseInt(slotSlider.value, 10) - 1, false, true));
 prevSlot.addEventListener('click', () => setSelectedIndex(selectedIndex - 1, false, true));
@@ -2219,6 +2434,7 @@ nextSlot.addEventListener('click', () => setSelectedIndex(selectedIndex + 1, fal
 latestSlot.addEventListener('click', () => setSelectedIndex(slots.length - 1, true, true));
 canvas.addEventListener('mousemove', inspectCell);
 window.addEventListener('resize', resizeCanvas);
+startLivePolling();
 </script>
 </body>
 </html>
@@ -2226,9 +2442,15 @@ window.addEventListener('resize', resizeCanvas);
     return (
         template.replace("__REFRESH_TAG__", refresh_tag)
         .replace("__TURBO_GRADIENT__", turbo_gradient_css())
-        .replace("__GENERATED_AT__", html.escape(generated_at))
+        .replace("__GENERATED_AT__", html.escape(payload["generatedAt"]))
         .replace("__MAP_PATH__", html.escape(str(map_path)))
-        .replace("__COLORBAR_HTML__", colorbar_html(vmin, vmax))
+        .replace("__COLORBAR_HTML__", colorbar_html(payload["vmin"], payload["vmax"]))
+        .replace("__INITIAL_ROW_COUNT__", html.escape(initial_metrics["rowCount"]))
+        .replace("__INITIAL_SLOT_METRIC__", html.escape(initial_metrics["slotMetric"]))
+        .replace("__INITIAL_MIN_METRIC__", html.escape(initial_metrics["minMetric"]))
+        .replace("__INITIAL_MAX_METRIC__", html.escape(initial_metrics["maxMetric"]))
+        .replace("__INITIAL_SLOT_STATUS__", html.escape(initial_metrics["slotStatus"]))
+        .replace("__LIVE_CONFIG_JSON__", live_config_json)
         .replace("__PAYLOAD_JSON__", payload_json)
     )
 
@@ -2276,28 +2498,244 @@ def render_tmap_html_once(args, coords_path, map_path, html_path, refresh_second
     return row_count
 
 
+def file_signature(stat_result):
+    return (stat_result.st_dev, stat_result.st_ino, stat_result.st_size, stat_result.st_mtime_ns)
+
+
+def file_identity(stat_result):
+    return (stat_result.st_dev, stat_result.st_ino)
+
+
+def print_live_tmap_message(args, state, key, message):
+    if args.quiet:
+        return
+
+    if state.get(key) == message:
+        return
+
+    print(message, flush=True)
+    state[key] = message
+
+
+def reset_tmap_follow_state(state, map_identity=None):
+    state["geometry"] = None
+    state["last_rendered_row_count"] = 0
+    state["last_combined_signature"] = None
+    state["map_identity"] = map_identity
+    state["map_size"] = None
+    state["mismatch_key"] = None
+    state["mismatch_count"] = 0
+    state["html_shell_written"] = False
+    state["live_version"] = 0
+    state["run_token"] = ""
+
+
+def wait_for_live_tmap_paths(args, coords_path, map_path, state):
+    try:
+        coords_stat = coords_path.stat()
+    except FileNotFoundError:
+        print_live_tmap_message(args, state, "wait_coords", f"Waiting for {coords_path} ...")
+        return None, None
+
+    try:
+        map_stat = map_path.stat()
+    except FileNotFoundError:
+        print_live_tmap_message(args, state, "wait_map", f"Waiting for {map_path} ...")
+        return coords_stat, None
+
+    return coords_stat, map_stat
+
+
+def load_validated_tmap_geometry_for_follow(args, coords_path, map_path, state, coords_signature):
+    first_width, first_line_number = read_first_tmap_row_width(map_path, follow=True)
+
+    if first_width is None:
+        print_live_tmap_message(
+            args,
+            state,
+            "wait_tmap_row",
+            f"Waiting for a complete Tmap row in {map_path} ...",
+        )
+        return None
+
+    geometry = state.get("geometry")
+    if geometry is not None and geometry["cell_count"] == first_width:
+        state["mismatch_key"] = None
+        state["mismatch_count"] = 0
+        return geometry
+
+    if geometry is not None and geometry["cell_count"] != first_width:
+        geometry = None
+        state["geometry"] = None
+        state["last_rendered_row_count"] = 0
+
+    geometry = load_tmap_geometry_cells(coords_path, follow=True, allow_empty=True)
+
+    if geometry is None:
+        print_live_tmap_message(
+            args,
+            state,
+            "wait_coords_rows",
+            f"Waiting for complete coordinate rows in {coords_path} ...",
+        )
+        return None
+
+    if geometry["cell_count"] != first_width:
+        mismatch_key = (coords_signature, first_width, first_line_number, geometry["cell_count"])
+        if state.get("mismatch_key") == mismatch_key:
+            state["mismatch_count"] = state.get("mismatch_count", 0) + 1
+        else:
+            state["mismatch_key"] = mismatch_key
+            state["mismatch_count"] = 1
+
+        if state["mismatch_count"] >= STABLE_TMAP_GEOMETRY_MISMATCH_POLLS:
+            raise ValueError(
+                f"{coords_path}: complete coordinate count {geometry['cell_count']} does not match "
+                f"{map_path}:{first_line_number} Tmap width {first_width}"
+            )
+
+        print_live_tmap_message(
+            args,
+            state,
+            "wait_geometry_match",
+            f"Waiting for {coords_path} to match {first_width} Tmap cell(s); "
+            f"currently has {geometry['cell_count']} complete coordinate row(s).",
+        )
+        return None
+
+    state["geometry"] = geometry
+    state["mismatch_key"] = None
+    state["mismatch_count"] = 0
+    return geometry
+
+
+def render_tmap_html_follow_snapshot(args, coords_path, map_path, html_path, state, refresh_seconds, coords_signature):
+    geometry = load_validated_tmap_geometry_for_follow(
+        args,
+        coords_path,
+        map_path,
+        state,
+        coords_signature,
+    )
+
+    if geometry is None:
+        return False
+
+    slots, row_count, data_min, data_max = read_existing_tmap_slots(
+        map_path,
+        geometry["cell_count"],
+        follow=True,
+    )
+
+    if not slots:
+        print_live_tmap_message(
+            args,
+            state,
+            "wait_tmap_slots",
+            f"Waiting for complete Tmap slots in {map_path} before writing {html_path} ...",
+        )
+        return False
+
+    if row_count < state["last_rendered_row_count"]:
+        state["last_rendered_row_count"] = 0
+
+    if row_count <= state["last_rendered_row_count"]:
+        return False
+
+    live_version = state.get("live_version", 0) + 1
+    run_token = state.get("run_token", "")
+    payload = build_tmap_payload(
+        args,
+        coords_path,
+        map_path,
+        html_path,
+        geometry,
+        slots,
+        row_count,
+        data_min,
+        data_max,
+        live_version=live_version,
+        run_token=run_token,
+    )
+    manifest_path, payload_path = tmap_sidecar_paths(html_path)
+    write_tmap_sidecars(manifest_path, payload_path, payload)
+
+    if not state.get("html_shell_written") or not html_path.exists():
+        live_config = {
+            "manifestScript": manifest_path.name,
+            "payloadScript": payload_path.name,
+            "refreshMs": max(250, int(refresh_seconds * 1000.0)),
+        }
+        dashboard = build_tmap_html_dashboard(
+            args,
+            coords_path,
+            map_path,
+            html_path,
+            geometry,
+            slots,
+            row_count,
+            data_min,
+            data_max,
+            0.0,
+            live_config=live_config,
+            payload=payload,
+        )
+        write_text_atomic(html_path, dashboard)
+        state["html_shell_written"] = True
+
+    if not args.quiet:
+        previous_row_count = state["last_rendered_row_count"]
+        added_count = row_count - previous_row_count
+        latest_slot = slots[-1]["slot"] + 1
+        print(
+            f"Updated {manifest_path.name}/{payload_path.name} for {len(slots)} Tmap slot(s), latest slot {latest_slot} "
+            f"(added {added_count} complete slot(s))",
+            flush=True,
+        )
+
+    state["last_rendered_row_count"] = row_count
+    state["live_version"] = live_version
+    return True
+
+
 def render_tmap_html_follow(args, coords_path, map_path, html_path):
-    wait_for_path(coords_path, args)
-    last_signature = None
+    state = {}
+    reset_tmap_follow_state(state)
     refresh_seconds = args.html_refresh if args.html_refresh is not None else args.poll
 
     while True:
-        if map_path.exists():
-            stat = map_path.stat()
-            signature = (stat.st_size, stat.st_mtime_ns)
+        coords_stat, map_stat = wait_for_live_tmap_paths(args, coords_path, map_path, state)
 
-            if signature != last_signature:
-                render_tmap_html_once(
+        if coords_stat is not None and map_stat is not None:
+            current_map_identity = file_identity(map_stat)
+            previous_map_identity = state.get("map_identity")
+            previous_map_size = state.get("map_size")
+
+            if previous_map_identity != current_map_identity:
+                reset_tmap_follow_state(state, map_identity=current_map_identity)
+                if previous_map_identity is not None and not args.quiet:
+                    print(f"Detected new Tmap file {map_path}; restarting live follow state.", flush=True)
+            elif previous_map_size is not None and map_stat.st_size < previous_map_size:
+                reset_tmap_follow_state(state, map_identity=current_map_identity)
+                if not args.quiet:
+                    print(f"Detected truncated Tmap file {map_path}; restarting live follow state.", flush=True)
+
+            state["map_identity"] = current_map_identity
+            state["map_size"] = map_stat.st_size
+            state["run_token"] = f"{current_map_identity[0]}-{current_map_identity[1]}"
+
+            combined_signature = (file_signature(coords_stat), file_signature(map_stat))
+            if combined_signature != state.get("last_combined_signature") or state.get("geometry") is None:
+                render_tmap_html_follow_snapshot(
                     args,
                     coords_path,
                     map_path,
                     html_path,
-                    refresh_seconds=refresh_seconds,
-                    allow_empty=True,
+                    state,
+                    refresh_seconds,
+                    file_signature(coords_stat),
                 )
-                last_signature = signature
-        elif not args.quiet:
-            print(f"Waiting for {map_path} ...", flush=True)
+                state["last_combined_signature"] = combined_signature
 
         time.sleep(args.poll)
 
