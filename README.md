@@ -1,8 +1,7 @@
 # 🧊 SoftHier-3D-ICE
 
 SoftHier-3D-ICE generates 3D-ICE inputs from the default SoftHier architecture and
-runs them through a local 3D-ICE server workflow. The older 3D-ICE
-client/server socket flow remains available for debugging and compatibility.
+runs them through a local 3D-ICE server workflow.
 
 Unless noted otherwise, run commands from the repository root.
 
@@ -32,6 +31,7 @@ Initialize the submodules and set up the SoftHier environment:
 source init.sh
 ```
 
+
 ## 🧩 Generate 3D-ICE Inputs
 
 For run-local generated files, use the root target:
@@ -57,17 +57,13 @@ SoftHier's `ice_prepare` target.
 Equivalent direct command:
 
 ```bash
-python Interface_scripts/geometry_generator/generate_3dice_inputs.py \
-  --arch SoftHier/soft_hier/flex_cluster/flex_cluster_arch.py \
-  --geo runs/manual/generated/geo.json \
-  --floorplan runs/manual/generated/3dice/floorplan_nopower.flp \
-  --stk runs/manual/generated/3dice/ice.stk \
-  --pwr-interval-ps 100000000
+python Interface_scripts/geometry_generator/generate_3dice_inputs.py   --arch SoftHier/soft_hier/flex_cluster/flex_cluster_arch.py   --geo runs/manual/generated/geo.json   --floorplan runs/manual/generated/3dice/floorplan_nopower.flp   --stk runs/manual/generated/3dice/ice.stk   --pwr-interval-ps 100000000
 ```
 
 The stack slot duration is generated from `PWR_INTERVAL_PS * 1e-12` by default,
 so one SoftHier power row corresponds to one 3D-ICE thermal slot. The transient
 solver step defaults to one tenth of that slot.
+
 
 ## 🧩 Build 3D-ICE
 
@@ -103,18 +99,26 @@ make coupled-run RUN_NAME=default_app
 The root runner generates run-local 3D-ICE inputs, starts the 3D-ICE server in
 `DICE_RUN_MODE=local-server` by default, starts the trace adapter, runs SoftHier,
 and writes results under `runs/<run-name>/<timestamp>/`. In local-server mode,
-the 3D-ICE server reads `traces/3dice_power_traces.txt` directly with
-`--follow --until-minus-one` and writes stack-declared thermal output files
-after each slot.
+no 3D-ICE client is started for normal local runs. The 3D-ICE server reads
+`traces/3dice_power_traces.txt` directly with `--follow --until-minus-one`
+and writes stack-declared thermal output files after each slot.
+
+The runtime stack and floorplan are copied into the results directory, and the
+full Tmap outputs are written beside them:
+
+```text
+runs/<run-name>/<timestamp>/results/3dice/
+  floorplan_nopower.flp
+  ice.stk
+  xyaxis_TOP_DIE.txt
+  output_top_die.txt
+```
 
 To use the older socket split, run:
 
 ```bash
 make coupled-run RUN_NAME=default_app DICE_RUN_MODE=client-server
 ```
-
-In `client-server` mode, the 3D-ICE client feeds power slots to the server over
-localhost; the server still writes the thermal output files.
 
 During the SoftHier phase, the terminal shows a green framed live window with
 the latest 5 SoftHier log lines. Change the window size with
@@ -135,34 +139,40 @@ power trace:
 
 ```bash
 cd runs/manual/generated/3dice
-"$REPO_ROOT/3D-ICE/bin/3D-ICE-Server" ice.stk \
-  --power-trace ../../traces/3dice_power_traces.txt \
-  --follow \
-  --until-minus-one
+"$REPO_ROOT/3D-ICE/bin/3D-ICE-Server" ice.stk   --power-trace ../../traces/3dice_power_traces.txt   --follow   --until-minus-one
 ```
 
-### Optional: Plot Runtime Temperature
+### Optional: Plot Runtime Temperature and GIF
 
-For SSH/headless runs, render the current 3D-ICE `Tflp` output as a
-self-contained HTML dashboard:
+For SSH/headless runs, write a self-contained HTML dashboard from the full
+Tmap output. The page embeds all complete slots currently present in
+`output_top_die.txt`, opens at the latest slot by default, and provides a slot
+slider plus `Previous`, `Next`, and `Latest` buttons:
 
 ```bash
-python3 Interface_scripts/plot_runtime_temperature_map/plot_runtime_tmap.py \
-  --floorplan runs/<run-name>/latest/results/3dice/floorplan_nopower.flp \
-  --tflp runs/<run-name>/latest/results/3dice/output_top_die_flp_avg.txt \
-  --html runs/<run-name>/latest/results/3dice/temperature_map.html \
-  --once
+python Interface_scripts/plot_runtime_temperature_map/plot_runtime_tmap.py   --coords runs/<run-name>/latest/results/3dice/xyaxis_TOP_DIE.txt   --map runs/<run-name>/latest/results/3dice/output_top_die.txt   --html runs/<run-name>/latest/results/3dice/temperature_map.html   --follow   --poll 2
 ```
 
-Open or download `temperature_map.html` after the run. To update the HTML while
-3D-ICE is still appending rows, use `--follow --poll 2` instead of `--once`; the
-HTML includes a browser refresh tag in follow mode.
+Open `runs/<run-name>/latest/results/3dice/temperature_map.html` with a browser.
+In `--follow` mode, the script rewrites the HTML when complete Tmap slots are
+appended, and the page refreshes at the `--poll` interval. Manual slot selection
+is preserved across refreshes; click `Latest` to resume following the newest
+slot. 
 
-The older GUI `Tmap` viewer is still available for stacks that emit Tmap files:
+To generate a dashboard-style animated GIF after the run finishes, enable the
+end-of-run export:
 
 ```bash
-python -m pip install -r Interface_scripts/plot_runtime_temperature_map/requirements_tmap_plot.txt
-python3 Interface_scripts/plot_runtime_temperature_map/plot_runtime_tmap.py \
-  --coords output_top_die_map.coords.txt \
-  --map output_top_die_map.txt
+make coupled-run RUN_NAME=default_app ICE_GENERATE_GIF=1
 ```
+
+The GIF is written to `runs/<run-name>/latest/results/3dice/temperature_map.gif`
+by default. It uses the same `xyaxis_TOP_DIE.txt` and `output_top_die.txt`
+source files as the HTML dashboard. 
+
+You can also generate the GIF manually after a run:
+
+```bash
+python Interface_scripts/plot_runtime_temperature_map/plot_runtime_tmap.py   --coords runs/<run-name>/latest/results/3dice/xyaxis_TOP_DIE.txt   --map runs/<run-name>/latest/results/3dice/output_top_die.txt   --gif runs/<run-name>/latest/results/3dice/temperature_map.gif   --once
+```
+

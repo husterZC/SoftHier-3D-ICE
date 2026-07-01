@@ -33,12 +33,11 @@ The co-simulation flow:
    complete 3D-ICE power slots;
 9. in the default `DICE_RUN_MODE=local-server` mode, has the 3D-ICE server read
    those power slots directly from `traces/3dice_power_traces.txt`;
-10. in `DICE_RUN_MODE=client-server` mode, starts the 3D-ICE client with
-    `--follow --until-minus-one` to feed power slots to the server over
-    localhost;
-11. runs SoftHier;
-12. has the 3D-ICE server write stack-declared thermal outputs after each slot;
-13. sends the all-`-1` termination slot when SoftHier exits;
+10. runs SoftHier;
+11. has the 3D-ICE server write stack-declared thermal outputs after each slot;
+12. sends the all-`-1` termination slot when SoftHier exits;
+13. optionally generates an end-of-run temperature dashboard GIF when
+    `ICE_GENERATE_GIF=1`;
 14. writes per-run metadata and summary files.
 
 ## Host Dependencies
@@ -135,16 +134,6 @@ The server follows the adapter output file, consumes one complete power row per
 thermal slot, writes the stack-declared output files itself, and exits after the
 adapter appends an all-`-1` termination row.
 
-Use the older socket mode only when you specifically want to debug the network
-client/server split:
-
-```bash
-make coupled-run RUN_NAME=default_app DICE_RUN_MODE=client-server
-```
-
-In that mode, the client reads `traces/3dice_power_traces.txt` and sends each
-power row to the server over localhost. The server still owns thermal output
-file generation.
 
 ## One-Command First Run
 
@@ -179,13 +168,16 @@ runs/<run-name>/<timestamp>/
       floorplan_nopower.flp
       ice.stk
       conductance_layer.txt
-      output_top_die_flp_avg.txt
+      output_top_die.txt
+      xyaxis_TOP_DIE.txt
       thermal_map.txt
+      temperature_map.gif   # only when ICE_GENERATE_GIF=1
   logs/
     3dice_server.log
     3dice_client.log        # only present in DICE_RUN_MODE=client-server
     adapter.log
     softhier.log
+    tmap_gif.log            # only when ICE_GENERATE_GIF=1
   pids/
   state/
     softhier.done
@@ -194,36 +186,53 @@ runs/<run-name>/<timestamp>/
 Important files:
 
 - `run.env`: exact configuration, paths, ports, and git commits for the run.
-  It also records `EFFECTIVE_ICE_SLOT_SECONDS` and
-  `EFFECTIVE_ICE_STEP_SECONDS`, the values written into the generated `.stk`.
+  It also records `ICE_TARGET_TOP_DIE_CELLS`, `EFFECTIVE_ICE_SLOT_SECONDS`,
+  `EFFECTIVE_ICE_STEP_SECONDS`, and the optional `ICE_GENERATE_GIF` settings.
 - `summary.txt`: process statuses, trace row counts, thermal row count, and max
   temperature.
 - `traces/softhier_power_raw.txt`: SoftHier raw runtime power rows.
 - `traces/3dice_power_traces.txt`: adapter output consumed directly by the
   3D-ICE server in local-server mode, or by the 3D-ICE client in client-server
   mode.
-- `results/3dice/output_top_die_flp_avg.txt`: average floorplan temperatures
+- `results/3dice/output_top_die.txt`: full TOP_DIE `Tmap` temperatures
   written directly by the 3D-ICE server.
+- `results/3dice/xyaxis_TOP_DIE.txt`: non-uniform Tmap cell geometry used to
+  interpret `output_top_die.txt`.
 
-`thermal_map.txt` may be empty. The current generated stack file emits a `Tflp`
-average temperature output, not a live `Tmap` output. For SSH/headless runs,
-render that `Tflp` data as a self-contained HTML dashboard:
+The current generated stack emits a `Tmap`
+output. For SSH/headless runs, render the
+latest full Tmap slot as a self-contained HTML dashboard:
 
 ```bash
-python3 Interface_scripts/plot_runtime_temperature_map/plot_runtime_tmap.py \
-  --floorplan runs/<run-name>/latest/results/3dice/floorplan_nopower.flp \
-  --tflp runs/<run-name>/latest/results/3dice/output_top_die_flp_avg.txt \
+python Interface_scripts/plot_runtime_temperature_map/plot_runtime_tmap.py \
+  --coords runs/<run-name>/latest/results/3dice/xyaxis_TOP_DIE.txt \
+  --map runs/<run-name>/latest/results/3dice/output_top_die.txt \
   --html runs/<run-name>/latest/results/3dice/temperature_map.html \
+  --follow \
+  --poll 2
+```
+
+
+To keep the runtime HTML smooth, GIF export is offline/end-of-run. Enable it on
+the coupled command with:
+
+```bash
+make coupled-run RUN_NAME=default_app ICE_GENERATE_GIF=1
+```
+
+The default GIF path is
+`runs/<run-name>/latest/results/3dice/temperature_map.gif`.
+
+You can also generate the GIF manually after any run:
+
+```bash
+python Interface_scripts/plot_runtime_temperature_map/plot_runtime_tmap.py \
+  --coords runs/<run-name>/latest/results/3dice/xyaxis_TOP_DIE.txt \
+  --map runs/<run-name>/latest/results/3dice/output_top_die.txt \
+  --gif runs/<run-name>/latest/results/3dice/temperature_map.gif \
   --once
 ```
 
-For live monitoring while 3D-ICE is still appending rows, use `--follow --poll 2`
-instead of `--once`. The generated HTML includes a browser refresh tag in follow
-mode, so it can be opened through a browser, downloaded from the SSH server, or
-served from the run directory.
-
-The older GUI `Tmap` viewer is still available through `--coords/--map` when a
-stack emits Tmap files and coordinate output is available.
 
 ## Running Other Config + App Pairs
 
@@ -373,4 +382,11 @@ make coupled-run RUN_NAME=my_run \
   PWR_INTERVAL_PS=100000000 \
   ICE_SLOT_SECONDS=0.0001 \
   ICE_STEP_SECONDS=0.00001
+```
+
+The generated floorplan targets about `256*256` non-uniform TOP_DIE cells by
+default. To request a different total, set `ICE_TARGET_TOP_DIE_CELLS`:
+
+```bash
+make coupled-run RUN_NAME=my_run ICE_TARGET_TOP_DIE_CELLS=65536
 ```

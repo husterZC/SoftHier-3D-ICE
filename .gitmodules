@@ -4,3 +4,4 @@
 [submodule "3D-ICE"]
 	path = 3D-ICE
 	url = git@github.com:kaizhu657/3d-ice_softhier_interface.git
+	branch = local_server
