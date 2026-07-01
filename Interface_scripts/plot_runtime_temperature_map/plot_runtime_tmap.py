@@ -18,30 +18,45 @@
 
 """Runtime temperature-map viewer for 3D-ICE outputs.
 
-GUI Tmap mode:
-  python3 plot_runtime_tmap.py --coords COORDS_FILE --map TMAP_FILE
+Headless full Tmap dashboard mode:
+  python3 plot_runtime_tmap.py --coords COORDS_FILE --map TMAP_FILE --html HTML_FILE
 
 Headless floorplan dashboard mode:
   python3 plot_runtime_tmap.py --floorplan FLOORPLAN_FILE --tflp TFLP_FILE --html HTML_FILE
 
+Animated full Tmap dashboard GIF mode:
+  python3 plot_runtime_tmap.py --coords COORDS_FILE --map TMAP_FILE --gif GIF_FILE --once
+
+Animated floorplan dashboard GIF mode:
+  python3 plot_runtime_tmap.py --floorplan FLOORPLAN_FILE --tflp TFLP_FILE --gif GIF_FILE --once
+
 Examples:
-  python3 plot_runtime_tmap.py --coords output_top_die_map.coords.txt --map output_top_die_map.txt
+  python3 plot_runtime_tmap.py --coords xyaxis_TOP_DIE.txt --map output_top_die.txt --html tmap.html --once
+  python3 plot_runtime_tmap.py --coords xyaxis_TOP_DIE.txt --map output_top_die.txt --gif tmap.gif --once
   python3 plot_runtime_tmap.py \
       --floorplan runs/default/latest/results/3dice/floorplan_nopower.flp \
       --tflp runs/default/latest/results/3dice/output_top_die_flp_avg.txt \
       --html runs/default/latest/results/3dice/temperature_map.html --once
+  python3 plot_runtime_tmap.py \
+      --floorplan runs/default/latest/results/3dice/floorplan_nopower.flp \
+      --tflp runs/default/latest/results/3dice/output_top_die_flp_avg.txt \
+      --gif runs/default/latest/results/3dice/temperature_map.gif --once
 
 Notes:
-  - GUI Tmap mode opens a Matplotlib window and needs a display-capable backend.
+  - HTML Tmap mode is designed for SSH/headless runs and renders the latest complete Tmap row.
   - HTML floorplan mode is designed for SSH/headless runs and does not need Matplotlib.
   - Follow mode is the default. In HTML mode, follow mode rewrites the HTML file when
-    complete Tflp rows are appended.
+    complete rows are appended.
+  - GIF modes are offline exports. Full Tmap GIF uses --coords/--map/--gif/--once;
+    floorplan GIF uses --floorplan/--tflp/--gif/--once.
+  - GIF renders a dashboard-style interface by default; use --gif-layout map for a map-only view.
 """
 
 import argparse
 import html
 import json
 import re
+import shutil
 import sys
 import time
 from pathlib import Path
@@ -55,18 +70,63 @@ POSITION_RE = re.compile(r"\bposition\s+([^,;]+)\s*,\s*([^;]+)\s*;", re.IGNORECA
 DIMENSION_RE = re.compile(r"\bdimension\s+([^,;]+)\s*,\s*([^;]+)\s*;", re.IGNORECASE)
 TFLP_NAME_RE = re.compile(r"([^\s\t()]+)\(K\)")
 
+TURBO_STOPS = [
+    (48, 18, 59),
+    (65, 69, 170),
+    (70, 130, 240),
+    (54, 185, 214),
+    (70, 210, 130),
+    (159, 222, 72),
+    (230, 205, 49),
+    (249, 141, 38),
+    (214, 40, 40),
+    (122, 4, 3),
+]
+COLORBAR_TICK_COUNT = 7
+
+
+def rgb_css(stop):
+    return f"rgb({stop[0]}, {stop[1]}, {stop[2]})"
+
+
+def turbo_gradient_css():
+    return "linear-gradient(90deg, " + ", ".join(rgb_css(stop) for stop in TURBO_STOPS) + ")"
+
+
+def colorbar_tick_values(vmin, vmax, count=COLORBAR_TICK_COUNT):
+    if count <= 1:
+        return [vmin]
+    return [vmin + (vmax - vmin) * index / (count - 1) for index in range(count)]
+
+
+def colorbar_labels_html(vmin, vmax):
+    return "".join(
+        f"<span>{value:.1f} K</span>"
+        for value in colorbar_tick_values(vmin, vmax)
+    )
+
+
+def colorbar_html(vmin, vmax):
+    return (
+        '<div class="map-legend" aria-label="Temperature color scale">'
+        '<div class="legend-title">Temperature (K)</div>'
+        '<div class="legend-bar"></div>'
+        f'<div class="legend-labels">{colorbar_labels_html(vmin, vmax)}</div>'
+        '</div>'
+    )
+
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="Render runtime 3D-ICE temperature maps as a GUI plot or headless HTML dashboard."
+        description="Render runtime 3D-ICE temperature maps as an HTML dashboard or GIF."
     )
     parser.add_argument(
         "--coords",
-        help="Path to a Tmap coordinate file, for example output_top_die_map.coords.txt.",
+        help="Path to a Tmap coordinate file, for example xyaxis_TOP_DIE.txt.",
     )
     parser.add_argument(
         "--map",
-        help="Path to a Tmap temperature file, for example output_top_die_map.txt.",
+        help="Path to a Tmap temperature file, for example output_top_die.txt.",
     )
     parser.add_argument(
         "--floorplan",
@@ -78,15 +138,58 @@ def parse_args():
     )
     parser.add_argument(
         "--html",
-        help="Path to write a self-contained HTML dashboard for --floorplan/--tflp mode.",
+        help="Path to write a self-contained HTML dashboard for --coords/--map or --floorplan/--tflp mode.",
+    )
+    parser.add_argument(
+        "--gif",
+        help="Path to write an animated GIF for --coords/--map or --floorplan/--tflp mode.",
     )
     parser.add_argument("--poll", type=float, default=1.0)
     parser.add_argument("--html-refresh", type=float)
-    parser.add_argument("--cmap", default="inferno")
+    parser.add_argument("--cmap", default="turbo")
     parser.add_argument("--vmin", type=float)
     parser.add_argument("--vmax", type=float)
-    parser.add_argument("--backend", default="QtAgg")
-    parser.add_argument("--skip-to-latest", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument(
+        "--gif-width",
+        type=int,
+        default=1600,
+        help="Output GIF canvas width in pixels.",
+    )
+    parser.add_argument(
+        "--gif-dpi",
+        type=float,
+        default=120.0,
+        help="Matplotlib render DPI for GIF export.",
+    )
+    parser.add_argument(
+        "--gif-fps",
+        type=float,
+        default=8.0,
+        help="Animated GIF playback speed in frames per second.",
+    )
+    parser.add_argument(
+        "--gif-stride",
+        type=int,
+        default=1,
+        help="Render every Nth Tmap or Tflp row; the final row is always included.",
+    )
+    parser.add_argument(
+        "--gif-writer",
+        choices=("auto", "imagemagick", "pillow"),
+        default="auto",
+        help="GIF encoder to use. Auto prefers ImageMagick when available.",
+    )
+    parser.add_argument(
+        "--gif-layout",
+        choices=("interface", "map"),
+        default="interface",
+        help="GIF layout to render. Interface records the dashboard-style view; map renders only the temperature map.",
+    )
+    parser.add_argument(
+        "--gif-labels",
+        action="store_true",
+        help="Draw floorplan region names inside the GIF.",
+    )
     parser.add_argument("--quiet", action="store_true")
 
     mode = parser.add_mutually_exclusive_group()
@@ -97,168 +200,60 @@ def parse_args():
 
 
 def validate_mode_args(args):
-    html_fields = [args.floorplan, args.tflp, args.html]
-    tmap_fields = [args.coords, args.map]
-    html_mode = any(value is not None for value in html_fields)
-    tmap_mode = any(value is not None for value in tmap_fields)
+    floorplan_mode = any(value is not None for value in (args.floorplan, args.tflp))
+    tmap_mode = any(value is not None for value in (args.coords, args.map))
 
-    if html_mode and tmap_mode:
-        raise ValueError("choose either --floorplan/--tflp/--html mode or --coords/--map mode, not both")
+    if floorplan_mode and tmap_mode:
+        raise ValueError("choose either --floorplan/--tflp output mode or --coords/--map mode, not both")
 
-    if html_mode:
-        missing = [name for name, value in (("--floorplan", args.floorplan), ("--tflp", args.tflp), ("--html", args.html)) if value is None]
+    if floorplan_mode:
+        missing = [name for name, value in (("--floorplan", args.floorplan), ("--tflp", args.tflp)) if value is None]
         if missing:
-            raise ValueError(f"HTML mode requires {', '.join(missing)}")
-        return "html"
+            raise ValueError(f"floorplan output mode requires {', '.join(missing)}")
+        if args.html is None and args.gif is None:
+            raise ValueError("floorplan output mode requires --html and/or --gif")
+        return "floorplan"
 
     if tmap_mode:
         missing = [name for name, value in (("--coords", args.coords), ("--map", args.map)) if value is None]
         if missing:
-            raise ValueError(f"Tmap GUI mode requires {', '.join(missing)}")
+            raise ValueError(f"Tmap mode requires {', '.join(missing)}")
+        if args.html is None and args.gif is None:
+            raise ValueError("Tmap mode requires --html and/or --gif")
         return "tmap"
 
-    raise ValueError("provide either --floorplan/--tflp/--html or --coords/--map")
+    if args.html is not None:
+        raise ValueError("--html requires either --coords/--map or --floorplan/--tflp")
+
+    if args.gif is not None:
+        raise ValueError("--gif requires either --coords/--map or --floorplan/--tflp")
+
+    raise ValueError("provide either --floorplan/--tflp output mode or --coords/--map mode")
 
 
-def load_plotting_modules(backend):
+def load_gif_modules():
     try:
         import numpy as np
         import matplotlib
 
-        matplotlib.use(backend)
+        matplotlib.use("Agg")
 
         import matplotlib.pyplot as plt
-        from matplotlib.collections import PolyCollection
+        from matplotlib.animation import FuncAnimation, ImageMagickWriter, PillowWriter
+        from matplotlib.collections import PatchCollection
+        from matplotlib.colors import Normalize
+        from matplotlib.patches import Rectangle
     except ImportError as exc:
         print(
-            "ERROR: missing Python plotting dependency.\n"
-            "Install GUI plotting dependencies with:\n"
-            "  python3 -m pip install -r requirements_tmap_plot.txt\n"
-            "For SSH/headless runs, use --floorplan/--tflp/--html instead.\n"
+            "ERROR: missing Python GIF plotting dependency.\n"
+            "Install GIF plotting dependencies with:\n"
+            "  python3 -m pip install -r Interface_scripts/plot_runtime_temperature_map/requirements_tmap_plot.txt\n"
             f"Original import error: {exc}",
             file=sys.stderr,
         )
         raise SystemExit(1)
-    except Exception as exc:
-        print(
-            f"ERROR: could not initialize matplotlib backend {backend!r}: {exc}\n"
-            "For a local GUI window, install/use a GUI backend such as PyQt5 and run with X11/desktop access.\n"
-            "For SSH/headless runs, use --floorplan/--tflp/--html instead.",
-            file=sys.stderr,
-        )
-        raise SystemExit(1)
 
-    return np, plt, PolyCollection
-
-
-def parse_nrows_ncolumns(line):
-    parts = line.strip().split()
-
-    if len(parts) >= 5 and parts[0] == "#" and parts[1] == "nrows" and parts[3] == "ncolumns":
-        return int(parts[2]), int(parts[4])
-
-    return None, None
-
-
-def load_geometry(coords_path, np):
-    cells = []
-    declared_nrows = None
-    declared_ncolumns = None
-
-    with coords_path.open("r", encoding="utf-8") as stream:
-        for line_number, line in enumerate(stream, start=1):
-            stripped = line.strip()
-
-            if not stripped:
-                continue
-
-            if stripped.startswith("#"):
-                nrows, ncolumns = parse_nrows_ncolumns(stripped)
-
-                if nrows is not None:
-                    declared_nrows = nrows
-                    declared_ncolumns = ncolumns
-
-                continue
-
-            parts = stripped.split()
-
-            if len(parts) != 4:
-                raise ValueError(
-                    f"{coords_path}:{line_number}: expected 4 coordinate fields, got {len(parts)}"
-                )
-
-            cells.append(tuple(map(float, parts)))
-
-    if not cells:
-        raise ValueError(f"{coords_path}: no coordinate cells found")
-
-    cells_array = np.asarray(cells, dtype=np.float64)
-    left_x = cells_array[:, 0]
-    left_y = cells_array[:, 1]
-    length = cells_array[:, 2]
-    width = cells_array[:, 3]
-    right_x = left_x + length
-    right_y = left_y + width
-
-    vertices = np.empty((len(cells_array), 4, 2), dtype=np.float64)
-    vertices[:, 0, 0] = left_x
-    vertices[:, 0, 1] = left_y
-    vertices[:, 1, 0] = right_x
-    vertices[:, 1, 1] = left_y
-    vertices[:, 2, 0] = right_x
-    vertices[:, 2, 1] = right_y
-    vertices[:, 3, 0] = left_x
-    vertices[:, 3, 1] = right_y
-
-    bounds = (
-        float(left_x.min()),
-        float(left_y.min()),
-        float(right_x.max()),
-        float(right_y.max()),
-    )
-
-    return {
-        "vertices": vertices,
-        "cell_count": len(cells_array),
-        "bounds": bounds,
-        "declared_nrows": declared_nrows,
-        "declared_ncolumns": declared_ncolumns,
-    }
-
-
-def create_figure(args, geometry, np, plt, PolyCollection):
-    min_x, min_y, max_x, max_y = geometry["bounds"]
-    physical_width = max_x - min_x
-    physical_height = max_y - min_y
-
-    figure_width = 10.0
-    figure_height = max(1.0, figure_width * physical_height / physical_width)
-
-    figure, axis = plt.subplots(figsize=(figure_width, figure_height), constrained_layout=True)
-    axis.set_aspect("equal", adjustable="box")
-    axis.set_xlim(min_x, max_x)
-    axis.set_ylim(min_y, max_y)
-    axis.set_xlabel("x")
-    axis.set_ylabel("y")
-
-    initial_temperatures = np.zeros(geometry["cell_count"], dtype=np.float64)
-    collection = PolyCollection(
-        geometry["vertices"],
-        array=initial_temperatures,
-        cmap=args.cmap,
-        edgecolors="none",
-        linewidths=0,
-        antialiased=False,
-        rasterized=True,
-    )
-    axis.add_collection(collection)
-
-    colorbar = figure.colorbar(collection, ax=axis)
-    colorbar.set_label("Temperature (K)")
-    axis.set_title("Waiting for Tmap data")
-
-    return figure, axis, collection, colorbar
+    return np, plt, FuncAnimation, ImageMagickWriter, PillowWriter, PatchCollection, Normalize, Rectangle
 
 
 def parse_temperature_row(raw_line, expected_count, map_path, line_number, np):
@@ -296,161 +291,10 @@ def read_complete_data_line(stream, line_number, follow):
         line_number += 1
         first_byte = first_non_whitespace_byte(raw_line)
 
-        if first_byte is None or first_byte == ord("#"):
+        if first_byte is None or first_byte in (ord("#"), ord("%")):
             continue
 
         return raw_line, line_number
-
-
-def read_complete_row(stream, map_path, expected_count, line_number, follow, np):
-    raw_line, line_number = read_complete_data_line(stream, line_number, follow)
-
-    if raw_line is None:
-        return None, line_number
-
-    return parse_temperature_row(raw_line, expected_count, map_path, line_number, np), line_number
-
-
-def read_latest_existing_row(map_path, expected_count, np):
-    latest_raw_line = None
-    latest_line_number = None
-    row_count = 0
-    line_number = 0
-
-    with map_path.open("rb") as stream:
-        while True:
-            raw_line, line_number = read_complete_data_line(
-                stream, line_number, follow=False
-            )
-
-            if raw_line is None:
-                break
-
-            latest_raw_line = raw_line
-            latest_line_number = line_number
-            row_count += 1
-
-    if latest_raw_line is None:
-        return None, -1
-
-    return (
-        parse_temperature_row(
-            latest_raw_line, expected_count, map_path, latest_line_number, np
-        ),
-        row_count - 1,
-    )
-
-
-def update_plot(args, figure, axis, collection, colorbar, temperatures, slot_index):
-    # By default, scale the colors to the min/max of the row being rendered.
-    min_temp = float(temperatures.min())
-    max_temp = float(temperatures.max())
-    vmin = args.vmin if args.vmin is not None else min_temp
-    vmax = args.vmax if args.vmax is not None else max_temp
-
-    if vmax <= vmin:
-        vmax = vmin + 1.0
-
-    collection.set_array(temperatures)
-    collection.set_clim(vmin, vmax)
-    colorbar.update_normal(collection)
-    axis.set_title(
-        f"Slot {slot_index} | min {min_temp:.3f} K | max {max_temp:.3f} K | "
-        f"updated {time.strftime('%H:%M:%S')}"
-    )
-    figure.canvas.draw_idle()
-    figure.canvas.flush_events()
-
-    if not args.quiet:
-        print(
-            f"Rendered slot {slot_index}: {min_temp:.3f} K to {max_temp:.3f} K",
-            flush=True,
-        )
-
-
-def wait_for_file(path, args, plt, figure):
-    printed = False
-
-    while not path.exists():
-        if not printed and not args.quiet:
-            print(f"Waiting for {path} ...", flush=True)
-            printed = True
-
-        if not plt.fignum_exists(figure.number):
-            raise SystemExit(0)
-
-        plt.pause(args.poll)
-
-
-def render_once(args, map_path, geometry, np, plt, figure, axis, collection, colorbar):
-    temperatures, slot_index = read_latest_existing_row(
-        map_path, geometry["cell_count"], np
-    )
-
-    if temperatures is None:
-        raise ValueError(f"{map_path}: no complete temperature rows found")
-
-    update_plot(args, figure, axis, collection, colorbar, temperatures, slot_index)
-
-    if not args.quiet:
-        print("Close the matplotlib window to exit.", flush=True)
-
-    plt.show()
-
-
-def render_follow(args, map_path, geometry, np, plt, figure, axis, collection, colorbar):
-    slot_index = -1
-    line_number = 0
-
-    wait_for_file(map_path, args, plt, figure)
-
-    with map_path.open("rb") as stream:
-        while plt.fignum_exists(figure.number):
-            latest_raw_line = None
-            latest_line_number = None
-            count = 0
-
-            while True:
-                raw_line, line_number = read_complete_data_line(
-                    stream, line_number, follow=True
-                )
-
-                if raw_line is None:
-                    break
-
-                latest_raw_line = raw_line
-                latest_line_number = line_number
-                count += 1
-
-            if latest_raw_line is not None:
-                slot_index += count
-                latest = parse_temperature_row(
-                    latest_raw_line,
-                    geometry["cell_count"],
-                    map_path,
-                    latest_line_number,
-                    np,
-                )
-                update_plot(args, figure, axis, collection, colorbar, latest, slot_index)
-                plt.pause(0.001)
-                continue
-
-            try:
-                if map_path.stat().st_size < stream.tell():
-                    stream.seek(0)
-                    line_number = 0
-                    slot_index = -1
-
-                    if not args.quiet:
-                        print("Map file was truncated; restarting from the beginning.", flush=True)
-            except FileNotFoundError:
-                stream.close()
-                wait_for_file(map_path, args, plt, figure)
-                stream = map_path.open("rb")
-                line_number = 0
-                slot_index = -1
-
-            plt.pause(args.poll)
 
 
 def load_floorplan_regions(floorplan_path):
@@ -591,6 +435,7 @@ def build_html_dashboard(args, floorplan_path, tflp_path, html_path, regions, na
         "dataMin": data_min,
         "dataMax": data_max,
         "cmap": args.cmap,
+        "turboStops": TURBO_STOPS,
     }
     payload_json = json.dumps(payload, separators=(",", ":"))
     refresh_tag = ""
@@ -598,42 +443,44 @@ def build_html_dashboard(args, floorplan_path, tflp_path, html_path, regions, na
     if refresh_seconds and refresh_seconds > 0.0:
         refresh_tag = f'<meta http-equiv="refresh" content="{html.escape(html_number(refresh_seconds))}">'
 
-    safe_title = "3D-ICE Runtime Temperature Map"
-
-    return f"""<!doctype html>
+    template = """<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-{refresh_tag}
-<title>{safe_title}</title>
+__REFRESH_TAG__
+<title>3D-ICE Runtime Temperature Map</title>
 <style>
-:root {{ color-scheme: light; --ink: #17202a; --muted: #5c6773; --line: #d8dee7; --panel: #f7f9fc; }}
-* {{ box-sizing: border-box; }}
-body {{ margin: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; color: var(--ink); background: #ffffff; }}
-main {{ max-width: 1200px; margin: 0 auto; padding: 20px; }}
-header {{ display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; margin-bottom: 16px; }}
-h1 {{ margin: 0 0 6px; font-size: 22px; font-weight: 650; }}
-.meta {{ color: var(--muted); font-size: 13px; line-height: 1.5; overflow-wrap: anywhere; }}
-.summary {{ display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; margin: 14px 0; }}
-.metric {{ border: 1px solid var(--line); border-radius: 6px; padding: 10px; background: var(--panel); }}
-.metric strong {{ display: block; font-size: 18px; margin-top: 4px; }}
-.viewer {{ display: grid; grid-template-columns: minmax(0, 1fr) 260px; gap: 18px; align-items: start; }}
-.map-wrap {{ border: 1px solid var(--line); border-radius: 6px; padding: 10px; background: #fff; min-width: 0; }}
-svg {{ width: 100%; height: auto; display: block; background: #fbfcfe; }}
-rect.region {{ stroke: rgba(20, 30, 40, 0.28); stroke-width: 5; vector-effect: non-scaling-stroke; cursor: crosshair; }}
-rect.region:hover {{ stroke: #111827; stroke-width: 9; }}
-.controls {{ border: 1px solid var(--line); border-radius: 6px; padding: 12px; background: var(--panel); }}
-button {{ border: 1px solid #9aa6b2; border-radius: 5px; background: #fff; padding: 7px 10px; cursor: pointer; }}
-button:hover {{ background: #eef3f8; }}
-input[type="range"] {{ width: 100%; margin: 12px 0; }}
-.legend {{ margin: 12px 0 8px; }}
-.legend-bar {{ height: 14px; border-radius: 3px; background: linear-gradient(90deg, #313695, #2c7bb6, #00a6ca, #00ccbc, #90eb9d, #ffff8c, #f9d057, #f29e2e, #e76818, #d7191c); border: 1px solid var(--line); }}
-.legend-labels {{ display: flex; justify-content: space-between; font-size: 12px; color: var(--muted); }}
-#tooltip {{ min-height: 74px; font-size: 13px; line-height: 1.45; overflow-wrap: anywhere; }}
-#hotspots {{ margin: 10px 0 0; padding-left: 18px; font-size: 13px; line-height: 1.5; }}
-.empty {{ border: 1px dashed var(--line); border-radius: 6px; padding: 28px; color: var(--muted); text-align: center; }}
-@media (max-width: 860px) {{ .viewer {{ grid-template-columns: 1fr; }} .summary {{ grid-template-columns: repeat(2, minmax(0, 1fr)); }} }}
+:root { color-scheme: light; --ink: #17202a; --muted: #5c6773; --line: #d8dee7; --panel: #f7f9fc; }
+* { box-sizing: border-box; }
+body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; color: var(--ink); background: #ffffff; }
+main { max-width: 1200px; margin: 0 auto; padding: 20px; }
+header { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; margin-bottom: 16px; }
+h1 { margin: 0 0 6px; font-size: 22px; font-weight: 650; }
+.meta { color: var(--muted); font-size: 13px; line-height: 1.5; overflow-wrap: anywhere; }
+.summary { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; margin: 14px 0; }
+.metric { border: 1px solid var(--line); border-radius: 6px; padding: 10px; background: var(--panel); }
+.metric strong { display: block; font-size: 20px; margin-top: 4px; }
+.viewer { display: grid; grid-template-columns: minmax(0, 1fr) 260px; gap: 18px; align-items: start; }
+.map-wrap { border: 1px solid var(--line); border-radius: 6px; padding: 10px; background: #fff; min-width: 0; }
+svg { width: 100%; height: auto; display: block; background: #fbfcfe; }
+rect.region { stroke: rgba(20, 30, 40, 0.28); stroke-width: 5; vector-effect: non-scaling-stroke; cursor: crosshair; }
+rect.region:hover { stroke: #111827; stroke-width: 9; }
+.controls { border: 1px solid var(--line); border-radius: 6px; padding: 12px; background: var(--panel); }
+button { border: 1px solid #9aa6b2; border-radius: 5px; background: #fff; padding: 7px 10px; cursor: pointer; }
+button:hover { background: #eef3f8; }
+input[type="range"] { width: 100%; margin: 12px 0; }
+.map-legend { margin-top: 10px; }
+.legend-title { margin-bottom: 6px; color: var(--ink); font-size: 14px; font-weight: 650; }
+.legend-bar { height: 16px; border-radius: 3px; background: __TURBO_GRADIENT__; border: 1px solid var(--line); }
+.legend-labels { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: 4px; margin-top: 5px; font-size: 13px; color: var(--muted); }
+.legend-labels span { text-align: center; white-space: nowrap; }
+.legend-labels span:first-child { text-align: left; }
+.legend-labels span:last-child { text-align: right; }
+#tooltip { min-height: 74px; font-size: 15px; line-height: 1.45; overflow-wrap: anywhere; }
+#hotspots { margin: 10px 0 0; padding-left: 18px; font-size: 15px; line-height: 1.5; }
+.empty { border: 1px dashed var(--line); border-radius: 6px; padding: 28px; color: var(--muted); text-align: center; }
+@media (max-width: 860px) { .viewer { grid-template-columns: 1fr; } .summary { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
 </style>
 </head>
 <body>
@@ -641,7 +488,7 @@ input[type="range"] {{ width: 100%; margin: 12px 0; }}
 <header>
   <div>
     <h1>3D-ICE Runtime Temperature Map</h1>
-    <div class="meta">Generated {html.escape(payload["generatedAt"])} from <code>{html.escape(str(tflp_path))}</code></div>
+    <div class="meta">Generated __GENERATED_AT__ from <code>__TFLP_PATH__</code></div>
   </div>
 </header>
 <section class="summary">
@@ -651,21 +498,17 @@ input[type="range"] {{ width: 100%; margin: 12px 0; }}
   <div class="metric">Maximum<strong id="maxMetric">n/a</strong></div>
 </section>
 <section class="viewer">
-  <div class="map-wrap" id="mapContainer"></div>
+  <div class="map-wrap"><div id="mapContainer"></div>__COLORBAR_HTML__</div>
   <aside class="controls">
     <button id="playButton" type="button">Play</button>
     <input id="slotSlider" type="range" min="0" max="0" value="0" step="1">
     <div class="meta" id="slotText">No rows loaded</div>
-    <div class="legend">
-      <div class="legend-bar"></div>
-      <div class="legend-labels"><span id="legendMin">n/a</span><span id="legendMax">n/a</span></div>
-    </div>
     <div id="tooltip">Hover over a region to inspect it.</div>
     <ol id="hotspots"></ol>
   </aside>
 </section>
 </main>
-<script id="temperature-data" type="application/json">{payload_json}</script>
+<script id="temperature-data" type="application/json">__PAYLOAD_JSON__</script>
 <script>
 const data = JSON.parse(document.getElementById('temperature-data').textContent);
 const mapContainer = document.getElementById('mapContainer');
@@ -676,24 +519,18 @@ const rowCount = document.getElementById('rowCount');
 const slotMetric = document.getElementById('slotMetric');
 const minMetric = document.getElementById('minMetric');
 const maxMetric = document.getElementById('maxMetric');
-const legendMin = document.getElementById('legendMin');
-const legendMax = document.getElementById('legendMax');
 const tooltip = document.getElementById('tooltip');
 const hotspots = document.getElementById('hotspots');
 let timer = null;
 
-function fmt(value, digits = 3) {{
+function fmt(value, digits = 1) {
   if (!Number.isFinite(value)) return 'n/a';
   return value.toFixed(digits);
-}}
+}
 
-function colorFor(value) {{
+function colorFor(value) {
   const t = Math.max(0, Math.min(1, (value - data.vmin) / (data.vmax - data.vmin)));
-  const stops = [
-    [49, 54, 149], [44, 123, 182], [0, 166, 202], [0, 204, 188],
-    [144, 235, 157], [255, 255, 140], [249, 208, 87], [242, 158, 46],
-    [231, 104, 24], [215, 25, 28]
-  ];
+  const stops = data.turboStops;
   const scaled = t * (stops.length - 1);
   const i = Math.min(stops.length - 2, Math.floor(scaled));
   const f = scaled - i;
@@ -702,23 +539,23 @@ function colorFor(value) {{
   const r = Math.round(a[0] + (b[0] - a[0]) * f);
   const g = Math.round(a[1] + (b[1] - a[1]) * f);
   const bl = Math.round(a[2] + (b[2] - a[2]) * f);
-  return `rgb(${{r}},${{g}},${{bl}})`;
-}}
+  return `rgb(${r},${g},${bl})`;
+}
 
-function svgY(region) {{
+function svgY(region) {
   return data.bounds.maxY + data.bounds.minY - (region.y + region.height);
-}}
+}
 
-function buildSvg() {{
-  if (!data.regions.length) {{
+function buildSvg() {
+  if (!data.regions.length) {
     mapContainer.innerHTML = '<div class="empty">No floorplan regions loaded.</div>';
     return;
-  }}
+  }
   const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
-  svg.setAttribute('viewBox', `${{data.bounds.minX}} ${{data.bounds.minY}} ${{data.bounds.width}} ${{data.bounds.height}}`);
+  svg.setAttribute('viewBox', `${data.bounds.minX} ${data.bounds.minY} ${data.bounds.width} ${data.bounds.height}`);
   svg.setAttribute('role', 'img');
   svg.setAttribute('aria-label', '3D-ICE floorplan temperature map');
-  data.regions.forEach((region, index) => {{
+  data.regions.forEach((region, index) => {
     const rect = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
     rect.classList.add('region');
     rect.dataset.index = index;
@@ -733,91 +570,97 @@ function buildSvg() {{
     title.textContent = region.name;
     rect.appendChild(title);
     svg.appendChild(rect);
-  }});
+  });
   mapContainer.replaceChildren(svg);
-}}
+}
 
-function updateTooltip(index, slot) {{
+function updateTooltip(index, slot) {
   const region = data.regions[index];
   const row = data.rows[slot];
   const temp = row ? row.values[index] : NaN;
-  tooltip.innerHTML = `<strong>${{region.name}}</strong><br>Temperature: ${{fmt(temp)}} K<br>Position: ${{fmt(region.x, 1)}}, ${{fmt(region.y, 1)}}<br>Size: ${{fmt(region.width, 1)}} x ${{fmt(region.height, 1)}}`;
-}}
+  tooltip.innerHTML = `<strong>${region.name}</strong><br>Temperature: ${fmt(temp)} K<br>Position: ${fmt(region.x, 1)}, ${fmt(region.y, 1)}<br>Size: ${fmt(region.width, 1)} x ${fmt(region.height, 1)}`;
+}
 
-function updateHotspots(row) {{
+function updateHotspots(row) {
   hotspots.replaceChildren();
   if (!row) return;
   row.values
-    .map((value, index) => ({{ value, name: data.regions[index].name }}))
+    .map((value, index) => ({ value, name: data.regions[index].name }))
     .sort((a, b) => b.value - a.value)
     .slice(0, 6)
-    .forEach(item => {{
+    .forEach(item => {
       const li = document.createElement('li');
-      li.textContent = `${{item.name}}: ${{fmt(item.value)}} K`;
+      li.textContent = `${item.name}: ${fmt(item.value)} K`;
       hotspots.appendChild(li);
-    }});
-}}
+    });
+}
 
-function updateSlot(slot) {{
+function updateSlot(slot) {
   const row = data.rows[slot];
   const rects = mapContainer.querySelectorAll('rect.region');
-  if (!row) {{
+  if (!row) {
     slotText.textContent = 'Waiting for complete temperature rows.';
     return;
-  }}
+  }
   let min = Infinity;
   let max = -Infinity;
-  row.values.forEach((value, index) => {{
+  row.values.forEach((value, index) => {
     min = Math.min(min, value);
     max = Math.max(max, value);
     if (rects[index]) rects[index].setAttribute('fill', colorFor(value));
-  }});
-  slotText.textContent = `Slot ${{slot}} | time ${{fmt(row.time, 6)}} s | updated ${{data.generatedAt}}`;
-  slotMetric.textContent = String(slot);
-  minMetric.textContent = `${{fmt(min)}} K`;
-  maxMetric.textContent = `${{fmt(max)}} K`;
+  });
+  const displaySlot = slot + 1;
+  slotText.textContent = `Slot ${displaySlot} / ${data.rows.length} | time ${fmt(row.time, 6)} s | updated ${data.generatedAt}`;
+  slotMetric.textContent = String(displaySlot);
+  minMetric.textContent = `${fmt(min)} K`;
+  maxMetric.textContent = `${fmt(max)} K`;
   updateHotspots(row);
-}}
+}
 
-function setPlaying(enabled) {{
-  if (enabled) {{
+function setPlaying(enabled) {
+  if (enabled) {
     playButton.textContent = 'Pause';
-    timer = window.setInterval(() => {{
+    timer = window.setInterval(() => {
       const next = Number(slider.value) >= data.rows.length - 1 ? 0 : Number(slider.value) + 1;
       slider.value = String(next);
       updateSlot(next);
-    }}, 500);
-  }} else {{
+    }, 500);
+  } else {
     playButton.textContent = 'Play';
     if (timer !== null) window.clearInterval(timer);
     timer = null;
-  }}
-}}
+  }
+}
 
-function init() {{
+function init() {
   rowCount.textContent = String(data.rows.length);
-  legendMin.textContent = `${{fmt(data.vmin)}} K`;
-  legendMax.textContent = `${{fmt(data.vmax)}} K`;
   buildSvg();
-  if (data.rows.length === 0) {{
+  if (data.rows.length === 0) {
     slider.disabled = true;
     playButton.disabled = true;
     slotText.textContent = 'Waiting for complete temperature rows.';
     return;
-  }}
+  }
   slider.max = String(data.rows.length - 1);
   slider.value = String(data.rows.length - 1);
   slider.addEventListener('input', () => updateSlot(Number(slider.value)));
   playButton.addEventListener('click', () => setPlaying(timer === null));
   updateSlot(data.rows.length - 1);
-}}
+}
 
 init();
 </script>
 </body>
 </html>
 """
-
+    return (
+        template.replace("__REFRESH_TAG__", refresh_tag)
+        .replace("__TURBO_GRADIENT__", turbo_gradient_css())
+        .replace("__GENERATED_AT__", html.escape(payload["generatedAt"]))
+        .replace("__TFLP_PATH__", html.escape(str(tflp_path)))
+        .replace("__COLORBAR_HTML__", colorbar_html(vmin, vmax))
+        .replace("__PAYLOAD_JSON__", payload_json)
+    )
 
 def render_html_once(args, floorplan_path, tflp_path, html_path, refresh_seconds=0.0, allow_empty=False):
     regions = load_floorplan_regions(floorplan_path)
@@ -844,6 +687,1615 @@ def render_html_once(args, floorplan_path, tflp_path, html_path, refresh_seconds
 
     return len(rows)
 
+
+def validate_gif_args(args):
+    if args.gif_width < 320:
+        raise ValueError("--gif-width must be at least 320 pixels")
+    if args.gif_dpi <= 0.0:
+        raise ValueError("--gif-dpi must be positive")
+    if args.gif_fps <= 0.0:
+        raise ValueError("--gif-fps must be positive")
+    if args.gif_stride < 1:
+        raise ValueError("--gif-stride must be at least 1")
+
+
+def frame_indices_for_rows(row_count, stride):
+    indices = list(range(0, row_count, stride))
+
+    if indices and indices[-1] != row_count - 1:
+        indices.append(row_count - 1)
+
+    return indices
+
+
+def make_gif_writer(args, ImageMagickWriter, PillowWriter):
+    writer_name = args.gif_writer
+
+    if writer_name == "auto":
+        writer_name = "imagemagick" if shutil.which("convert") or shutil.which("magick") else "pillow"
+
+    if writer_name == "imagemagick":
+        return ImageMagickWriter(fps=args.gif_fps), writer_name
+
+    return PillowWriter(fps=args.gif_fps), writer_name
+
+
+def save_animation_atomic(animation, gif_path, writer, dpi):
+    gif_path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = gif_path.with_name(f".{gif_path.name}.tmp.gif")
+
+    try:
+        animation.save(temp_path, writer=writer, dpi=dpi)
+        temp_path.replace(gif_path)
+    finally:
+        if temp_path.exists():
+            temp_path.unlink()
+
+
+def prepare_gif_data(args, floorplan_path, tflp_path, np):
+    regions = load_floorplan_regions(floorplan_path)
+    names, rows = load_tflp_rows(tflp_path, follow=False)
+
+    if not rows:
+        raise ValueError(f"{tflp_path}: no complete Tflp rows found")
+
+    regions = align_regions_to_tflp(floorplan_path, regions, names)
+    frame_indices = frame_indices_for_rows(len(rows), args.gif_stride)
+    bounds = floorplan_bounds(regions)
+    values = np.asarray(
+        [temperature for row in rows for temperature in row["values"]],
+        dtype=np.float64,
+    )
+    data_min = float(values.min())
+    data_max = float(values.max())
+    vmin = args.vmin if args.vmin is not None else data_min
+    vmax = args.vmax if args.vmax is not None else data_max
+
+    if vmax <= vmin:
+        vmax = vmin + 1.0
+
+    return {
+        "regions": regions,
+        "names": names,
+        "rows": rows,
+        "frame_indices": frame_indices,
+        "bounds": bounds,
+        "data_min": data_min,
+        "data_max": data_max,
+        "vmin": vmin,
+        "vmax": vmax,
+    }
+
+
+def save_gif_with_fallback(args, plt, figure, animation, gif_path, ImageMagickWriter, PillowWriter):
+    writer, writer_name = make_gif_writer(args, ImageMagickWriter, PillowWriter)
+
+    try:
+        try:
+            save_animation_atomic(animation, gif_path, writer, args.gif_dpi)
+        except Exception as exc:
+            if args.gif_writer != "auto" or writer_name != "imagemagick":
+                raise
+            if not args.quiet:
+                print(f"ImageMagick GIF writer failed ({exc}); retrying with Pillow.", flush=True)
+            writer = PillowWriter(fps=args.gif_fps)
+            save_animation_atomic(animation, gif_path, writer, args.gif_dpi)
+            writer_name = "pillow"
+
+        width_px, height_px = figure.canvas.get_width_height()
+    finally:
+        plt.close(figure)
+
+    return writer_name, width_px, height_px
+
+
+def add_figure_panel(figure, x, y, width, height, facecolor="#ffffff", edgecolor="#d8dee7"):
+    from matplotlib.patches import Rectangle
+
+    panel = Rectangle(
+        (x, y),
+        width,
+        height,
+        transform=figure.transFigure,
+        facecolor=facecolor,
+        edgecolor=edgecolor,
+        linewidth=0.8,
+        zorder=0,
+    )
+    figure.patches.append(panel)
+    return panel
+
+
+def add_metric_card(figure, x, y, width, height, label, initial_value):
+    add_figure_panel(figure, x, y, width, height, facecolor="#f7f9fc")
+    figure.text(
+        x + 0.012,
+        y + height - 0.027,
+        label,
+        color="#5c6773",
+        fontsize=9.5,
+        va="top",
+        zorder=4,
+    )
+    return figure.text(
+        x + 0.012,
+        y + 0.020,
+        initial_value,
+        color="#17202a",
+        fontsize=15,
+        fontweight="semibold",
+        va="bottom",
+        zorder=4,
+    )
+
+
+def shorten_text(value, max_chars):
+    if len(value) <= max_chars:
+        return value
+    return value[: max_chars - 3] + "..."
+
+
+def format_gif_temp(value):
+    return f"{value:.1f} K"
+
+
+def render_gif_map_layout(args, gif_data, modules, gif_path):
+    (
+        np,
+        plt,
+        FuncAnimation,
+        ImageMagickWriter,
+        PillowWriter,
+        PatchCollection,
+        Normalize,
+        Rectangle,
+    ) = modules
+
+    regions = gif_data["regions"]
+    rows = gif_data["rows"]
+    frame_indices = gif_data["frame_indices"]
+    bounds = gif_data["bounds"]
+    vmin = gif_data["vmin"]
+    vmax = gif_data["vmax"]
+
+    figure_width = args.gif_width / args.gif_dpi
+    figure_height = max(4.0, figure_width * bounds["height"] / bounds["width"] * 0.82)
+    figure, axis = plt.subplots(
+        figsize=(figure_width, figure_height),
+        dpi=args.gif_dpi,
+        constrained_layout=True,
+    )
+    axis.set_aspect("equal", adjustable="box")
+    axis.set_xlim(bounds["minX"], bounds["maxX"])
+    axis.set_ylim(bounds["minY"], bounds["maxY"])
+    axis.set_xlabel("x")
+    axis.set_ylabel("y")
+
+    patches = [
+        Rectangle(
+            (region["x"], region["y"]),
+            region["width"],
+            region["height"],
+        )
+        for region in regions
+    ]
+    norm = Normalize(vmin=vmin, vmax=vmax)
+    collection = PatchCollection(
+        patches,
+        cmap=plt.get_cmap(args.cmap),
+        norm=norm,
+        edgecolors=(0.08, 0.1, 0.13, 0.35),
+        linewidths=0.45,
+        antialiased=False,
+    )
+    axis.add_collection(collection)
+    colorbar = figure.colorbar(collection, ax=axis, fraction=0.046, pad=0.04)
+    colorbar.set_label("Temperature (K)", fontsize=11)
+    colorbar.ax.tick_params(labelsize=9)
+
+    if args.gif_labels:
+        label_size = max(4.5, min(8.0, args.gif_width / 250.0))
+        for region in regions:
+            axis.text(
+                region["x"] + region["width"] / 2.0,
+                region["y"] + region["height"] / 2.0,
+                region["name"],
+                ha="center",
+                va="center",
+                fontsize=label_size,
+                color="#111827",
+                clip_on=True,
+            )
+
+    title = axis.set_title("")
+
+    def update(frame_index):
+        row = rows[frame_index]
+        temperatures = np.asarray(row["values"], dtype=np.float64)
+        min_temp = float(temperatures.min())
+        max_temp = float(temperatures.max())
+        collection.set_array(temperatures)
+        title.set_text(
+            f"Slot {frame_index + 1}/{len(rows)} | time {row['time']:.6g} s | "
+            f"min {min_temp:.1f} K | max {max_temp:.1f} K"
+        )
+        return collection, title
+
+    update(frame_indices[0])
+    animation = FuncAnimation(
+        figure,
+        update,
+        frames=frame_indices,
+        interval=1000.0 / args.gif_fps,
+        blit=False,
+        repeat=True,
+        cache_frame_data=False,
+    )
+    return save_gif_with_fallback(
+        args,
+        plt,
+        figure,
+        animation,
+        gif_path,
+        ImageMagickWriter,
+        PillowWriter,
+    )
+
+
+def render_gif_interface_layout(args, floorplan_path, tflp_path, gif_data, modules, gif_path):
+    (
+        np,
+        plt,
+        FuncAnimation,
+        ImageMagickWriter,
+        PillowWriter,
+        PatchCollection,
+        Normalize,
+        Rectangle,
+    ) = modules
+
+    regions = gif_data["regions"]
+    rows = gif_data["rows"]
+    frame_indices = gif_data["frame_indices"]
+    bounds = gif_data["bounds"]
+    vmin = gif_data["vmin"]
+    vmax = gif_data["vmax"]
+    cmap = plt.get_cmap(args.cmap)
+    norm = Normalize(vmin=vmin, vmax=vmax)
+
+    figure_width = args.gif_width / args.gif_dpi
+    figure_height = max(4.8, figure_width * 0.62)
+    figure = plt.figure(figsize=(figure_width, figure_height), dpi=args.gif_dpi)
+    figure.patch.set_facecolor("#ffffff")
+
+    short_tflp_path = shorten_text(str(tflp_path), 120)
+    figure.text(
+        0.045,
+        0.965,
+        "3D-ICE Runtime Temperature Map",
+        color="#17202a",
+        fontsize=16,
+        fontweight="semibold",
+        va="top",
+    )
+    figure.text(
+        0.045,
+        0.930,
+        f"Animated dashboard from {short_tflp_path}",
+        color="#5c6773",
+        fontsize=8.5,
+        va="top",
+    )
+
+    card_y = 0.815
+    card_h = 0.086
+    card_gap = 0.012
+    card_x = 0.045
+    card_total_w = 0.910
+    card_w = (card_total_w - 3 * card_gap) / 4.0
+    row_count_text = add_metric_card(figure, card_x, card_y, card_w, card_h, "Rows", str(len(rows)))
+    slot_metric_text = add_metric_card(
+        figure,
+        card_x + (card_w + card_gap),
+        card_y,
+        card_w,
+        card_h,
+        "Current Slot",
+        "n/a",
+    )
+    min_metric_text = add_metric_card(
+        figure,
+        card_x + 2 * (card_w + card_gap),
+        card_y,
+        card_w,
+        card_h,
+        "Minimum",
+        "n/a",
+    )
+    max_metric_text = add_metric_card(
+        figure,
+        card_x + 3 * (card_w + card_gap),
+        card_y,
+        card_w,
+        card_h,
+        "Maximum",
+        "n/a",
+    )
+
+    add_figure_panel(figure, 0.045, 0.115, 0.665, 0.665, facecolor="#ffffff")
+    add_figure_panel(figure, 0.735, 0.115, 0.220, 0.665, facecolor="#f7f9fc")
+
+    map_axis = figure.add_axes([0.065, 0.250, 0.625, 0.485], zorder=2)
+    map_axis.set_aspect("equal", adjustable="box")
+    map_axis.set_xlim(bounds["minX"], bounds["maxX"])
+    map_axis.set_ylim(bounds["minY"], bounds["maxY"])
+    map_axis.set_xticks([])
+    map_axis.set_yticks([])
+    map_axis.set_facecolor("#fbfcfe")
+    for spine in map_axis.spines.values():
+        spine.set_edgecolor("#d8dee7")
+        spine.set_linewidth(0.8)
+
+    patches = [
+        Rectangle(
+            (region["x"], region["y"]),
+            region["width"],
+            region["height"],
+        )
+        for region in regions
+    ]
+    collection = PatchCollection(
+        patches,
+        cmap=cmap,
+        norm=norm,
+        edgecolors=(0.08, 0.1, 0.13, 0.35),
+        linewidths=0.45,
+        antialiased=False,
+    )
+    map_axis.add_collection(collection)
+
+    if args.gif_labels:
+        label_size = max(4.0, min(7.0, args.gif_width / 270.0))
+        for region in regions:
+            map_axis.text(
+                region["x"] + region["width"] / 2.0,
+                region["y"] + region["height"] / 2.0,
+                shorten_text(region["name"], 16),
+                ha="center",
+                va="center",
+                fontsize=label_size,
+                color="#111827",
+                clip_on=True,
+            )
+
+    colorbar_axis = figure.add_axes([0.065, 0.165, 0.625, 0.030], zorder=2)
+    gradient = np.linspace(vmin, vmax, 512, dtype=np.float64).reshape(1, -1)
+    colorbar_axis.imshow(
+        gradient,
+        aspect="auto",
+        cmap=cmap,
+        norm=norm,
+        extent=(vmin, vmax, 0.0, 1.0),
+    )
+    colorbar_axis.set_yticks([])
+    figure.text(
+        0.065,
+        0.209,
+        "Temperature (K)",
+        color="#17202a",
+        fontsize=10,
+        fontweight="semibold",
+        ha="left",
+        va="bottom",
+        zorder=4,
+    )
+    ticks = colorbar_tick_values(vmin, vmax)
+    colorbar_axis.set_xticks(ticks)
+    colorbar_axis.set_xticklabels([f"{tick:.4g} K" for tick in ticks], fontsize=8.5)
+    colorbar_axis.tick_params(axis="x", length=0, pad=3, colors="#5c6773")
+    for spine in colorbar_axis.spines.values():
+        spine.set_edgecolor("#d8dee7")
+        spine.set_linewidth(0.8)
+
+    side_axis = figure.add_axes([0.735, 0.115, 0.220, 0.665], zorder=2)
+    side_axis.set_xlim(0.0, 1.0)
+    side_axis.set_ylim(0.0, 1.0)
+    side_axis.axis("off")
+
+    side_axis.add_patch(
+        Rectangle((0.065, 0.905), 0.235, 0.058, facecolor="#ffffff", edgecolor="#9aa6b2", linewidth=0.8)
+    )
+    side_axis.text(0.182, 0.934, "Play", color="#17202a", fontsize=8.5, ha="center", va="center")
+    side_axis.add_patch(
+        Rectangle((0.065, 0.835), 0.870, 0.030, facecolor="#d8dee7", edgecolor="#c9d2dc", linewidth=0.5)
+    )
+    progress_fill = Rectangle((0.065, 0.835), 0.0, 0.030, facecolor="#3478f6", edgecolor="none")
+    side_axis.add_patch(progress_fill)
+    slot_text = side_axis.text(
+        0.065,
+        0.790,
+        "",
+        color="#5c6773",
+        fontsize=8.8,
+        ha="left",
+        va="top",
+        wrap=True,
+    )
+
+    side_axis.add_patch(
+        Rectangle((0.065, 0.600), 0.870, 0.145, facecolor="#ffffff", edgecolor="#d8dee7", linewidth=0.8)
+    )
+    selected_text = side_axis.text(
+        0.090,
+        0.720,
+        "",
+        color="#17202a",
+        fontsize=8.8,
+        ha="left",
+        va="top",
+        linespacing=1.35,
+        wrap=True,
+    )
+    side_axis.text(
+        0.065,
+        0.535,
+        "Hottest floorplan elements",
+        color="#17202a",
+        fontsize=10.0,
+        fontweight="semibold",
+        ha="left",
+        va="top",
+    )
+    hotspot_texts = [
+        side_axis.text(
+            0.075,
+            0.490 - index * 0.060,
+            "",
+            color="#17202a",
+            fontsize=8.8,
+            ha="left",
+            va="top",
+        )
+        for index in range(6)
+    ]
+
+    def update(frame_index):
+        row = rows[frame_index]
+        temperatures = np.asarray(row["values"], dtype=np.float64)
+        min_temp = float(temperatures.min())
+        max_temp = float(temperatures.max())
+        collection.set_array(temperatures)
+
+        display_slot = frame_index + 1
+        slot_metric_text.set_text(str(display_slot))
+        min_metric_text.set_text(format_gif_temp(min_temp))
+        max_metric_text.set_text(format_gif_temp(max_temp))
+        progress = 1.0 if len(rows) <= 1 else frame_index / (len(rows) - 1)
+        progress_fill.set_width(0.870 * progress)
+        slot_text.set_text(f"Slot {display_slot} / {len(rows)} | time {row['time']:.6g} s")
+
+        hottest_indices = np.argsort(temperatures)[::-1][:6]
+        hottest_index = int(hottest_indices[0])
+        hottest_region = regions[hottest_index]
+        selected_text.set_text(
+            f"{shorten_text(hottest_region['name'], 28)}\n"
+            f"Temperature: {format_gif_temp(float(temperatures[hottest_index]))}\n"
+            f"Position: {hottest_region['x']:.3g}, {hottest_region['y']:.3g}\n"
+            f"Size: {hottest_region['width']:.3g} x {hottest_region['height']:.3g}"
+        )
+        for rank, text in enumerate(hotspot_texts):
+            if rank >= len(hottest_indices):
+                text.set_text("")
+                continue
+            index = int(hottest_indices[rank])
+            name = shorten_text(regions[index]["name"], 22)
+            text.set_text(f"{rank + 1}. {name}: {format_gif_temp(float(temperatures[index]))}")
+
+        return (
+            collection,
+            row_count_text,
+            slot_metric_text,
+            min_metric_text,
+            max_metric_text,
+            progress_fill,
+            slot_text,
+            selected_text,
+            *hotspot_texts,
+        )
+
+    update(frame_indices[0])
+    animation = FuncAnimation(
+        figure,
+        update,
+        frames=frame_indices,
+        interval=1000.0 / args.gif_fps,
+        blit=False,
+        repeat=True,
+        cache_frame_data=False,
+    )
+    return save_gif_with_fallback(
+        args,
+        plt,
+        figure,
+        animation,
+        gif_path,
+        ImageMagickWriter,
+        PillowWriter,
+    )
+
+
+def render_gif_once(args, floorplan_path, tflp_path, gif_path):
+    validate_gif_args(args)
+
+    modules = load_gif_modules()
+    np = modules[0]
+    gif_data = prepare_gif_data(args, floorplan_path, tflp_path, np)
+
+    if args.gif_layout == "map":
+        writer_name, width_px, height_px = render_gif_map_layout(args, gif_data, modules, gif_path)
+    else:
+        writer_name, width_px, height_px = render_gif_interface_layout(
+            args,
+            floorplan_path,
+            tflp_path,
+            gif_data,
+            modules,
+            gif_path,
+        )
+
+    if not args.quiet:
+        print(
+            f"Wrote {gif_path} with {len(gif_data['frame_indices'])} frame(s) from {len(gif_data['rows'])} row(s) "
+            f"at {width_px}x{height_px}px, {args.gif_fps:g} fps using {writer_name} "
+            f"({args.gif_layout} layout)",
+            flush=True,
+        )
+
+    return len(gif_data["frame_indices"])
+
+
+def load_tmap_geometry_cells(coords_path):
+    cells = []
+    min_x = None
+    min_y = None
+    max_x = None
+    max_y = None
+
+    with coords_path.open("r", encoding="utf-8") as stream:
+        for line_number, line in enumerate(stream, start=1):
+            stripped = line.strip()
+
+            if not stripped or stripped.startswith(("#", "%")):
+                continue
+
+            parts = stripped.split()
+            if len(parts) != 4:
+                raise ValueError(f"{coords_path}:{line_number}: expected 4 coordinate fields, got {len(parts)}")
+
+            x, y, width, height = map(float, parts)
+            if width <= 0.0 or height <= 0.0:
+                raise ValueError(f"{coords_path}:{line_number}: non-positive cell dimensions")
+
+            cells.append((x, y, width, height))
+            min_x = x if min_x is None else min(min_x, x)
+            min_y = y if min_y is None else min(min_y, y)
+            max_x = x + width if max_x is None else max(max_x, x + width)
+            max_y = y + height if max_y is None else max(max_y, y + height)
+
+    if not cells:
+        raise ValueError(f"{coords_path}: no coordinate cells found")
+
+    return {
+        "cells": cells,
+        "cell_count": len(cells),
+        "bounds": {
+            "minX": min_x,
+            "minY": min_y,
+            "maxX": max_x,
+            "maxY": max_y,
+            "width": max_x - min_x,
+            "height": max_y - min_y,
+        },
+    }
+
+
+def parse_tmap_values(raw_line, expected_count, map_path, line_number):
+    values = [float(part) for part in raw_line.split()]
+
+    if len(values) != expected_count:
+        raise ValueError(f"{map_path}:{line_number}: expected {expected_count} temperatures, got {len(values)}")
+
+    return values
+
+
+def read_latest_existing_tmap_values(map_path, expected_count):
+    latest_raw_line = None
+    latest_line_number = None
+    row_count = 0
+    line_number = 0
+
+    with map_path.open("rb") as stream:
+        while True:
+            raw_line, line_number = read_complete_data_line(stream, line_number, follow=False)
+
+            if raw_line is None:
+                break
+
+            latest_raw_line = raw_line
+            latest_line_number = line_number
+            row_count += 1
+
+    if latest_raw_line is None:
+        return None, -1, 0
+
+    return parse_tmap_values(latest_raw_line, expected_count, map_path, latest_line_number), row_count - 1, row_count
+
+
+
+def read_existing_tmap_slots(map_path, expected_count):
+    slots = []
+    data_min = None
+    data_max = None
+    row_count = 0
+    line_number = 0
+
+    with map_path.open("rb") as stream:
+        while True:
+            raw_line, line_number = read_complete_data_line(stream, line_number, follow=False)
+
+            if raw_line is None:
+                break
+
+            values = parse_tmap_values(raw_line, expected_count, map_path, line_number)
+            row_min = min(values)
+            row_max = max(values)
+            data_min = row_min if data_min is None else min(data_min, row_min)
+            data_max = row_max if data_max is None else max(data_max, row_max)
+            slots.append({"slot": row_count, "values": values})
+            row_count += 1
+
+    return slots, row_count, data_min, data_max
+
+
+def tmap_geometry_vertices(geometry, np):
+    cells_array = np.asarray(geometry["cells"], dtype=np.float64)
+    left_x = cells_array[:, 0]
+    left_y = cells_array[:, 1]
+    length = cells_array[:, 2]
+    width = cells_array[:, 3]
+    right_x = left_x + length
+    right_y = left_y + width
+
+    vertices = np.empty((len(cells_array), 4, 2), dtype=np.float64)
+    vertices[:, 0, 0] = left_x
+    vertices[:, 0, 1] = left_y
+    vertices[:, 1, 0] = right_x
+    vertices[:, 1, 1] = left_y
+    vertices[:, 2, 0] = right_x
+    vertices[:, 2, 1] = right_y
+    vertices[:, 3, 0] = left_x
+    vertices[:, 3, 1] = right_y
+    return vertices
+
+
+def read_tmap_gif_stats(map_path, expected_count, np):
+    data_min = None
+    data_max = None
+    row_count = 0
+    line_number = 0
+
+    with map_path.open("rb") as stream:
+        while True:
+            raw_line, line_number = read_complete_data_line(stream, line_number, follow=False)
+
+            if raw_line is None:
+                break
+
+            temperatures = parse_temperature_row(raw_line, expected_count, map_path, line_number, np)
+            row_min = float(temperatures.min())
+            row_max = float(temperatures.max())
+            data_min = row_min if data_min is None else min(data_min, row_min)
+            data_max = row_max if data_max is None else max(data_max, row_max)
+            row_count += 1
+
+    if row_count == 0:
+        raise ValueError(f"{map_path}: no complete Tmap rows found")
+
+    return row_count, data_min, data_max
+
+
+def read_tmap_gif_frame_rows(map_path, expected_count, frame_indices, np):
+    wanted = set(frame_indices)
+    frame_rows = []
+    row_index = 0
+    line_number = 0
+
+    with map_path.open("rb") as stream:
+        while True:
+            raw_line, line_number = read_complete_data_line(stream, line_number, follow=False)
+
+            if raw_line is None:
+                break
+
+            temperatures = parse_temperature_row(raw_line, expected_count, map_path, line_number, np)
+
+            if row_index in wanted:
+                frame_rows.append({"slot": row_index, "values": temperatures})
+
+            row_index += 1
+
+    if len(frame_rows) != len(frame_indices):
+        raise ValueError(
+            f"{map_path}: expected {len(frame_indices)} GIF frame row(s), got {len(frame_rows)}"
+        )
+
+    return frame_rows
+
+
+def prepare_tmap_gif_data(args, coords_path, map_path, np):
+    geometry = load_tmap_geometry_cells(coords_path)
+    row_count, data_min, data_max = read_tmap_gif_stats(
+        map_path,
+        geometry["cell_count"],
+        np,
+    )
+    frame_indices = frame_indices_for_rows(row_count, args.gif_stride)
+    frame_rows = read_tmap_gif_frame_rows(
+        map_path,
+        geometry["cell_count"],
+        frame_indices,
+        np,
+    )
+    vmin = args.vmin if args.vmin is not None else data_min
+    vmax = args.vmax if args.vmax is not None else data_max
+
+    if vmax <= vmin:
+        vmax = vmin + 1.0
+
+    return {
+        "geometry": geometry,
+        "row_count": row_count,
+        "frame_indices": frame_indices,
+        "frame_rows": frame_rows,
+        "data_min": data_min,
+        "data_max": data_max,
+        "vmin": vmin,
+        "vmax": vmax,
+    }
+
+
+def add_tmap_poly_collection(args, gif_data, np, plt, axis, Normalize):
+    from matplotlib.collections import PolyCollection
+
+    collection = PolyCollection(
+        tmap_geometry_vertices(gif_data["geometry"], np),
+        array=np.zeros(gif_data["geometry"]["cell_count"], dtype=np.float64),
+        cmap=plt.get_cmap(args.cmap),
+        norm=Normalize(vmin=gif_data["vmin"], vmax=gif_data["vmax"]),
+        edgecolors="none",
+        linewidths=0,
+        antialiased=False,
+        rasterized=True,
+    )
+    axis.add_collection(collection)
+    return collection
+
+
+def render_tmap_gif_map_layout(args, gif_data, modules, gif_path):
+    (
+        np,
+        plt,
+        FuncAnimation,
+        ImageMagickWriter,
+        PillowWriter,
+        PatchCollection,
+        Normalize,
+        Rectangle,
+    ) = modules
+
+    bounds = gif_data["geometry"]["bounds"]
+    figure_width = args.gif_width / args.gif_dpi
+    figure_height = max(4.0, figure_width * bounds["height"] / bounds["width"] * 0.82)
+    figure, axis = plt.subplots(
+        figsize=(figure_width, figure_height),
+        dpi=args.gif_dpi,
+        constrained_layout=True,
+    )
+    axis.set_aspect("equal", adjustable="box")
+    axis.set_xlim(bounds["minX"], bounds["maxX"])
+    axis.set_ylim(bounds["minY"], bounds["maxY"])
+    axis.set_xlabel("x")
+    axis.set_ylabel("y")
+
+    collection = add_tmap_poly_collection(args, gif_data, np, plt, axis, Normalize)
+    colorbar = figure.colorbar(collection, ax=axis, fraction=0.046, pad=0.04)
+    colorbar.set_label("Temperature (K)", fontsize=11)
+    colorbar.ax.tick_params(labelsize=9)
+    title = axis.set_title("")
+
+    def update(frame_row):
+        temperatures = frame_row["values"]
+        min_temp = float(temperatures.min())
+        max_temp = float(temperatures.max())
+        collection.set_array(temperatures)
+        title.set_text(
+            f"Slot {frame_row['slot'] + 1}/{gif_data['row_count']} | "
+            f"min {min_temp:.1f} K | max {max_temp:.1f} K"
+        )
+        return collection, title
+
+    update(gif_data["frame_rows"][0])
+    animation = FuncAnimation(
+        figure,
+        update,
+        frames=gif_data["frame_rows"],
+        interval=1000.0 / args.gif_fps,
+        blit=False,
+        repeat=True,
+        cache_frame_data=False,
+    )
+    return save_gif_with_fallback(
+        args,
+        plt,
+        figure,
+        animation,
+        gif_path,
+        ImageMagickWriter,
+        PillowWriter,
+    )
+
+
+def render_tmap_gif_interface_layout(args, coords_path, map_path, gif_data, modules, gif_path):
+    (
+        np,
+        plt,
+        FuncAnimation,
+        ImageMagickWriter,
+        PillowWriter,
+        PatchCollection,
+        Normalize,
+        Rectangle,
+    ) = modules
+
+    geometry = gif_data["geometry"]
+    bounds = geometry["bounds"]
+    cells = geometry["cells"]
+    cmap = plt.get_cmap(args.cmap)
+    norm = Normalize(vmin=gif_data["vmin"], vmax=gif_data["vmax"])
+
+    figure_width = args.gif_width / args.gif_dpi
+    figure_height = max(4.8, figure_width * 0.62)
+    figure = plt.figure(figsize=(figure_width, figure_height), dpi=args.gif_dpi)
+    figure.patch.set_facecolor("#ffffff")
+
+    short_map_path = shorten_text(str(map_path), 120)
+    figure.text(
+        0.045,
+        0.965,
+        "3D-ICE Tmap",
+        color="#17202a",
+        fontsize=16,
+        fontweight="semibold",
+        va="top",
+    )
+    figure.text(
+        0.045,
+        0.930,
+        f"Animated full Tmap dashboard from {short_map_path}",
+        color="#5c6773",
+        fontsize=8.5,
+        va="top",
+    )
+
+    card_y = 0.815
+    card_h = 0.086
+    card_gap = 0.012
+    card_x = 0.045
+    card_total_w = 0.910
+    card_w = (card_total_w - 3 * card_gap) / 4.0
+    loaded_slots_text = add_metric_card(
+        figure,
+        card_x,
+        card_y,
+        card_w,
+        card_h,
+        "Loaded Slots",
+        str(gif_data["row_count"]),
+    )
+    slot_metric_text = add_metric_card(
+        figure,
+        card_x + (card_w + card_gap),
+        card_y,
+        card_w,
+        card_h,
+        "Displayed Slot",
+        "n/a",
+    )
+    min_metric_text = add_metric_card(
+        figure,
+        card_x + 2 * (card_w + card_gap),
+        card_y,
+        card_w,
+        card_h,
+        "Minimum",
+        "n/a",
+    )
+    max_metric_text = add_metric_card(
+        figure,
+        card_x + 3 * (card_w + card_gap),
+        card_y,
+        card_w,
+        card_h,
+        "Maximum",
+        "n/a",
+    )
+
+    add_figure_panel(figure, 0.045, 0.115, 0.665, 0.665, facecolor="#ffffff")
+    add_figure_panel(figure, 0.735, 0.115, 0.220, 0.665, facecolor="#f7f9fc")
+
+    map_axis = figure.add_axes([0.065, 0.250, 0.625, 0.485], zorder=2)
+    map_axis.set_aspect("equal", adjustable="box")
+    map_axis.set_xlim(bounds["minX"], bounds["maxX"])
+    map_axis.set_ylim(bounds["minY"], bounds["maxY"])
+    map_axis.set_xticks([])
+    map_axis.set_yticks([])
+    map_axis.set_facecolor("#fbfcfe")
+    for spine in map_axis.spines.values():
+        spine.set_edgecolor("#d8dee7")
+        spine.set_linewidth(0.8)
+
+    collection = add_tmap_poly_collection(args, gif_data, np, plt, map_axis, Normalize)
+    collection.set_cmap(cmap)
+    collection.set_norm(norm)
+
+    colorbar_axis = figure.add_axes([0.065, 0.165, 0.625, 0.030], zorder=2)
+    gradient = np.linspace(gif_data["vmin"], gif_data["vmax"], 512, dtype=np.float64).reshape(1, -1)
+    colorbar_axis.imshow(
+        gradient,
+        aspect="auto",
+        cmap=cmap,
+        norm=norm,
+        extent=(gif_data["vmin"], gif_data["vmax"], 0.0, 1.0),
+    )
+    colorbar_axis.set_yticks([])
+    figure.text(
+        0.065,
+        0.209,
+        "Temperature (K)",
+        color="#17202a",
+        fontsize=10,
+        fontweight="semibold",
+        ha="left",
+        va="bottom",
+        zorder=4,
+    )
+    ticks = colorbar_tick_values(gif_data["vmin"], gif_data["vmax"])
+    colorbar_axis.set_xticks(ticks)
+    colorbar_axis.set_xticklabels([f"{tick:.4g} K" for tick in ticks], fontsize=8.5)
+    colorbar_axis.tick_params(axis="x", length=0, pad=3, colors="#5c6773")
+    for spine in colorbar_axis.spines.values():
+        spine.set_edgecolor("#d8dee7")
+        spine.set_linewidth(0.8)
+
+    side_axis = figure.add_axes([0.735, 0.115, 0.220, 0.665], zorder=2)
+    side_axis.set_xlim(0.0, 1.0)
+    side_axis.set_ylim(0.0, 1.0)
+    side_axis.axis("off")
+
+    side_axis.add_patch(
+        Rectangle((0.065, 0.905), 0.235, 0.058, facecolor="#ffffff", edgecolor="#9aa6b2", linewidth=0.8)
+    )
+    side_axis.text(0.182, 0.934, "Play", color="#17202a", fontsize=8.5, ha="center", va="center")
+    side_axis.add_patch(
+        Rectangle((0.065, 0.835), 0.870, 0.030, facecolor="#d8dee7", edgecolor="#c9d2dc", linewidth=0.5)
+    )
+    progress_fill = Rectangle((0.065, 0.835), 0.0, 0.030, facecolor="#3478f6", edgecolor="none")
+    side_axis.add_patch(progress_fill)
+    slot_text = side_axis.text(
+        0.065,
+        0.790,
+        "",
+        color="#5c6773",
+        fontsize=8.8,
+        ha="left",
+        va="top",
+        wrap=True,
+    )
+
+    side_axis.add_patch(
+        Rectangle((0.065, 0.600), 0.870, 0.145, facecolor="#ffffff", edgecolor="#d8dee7", linewidth=0.8)
+    )
+    selected_text = side_axis.text(
+        0.090,
+        0.720,
+        "",
+        color="#17202a",
+        fontsize=8.8,
+        ha="left",
+        va="top",
+        linespacing=1.35,
+        wrap=True,
+    )
+    side_axis.text(
+        0.065,
+        0.535,
+        "Hottest cells",
+        color="#17202a",
+        fontsize=10.0,
+        fontweight="semibold",
+        ha="left",
+        va="top",
+    )
+    hotspot_texts = [
+        side_axis.text(
+            0.075,
+            0.490 - index * 0.060,
+            "",
+            color="#17202a",
+            fontsize=8.8,
+            ha="left",
+            va="top",
+        )
+        for index in range(6)
+    ]
+
+    def update(frame_row):
+        temperatures = frame_row["values"]
+        min_temp = float(temperatures.min())
+        max_temp = float(temperatures.max())
+        collection.set_array(temperatures)
+
+        display_slot = frame_row["slot"] + 1
+        slot_metric_text.set_text(str(display_slot))
+        min_metric_text.set_text(format_gif_temp(min_temp))
+        max_metric_text.set_text(format_gif_temp(max_temp))
+        progress = 1.0 if gif_data["row_count"] <= 1 else frame_row["slot"] / (gif_data["row_count"] - 1)
+        progress_fill.set_width(0.870 * progress)
+        slot_text.set_text(f"Slot {display_slot} / {gif_data['row_count']} | cells {geometry['cell_count']}")
+
+        hottest_indices = np.argsort(temperatures)[::-1][:6]
+        hottest_index = int(hottest_indices[0])
+        x, y, width, height = cells[hottest_index]
+        selected_text.set_text(
+            f"Cell {hottest_index + 1} / {geometry['cell_count']}\n"
+            f"Temperature: {format_gif_temp(float(temperatures[hottest_index]))}\n"
+            f"Position: {x:.3g}, {y:.3g}\n"
+            f"Size: {width:.3g} x {height:.3g}"
+        )
+        for rank, text in enumerate(hotspot_texts):
+            if rank >= len(hottest_indices):
+                text.set_text("")
+                continue
+            index = int(hottest_indices[rank])
+            cell_x, cell_y, _, _ = cells[index]
+            text.set_text(
+                f"{rank + 1}. Cell {index + 1}: {format_gif_temp(float(temperatures[index]))} "
+                f"({cell_x:.3g}, {cell_y:.3g})"
+            )
+
+        return (
+            collection,
+            loaded_slots_text,
+            slot_metric_text,
+            min_metric_text,
+            max_metric_text,
+            progress_fill,
+            slot_text,
+            selected_text,
+            *hotspot_texts,
+        )
+
+    update(gif_data["frame_rows"][0])
+    animation = FuncAnimation(
+        figure,
+        update,
+        frames=gif_data["frame_rows"],
+        interval=1000.0 / args.gif_fps,
+        blit=False,
+        repeat=True,
+        cache_frame_data=False,
+    )
+    return save_gif_with_fallback(
+        args,
+        plt,
+        figure,
+        animation,
+        gif_path,
+        ImageMagickWriter,
+        PillowWriter,
+    )
+
+
+def render_tmap_gif_once(args, coords_path, map_path, gif_path):
+    validate_gif_args(args)
+
+    modules = load_gif_modules()
+    np = modules[0]
+    gif_data = prepare_tmap_gif_data(args, coords_path, map_path, np)
+
+    if args.gif_layout == "map":
+        writer_name, width_px, height_px = render_tmap_gif_map_layout(args, gif_data, modules, gif_path)
+    else:
+        writer_name, width_px, height_px = render_tmap_gif_interface_layout(
+            args,
+            coords_path,
+            map_path,
+            gif_data,
+            modules,
+            gif_path,
+        )
+
+    if not args.quiet:
+        print(
+            f"Wrote {gif_path} with {len(gif_data['frame_rows'])} frame(s) from {gif_data['row_count']} row(s) "
+            f"and {gif_data['geometry']['cell_count']} cell(s) at {width_px}x{height_px}px, "
+            f"{args.gif_fps:g} fps using {writer_name} ({args.gif_layout} layout)",
+            flush=True,
+        )
+
+    return len(gif_data["frame_rows"])
+
+def load_optional_floorplan_regions(coords_path):
+    floorplan_path = coords_path.parent / "floorplan_nopower.flp"
+
+    if not floorplan_path.exists():
+        return []
+
+    return load_floorplan_regions(floorplan_path)
+
+
+def build_tmap_html_dashboard(
+    args,
+    coords_path,
+    map_path,
+    html_path,
+    geometry,
+    slots,
+    row_count,
+    data_min,
+    data_max,
+    refresh_seconds,
+):
+    floorplan_regions = load_optional_floorplan_regions(coords_path)
+
+    if data_min is None or data_max is None:
+        data_min = args.vmin if args.vmin is not None else 300.0
+        data_max = args.vmax if args.vmax is not None else data_min + 1.0
+
+    vmin = args.vmin if args.vmin is not None else data_min
+    vmax = args.vmax if args.vmax is not None else data_max
+
+    if vmax <= vmin:
+        vmax = vmin + 1.0
+
+    slot_index = slots[-1]["slot"] if slots else -1
+    generated_at = time.strftime("%Y-%m-%d %H:%M:%S")
+    payload = {
+        "generatedAt": generated_at,
+        "coordsPath": str(coords_path),
+        "mapPath": str(map_path),
+        "htmlPath": str(html_path),
+        "cells": geometry["cells"],
+        "floorplanRegions": floorplan_regions,
+        "bounds": geometry["bounds"],
+        "slots": slots,
+        "slotIndex": slot_index,
+        "rowCount": row_count,
+        "vmin": vmin,
+        "vmax": vmax,
+        "dataMin": data_min,
+        "dataMax": data_max,
+        "cmap": args.cmap,
+        "turboStops": TURBO_STOPS,
+    }
+    payload_json = json.dumps(payload, separators=(",", ":"))
+    refresh_tag = ""
+
+    if refresh_seconds and refresh_seconds > 0.0:
+        refresh_tag = f'<meta http-equiv="refresh" content="{html.escape(html_number(refresh_seconds))}">'
+
+    template = """<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+__REFRESH_TAG__
+<title>3D-ICE Tmap</title>
+<style>
+:root { color-scheme: light; --ink: #17202a; --muted: #5c6773; --line: #d8dee7; --panel: #f7f9fc; }
+* { box-sizing: border-box; }
+body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; color: var(--ink); background: #ffffff; }
+main { max-width: 1280px; margin: 0 auto; padding: 20px; }
+h1 { margin: 0 0 6px; font-size: 22px; font-weight: 650; }
+.meta { color: var(--muted); font-size: 13px; line-height: 1.5; overflow-wrap: anywhere; }
+.summary { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; margin: 14px 0; }
+.metric { border: 1px solid var(--line); border-radius: 6px; padding: 10px; background: var(--panel); }
+.metric strong { display: block; font-size: 20px; margin-top: 4px; }
+.map-wrap { border: 1px solid var(--line); border-radius: 6px; padding: 10px; background: #fff; min-width: 0; }
+.slot-controls { display: grid; gap: 8px; margin: 0 0 10px; padding: 10px; border: 1px solid var(--line); border-radius: 6px; background: var(--panel); }
+.slot-control-row { display: grid; grid-template-columns: auto minmax(0, 1fr) auto auto; gap: 8px; align-items: center; }
+button { border: 1px solid #9aa6b2; border-radius: 5px; background: #fff; padding: 7px 10px; cursor: pointer; white-space: nowrap; }
+button:hover:not(:disabled) { background: #eef3f8; }
+button:disabled { opacity: 0.52; cursor: not-allowed; }
+#slotSlider { width: 100%; margin: 0; }
+.slot-status { color: var(--muted); font-size: 14px; line-height: 1.4; overflow-wrap: anywhere; }
+canvas { width: 100%; height: auto; display: block; background: #fbfcfe; }
+.map-legend { margin-top: 10px; }
+.legend-title { margin-bottom: 6px; color: var(--ink); font-size: 14px; font-weight: 650; }
+.legend-bar { height: 16px; border-radius: 3px; background: __TURBO_GRADIENT__; border: 1px solid var(--line); }
+.legend-labels { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: 4px; margin-top: 5px; font-size: 13px; color: var(--muted); }
+.legend-labels span { text-align: center; white-space: nowrap; }
+.legend-labels span:first-child { text-align: left; }
+.legend-labels span:last-child { text-align: right; }
+#tooltip { margin-top: 10px; min-height: 42px; font-size: 15px; line-height: 1.45; color: var(--muted); overflow-wrap: anywhere; }
+@media (max-width: 860px) { .summary { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+@media (max-width: 680px) { .slot-control-row { grid-template-columns: repeat(3, minmax(0, 1fr)); } #slotSlider { grid-column: 1 / -1; grid-row: 1; } }
+</style>
+</head>
+<body>
+<main>
+<header>
+  <h1>3D-ICE Tmap</h1>
+  <div class="meta">Generated __GENERATED_AT__ from <code>__MAP_PATH__</code></div>
+</header>
+<section class="summary">
+  <div class="metric">Loaded Slots<strong id="rowCount">0</strong></div>
+  <div class="metric">Displayed Slot<strong id="slotMetric">n/a</strong></div>
+  <div class="metric">Minimum<strong id="minMetric">n/a</strong></div>
+  <div class="metric">Maximum<strong id="maxMetric">n/a</strong></div>
+</section>
+<section class="map-wrap">
+  <div class="slot-controls" aria-label="Tmap slot controls">
+    <div class="slot-control-row">
+      <button id="prevSlot" type="button">Previous</button>
+      <input id="slotSlider" type="range" min="1" max="1" value="1" step="1" aria-label="Displayed slot">
+      <button id="nextSlot" type="button">Next</button>
+      <button id="latestSlot" type="button">Latest</button>
+    </div>
+    <div class="slot-status" id="slotStatus">No slots loaded</div>
+  </div>
+  <canvas id="mapCanvas"></canvas>
+  __COLORBAR_HTML__
+  <div id="tooltip">Move over the map to inspect cell coordinates and temperature.</div>
+</section>
+</main>
+<script id="temperature-data" type="application/json">__PAYLOAD_JSON__</script>
+<script>
+const data = JSON.parse(document.getElementById('temperature-data').textContent);
+const slots = Array.isArray(data.slots) ? data.slots : [];
+const canvas = document.getElementById('mapCanvas');
+const ctx = canvas.getContext('2d');
+const rowCount = document.getElementById('rowCount');
+const slotMetric = document.getElementById('slotMetric');
+const minMetric = document.getElementById('minMetric');
+const maxMetric = document.getElementById('maxMetric');
+const tooltip = document.getElementById('tooltip');
+const slotSlider = document.getElementById('slotSlider');
+const prevSlot = document.getElementById('prevSlot');
+const nextSlot = document.getElementById('nextSlot');
+const latestSlot = document.getElementById('latestSlot');
+const slotStatus = document.getElementById('slotStatus');
+const storageKey = `3dice-tmap-html:${data.mapPath}`;
+let cssWidth = 0;
+let cssHeight = 0;
+let selectedIndex = slots.length ? slots.length - 1 : -1;
+let followingLatest = true;
+
+function fmt(value, digits = 1) {
+  if (!Number.isFinite(value)) return 'n/a';
+  return value.toFixed(digits);
+}
+
+function clampIndex(index) {
+  if (!slots.length) return -1;
+  return Math.max(0, Math.min(slots.length - 1, index));
+}
+
+function slotNumberAt(index) {
+  if (index < 0 || index >= slots.length) return null;
+  return slots[index].slot + 1;
+}
+
+function indexForSlotNumber(slotNumber) {
+  if (!slots.length || !Number.isFinite(slotNumber)) return -1;
+  const found = slots.findIndex(slot => slot.slot + 1 === slotNumber);
+  if (found >= 0) return found;
+  return clampIndex(slotNumber - 1);
+}
+
+function parseViewerState(value) {
+  if (!value) return null;
+  try {
+    const parsed = JSON.parse(value);
+    if (parsed && parsed.mode === 'slot' && Number.isFinite(parsed.slotNumber)) {
+      return { mode: 'slot', slotNumber: parsed.slotNumber };
+    }
+    if (parsed && parsed.mode === 'latest') return { mode: 'latest' };
+  } catch (_) {
+    return null;
+  }
+  return null;
+}
+
+function readHashState() {
+  const raw = window.location.hash.replace(/^#/, '');
+  if (!raw) return null;
+  const params = new URLSearchParams(raw);
+  const mode = params.get('mode');
+  const slotNumber = Number.parseInt(params.get('slot'), 10);
+  if (mode === 'slot' && Number.isFinite(slotNumber)) return { mode: 'slot', slotNumber };
+  if (mode === 'latest') return { mode: 'latest' };
+  return null;
+}
+
+function readStoredState() {
+  try {
+    return parseViewerState(window.localStorage.getItem(storageKey));
+  } catch (_) {
+    return null;
+  }
+}
+
+function saveViewerState() {
+  const slotNumber = slotNumberAt(selectedIndex);
+  const state = followingLatest ? { mode: 'latest' } : { mode: 'slot', slotNumber };
+  try {
+    window.localStorage.setItem(storageKey, JSON.stringify(state));
+  } catch (_) {}
+  try {
+    const params = new URLSearchParams();
+    params.set('mode', state.mode);
+    if (state.mode === 'slot' && slotNumber !== null) params.set('slot', String(slotNumber));
+    window.history.replaceState(null, '', `#${params.toString()}`);
+  } catch (_) {}
+}
+
+function applyInitialState() {
+  const state = readHashState() || readStoredState();
+  if (state && state.mode === 'slot') {
+    selectedIndex = indexForSlotNumber(state.slotNumber);
+    followingLatest = false;
+  } else {
+    selectedIndex = slots.length ? slots.length - 1 : -1;
+    followingLatest = true;
+  }
+}
+
+function currentSlot() {
+  if (selectedIndex < 0 || selectedIndex >= slots.length) return null;
+  return slots[selectedIndex];
+}
+
+function currentValues() {
+  const slot = currentSlot();
+  return slot ? slot.values : [];
+}
+
+function currentMinMax(values) {
+  if (!values.length) return [NaN, NaN];
+  let minValue = values[0];
+  let maxValue = values[0];
+  for (const value of values) {
+    if (value < minValue) minValue = value;
+    if (value > maxValue) maxValue = value;
+  }
+  return [minValue, maxValue];
+}
+
+function colorFor(value) {
+  const t = Math.max(0, Math.min(1, (value - data.vmin) / (data.vmax - data.vmin)));
+  const stops = data.turboStops;
+  const scaled = t * (stops.length - 1);
+  const i = Math.min(stops.length - 2, Math.floor(scaled));
+  const f = scaled - i;
+  const a = stops[i];
+  const b = stops[i + 1];
+  const r = Math.round(a[0] + (b[0] - a[0]) * f);
+  const g = Math.round(a[1] + (b[1] - a[1]) * f);
+  const bl = Math.round(a[2] + (b[2] - a[2]) * f);
+  return `rgb(${r},${g},${bl})`;
+}
+
+function mapX(x) {
+  return (x - data.bounds.minX) * cssWidth / data.bounds.width;
+}
+
+function mapY(y, height) {
+  return cssHeight - ((y + height - data.bounds.minY) * cssHeight / data.bounds.height);
+}
+
+function drawFloorplanOutlines() {
+  if (!data.floorplanRegions || !data.floorplanRegions.length) return;
+  ctx.save();
+  ctx.strokeStyle = 'rgba(17, 24, 39, 0.82)';
+  ctx.lineWidth = 1.25;
+  data.floorplanRegions.forEach(region => {
+    const x = mapX(region.x);
+    const y = mapY(region.y, region.height);
+    const w = region.width * cssWidth / data.bounds.width;
+    const h = region.height * cssHeight / data.bounds.height;
+    ctx.strokeRect(x, y, w, h);
+  });
+  ctx.restore();
+}
+
+function drawMap() {
+  ctx.clearRect(0, 0, cssWidth, cssHeight);
+  const values = currentValues();
+  if (!values.length) return;
+  for (let index = 0; index < data.cells.length && index < values.length; index += 1) {
+    const cell = data.cells[index];
+    const x = mapX(cell[0]);
+    const y = mapY(cell[1], cell[3]);
+    const w = Math.max(0.5, cell[2] * cssWidth / data.bounds.width);
+    const h = Math.max(0.5, cell[3] * cssHeight / data.bounds.height);
+    ctx.fillStyle = colorFor(values[index]);
+    ctx.fillRect(x - 0.5, y - 0.5, w + 1.0, h + 1.0);
+  }
+  drawFloorplanOutlines();
+}
+
+function resizeCanvas() {
+  const dpr = window.devicePixelRatio || 1;
+  cssWidth = Math.max(320, canvas.parentElement.clientWidth - 20);
+  cssHeight = Math.max(240, cssWidth * data.bounds.height / data.bounds.width);
+  canvas.style.width = `${cssWidth}px`;
+  canvas.style.height = `${cssHeight}px`;
+  canvas.width = Math.round(cssWidth * dpr);
+  canvas.height = Math.round(cssHeight * dpr);
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  drawMap();
+}
+
+function setDefaultTooltip() {
+  tooltip.textContent = 'Move over the map to inspect cell coordinates and temperature.';
+}
+
+function updateMetrics() {
+  const slot = currentSlot();
+  const values = currentValues();
+  const [slotMin, slotMax] = currentMinMax(values);
+  rowCount.textContent = String(data.rowCount);
+  slotMetric.textContent = slot ? String(slot.slot + 1) : 'n/a';
+  minMetric.textContent = `${fmt(slotMin)} K`;
+  maxMetric.textContent = `${fmt(slotMax)} K`;
+
+  slotSlider.disabled = slots.length === 0;
+  prevSlot.disabled = selectedIndex <= 0;
+  nextSlot.disabled = selectedIndex < 0 || selectedIndex >= slots.length - 1;
+  latestSlot.disabled = slots.length === 0 || (followingLatest && selectedIndex === slots.length - 1);
+  slotSlider.max = String(Math.max(1, slots.length));
+  slotSlider.value = String(Math.max(1, selectedIndex + 1));
+
+  if (!slot) {
+    slotStatus.textContent = 'No complete Tmap slots loaded yet.';
+    return;
+  }
+
+  const modeText = followingLatest ? 'following latest' : 'manual selection';
+  slotStatus.textContent = `Slot ${slot.slot + 1} of ${data.rowCount} (${selectedIndex + 1}/${slots.length} loaded), ${modeText}`;
+}
+
+function updateView() {
+  updateMetrics();
+  setDefaultTooltip();
+  drawMap();
+}
+
+function setSelectedIndex(index, followLatest, persist) {
+  selectedIndex = clampIndex(index);
+  followingLatest = followLatest;
+  if (persist) saveViewerState();
+  updateView();
+}
+
+function inspectCell(event) {
+  const values = currentValues();
+  if (!values.length) return;
+  const rect = canvas.getBoundingClientRect();
+  const px = (event.clientX - rect.left) * cssWidth / rect.width;
+  const py = (event.clientY - rect.top) * cssHeight / rect.height;
+  const physicalX = data.bounds.minX + px * data.bounds.width / cssWidth;
+  const physicalY = data.bounds.minY + (cssHeight - py) * data.bounds.height / cssHeight;
+  let bestIndex = -1;
+  for (let index = 0; index < data.cells.length; index += 1) {
+    const cell = data.cells[index];
+    if (physicalX >= cell[0] && physicalX <= cell[0] + cell[2] && physicalY >= cell[1] && physicalY <= cell[1] + cell[3]) {
+      bestIndex = index;
+      break;
+    }
+  }
+  if (bestIndex < 0) return;
+  const cell = data.cells[bestIndex];
+  tooltip.innerHTML = `Cell ${bestIndex + 1} / ${data.cells.length} | Temperature: <strong>${fmt(values[bestIndex])} K</strong><br>Position: ${fmt(cell[0], 1)}, ${fmt(cell[1], 1)} | Size: ${fmt(cell[2], 1)} x ${fmt(cell[3], 1)}`;
+}
+
+applyInitialState();
+updateMetrics();
+resizeCanvas();
+slotSlider.addEventListener('input', () => setSelectedIndex(Number.parseInt(slotSlider.value, 10) - 1, false, true));
+prevSlot.addEventListener('click', () => setSelectedIndex(selectedIndex - 1, false, true));
+nextSlot.addEventListener('click', () => setSelectedIndex(selectedIndex + 1, false, true));
+latestSlot.addEventListener('click', () => setSelectedIndex(slots.length - 1, true, true));
+canvas.addEventListener('mousemove', inspectCell);
+window.addEventListener('resize', resizeCanvas);
+</script>
+</body>
+</html>
+"""
+    return (
+        template.replace("__REFRESH_TAG__", refresh_tag)
+        .replace("__TURBO_GRADIENT__", turbo_gradient_css())
+        .replace("__GENERATED_AT__", html.escape(generated_at))
+        .replace("__MAP_PATH__", html.escape(str(map_path)))
+        .replace("__COLORBAR_HTML__", colorbar_html(vmin, vmax))
+        .replace("__PAYLOAD_JSON__", payload_json)
+    )
+
+
+def render_tmap_html_once(args, coords_path, map_path, html_path, refresh_seconds=0.0, allow_empty=False):
+    geometry = load_tmap_geometry_cells(coords_path)
+
+    if map_path.exists():
+        slots, row_count, data_min, data_max = read_existing_tmap_slots(map_path, geometry["cell_count"])
+    else:
+        slots, row_count, data_min, data_max = [], 0, None, None
+
+    if not slots:
+        if not allow_empty:
+            raise ValueError(f"{map_path}: no complete Tmap rows found")
+        if not args.quiet:
+            if html_path.exists():
+                print(f"No complete Tmap slots found in {map_path}; keeping existing {html_path}", flush=True)
+            else:
+                print(f"Waiting for complete Tmap slots in {map_path} before writing {html_path} ...", flush=True)
+        return 0
+
+    dashboard = build_tmap_html_dashboard(
+        args,
+        coords_path,
+        map_path,
+        html_path,
+        geometry,
+        slots,
+        row_count,
+        data_min,
+        data_max,
+        refresh_seconds,
+    )
+    write_text_atomic(html_path, dashboard)
+
+    if not args.quiet:
+        latest_slot = slots[-1]["slot"] + 1 if slots else "n/a"
+        print(f"Wrote {html_path} with {len(slots)} Tmap slot(s), latest slot {latest_slot}", flush=True)
+
+    return row_count
+
+
+def render_tmap_html_follow(args, coords_path, map_path, html_path):
+    wait_for_path(coords_path, args)
+    last_signature = None
+    refresh_seconds = args.html_refresh if args.html_refresh is not None else args.poll
+
+    while True:
+        if map_path.exists():
+            stat = map_path.stat()
+            signature = (stat.st_size, stat.st_mtime_ns)
+
+            if signature != last_signature:
+                render_tmap_html_once(
+                    args,
+                    coords_path,
+                    map_path,
+                    html_path,
+                    refresh_seconds=refresh_seconds,
+                    allow_empty=True,
+                )
+                last_signature = signature
+        elif not args.quiet:
+            print(f"Waiting for {map_path} ...", flush=True)
+
+        time.sleep(args.poll)
 
 def wait_for_path(path, args):
     printed = False
@@ -882,60 +2334,62 @@ def render_html_follow(args, floorplan_path, tflp_path, html_path):
 
 
 def run_tmap_mode(args):
-    np, plt, PolyCollection = load_plotting_modules(args.backend)
-
     coords_path = Path(args.coords)
     map_path = Path(args.map)
-
-    geometry = load_geometry(coords_path, np)
-
-    if not args.quiet:
-        declared = ""
-
-        if geometry["declared_nrows"] is not None:
-            declared = (
-                f" (header nrows={geometry['declared_nrows']}, "
-                f"ncolumns={geometry['declared_ncolumns']})"
-            )
-
-        print(f"Loaded {geometry['cell_count']} geometry cells{declared}", flush=True)
-
-    figure, axis, collection, colorbar = create_figure(args, geometry, np, plt, PolyCollection)
-    plt.show(block=False)
-
-    if args.once:
-        render_once(args, map_path, geometry, np, plt, figure, axis, collection, colorbar)
-    else:
-        render_follow(args, map_path, geometry, np, plt, figure, axis, collection, colorbar)
-
-
-def run_html_mode(args):
-    floorplan_path = Path(args.floorplan)
-    tflp_path = Path(args.tflp)
-    html_path = Path(args.html)
 
     if args.html_refresh is not None and args.html_refresh < 0.0:
         raise ValueError("--html-refresh must be non-negative")
 
-    if args.once:
-        render_html_once(args, floorplan_path, tflp_path, html_path)
-    else:
+    if args.follow:
+        if args.gif is not None:
+            raise ValueError("--gif is an offline export; use --once for GIF output")
+        render_tmap_html_follow(args, coords_path, map_path, Path(args.html))
+        return
+
+    if args.html is not None:
+        render_tmap_html_once(args, coords_path, map_path, Path(args.html))
+
+    if args.gif is not None:
+        render_tmap_gif_once(args, coords_path, map_path, Path(args.gif))
+
+
+def run_floorplan_mode(args):
+    floorplan_path = Path(args.floorplan)
+    tflp_path = Path(args.tflp)
+
+    if args.html_refresh is not None and args.html_refresh < 0.0:
+        raise ValueError("--html-refresh must be non-negative")
+
+    if args.follow:
+        if args.gif is not None:
+            raise ValueError("--gif is an offline export; use --once for GIF output")
+        html_path = Path(args.html)
         render_html_follow(args, floorplan_path, tflp_path, html_path)
+        return
+
+    if args.html is not None:
+        render_html_once(args, floorplan_path, tflp_path, Path(args.html))
+
+    if args.gif is not None:
+        render_gif_once(args, floorplan_path, tflp_path, Path(args.gif))
 
 
 def main():
     args = parse_args()
-
-    if not args.follow and not args.once:
-        args.follow = True
 
     if args.poll <= 0.0:
         raise ValueError("--poll must be positive")
 
     mode = validate_mode_args(args)
 
-    if mode == "html":
-        run_html_mode(args)
+    if not args.follow and not args.once:
+        if args.gif is not None:
+            args.once = True
+        else:
+            args.follow = True
+
+    if mode == "floorplan":
+        run_floorplan_mode(args)
     else:
         run_tmap_mode(args)
 

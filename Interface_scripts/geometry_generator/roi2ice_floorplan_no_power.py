@@ -22,8 +22,6 @@ import argparse
 import importlib.util
 import json
 import math
-import subprocess
-import re
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 WORK_DIR = os.path.abspath(os.path.join(SCRIPT_DIR, "..", ".."))
@@ -31,6 +29,14 @@ SOFTHIER_DIR = os.path.join(WORK_DIR, "SoftHier")
 DEFAULT_ARCH_FILE = os.path.join(SOFTHIER_DIR, "soft_hier", "flex_cluster", "flex_cluster_arch.py")
 DEFAULT_GEO_FILE = os.path.join(SOFTHIER_DIR, "geo.json")
 DEFAULT_OUTPUT_DIR = SOFTHIER_DIR
+DEFAULT_TARGET_TOP_DIE_CELLS = 256 * 256
+
+
+def positive_int(value):
+    parsed = int(value)
+    if parsed <= 0:
+        raise argparse.ArgumentTypeError("value must be a positive integer")
+    return parsed
 
 ## Change the roi accroding to the needed granularity.
 def gen_roi(arch):
@@ -41,35 +47,116 @@ def gen_roi(arch):
         roi_list.append(f"chip/cluster_{i}/tcdm")
     return roi_list
 
-def ice_template(name, position, dimension):
+def ice_template(name, position, dimension, discretization):
     return f"""{name} : 
 
     position {position[0]}, {position[1]}; 
     dimension {dimension[0]}, {dimension[1]}; 
-    discretization  {round(dimension[0] / 10)}, {round(dimension[1] / 10)} ; 
+    discretization  {discretization[0]}, {discretization[1]} ;
 """
 
-def roi2ice(geometry, roi, output_file):
+
+def get_roi_entry(geometry, entry):
+    path = entry.split("/")
+    geo = geometry
+    position = [0, 0]
+
+    for index, name in enumerate(path):
+        if index == len(path) - 1:
+            leaf = geo[name]
+            dimension = leaf["shape"]
+            position[0] += leaf["offset"][0]
+            position[1] += leaf["offset"][1]
+            return {
+                "name": entry.replace("/", "__"),
+                "position": position,
+                "dimension": dimension,
+            }
+
+        node = geo[name]
+        position[0] += node["offset"][0]
+        position[1] += node["offset"][1]
+        geo = node["subs"]
+
+    raise RuntimeError(f"Invalid ROI entry: {entry}")
+
+
+def discretization_for_pitch(dimension, pitch):
+    length, width = dimension
+    return max(1, round(length / pitch)), max(1, round(width / pitch))
+
+
+def total_discretized_cells(entries, pitch):
+    total = 0
+    for entry in entries:
+        discr_x, discr_y = discretization_for_pitch(entry["dimension"], pitch)
+        total += discr_x * discr_y
+    return total
+
+
+def choose_target_pitch(entries, target_cells):
+    total_area = sum(
+        entry["dimension"][0] * entry["dimension"][1]
+        for entry in entries
+    )
+
+    if total_area <= 0.0:
+        raise RuntimeError("ROI floorplan area must be positive")
+
+    base_pitch = math.sqrt(total_area / target_cells)
+    lower = base_pitch * 0.5
+    upper = base_pitch * 2.0
+    best_pitch = base_pitch
+    best_total = total_discretized_cells(entries, base_pitch)
+    best_error = abs(best_total - target_cells)
+
+    # The rounded per-element counts form plateaus; a dense deterministic scan is
+    # enough here and keeps the result stable across Python versions.
+    samples = 10001
+    for index in range(samples):
+        pitch = lower + (upper - lower) * index / (samples - 1)
+        total = total_discretized_cells(entries, pitch)
+        error = abs(total - target_cells)
+
+        if error < best_error or (error == best_error and pitch < best_pitch):
+            best_pitch = pitch
+            best_total = total
+            best_error = error
+
+            if best_error == 0:
+                break
+
+    return best_pitch, best_total
+
+
+def assign_discretization(entries, target_cells):
+    pitch, actual_cells = choose_target_pitch(entries, target_cells)
+
+    for entry in entries:
+        entry["discretization"] = discretization_for_pitch(entry["dimension"], pitch)
+
+    return actual_cells, pitch
+
+
+def roi2ice(geometry, roi, output_file, target_top_die_cells):
+    entries = [get_roi_entry(geometry, entry) for entry in roi]
+    actual_cells, pitch = assign_discretization(entries, target_top_die_cells)
+
     os.makedirs(os.path.dirname(output_file), exist_ok=True)
     with open(output_file, "w") as f:
-        for entry in roi:
-            entry_name = entry.replace("/", "__")
-            path=entry.split("/")
-            geo=geometry.copy()
-            position = [0, 0]
-            for i in range(len(path)):
-                if i == len(path) - 1:
-                    dimension = geo[path[i]]["shape"]
-                    position[0] += geo[path[i]]["offset"][0]
-                    position[1] += geo[path[i]]["offset"][1]
-                    ice_entry = ice_template(entry_name, position, dimension)
-                    f.write(ice_entry + "\n")
-                else:
-                    position[0] += geo[path[i]]["offset"][0]
-                    position[1] += geo[path[i]]["offset"][1]
-                    geo = geo[path[i]]["subs"]
-            pass
-    pass
+        for entry in entries:
+            ice_entry = ice_template(
+                entry["name"],
+                entry["position"],
+                entry["dimension"],
+                entry["discretization"],
+            )
+            f.write(ice_entry + "\n")
+
+    print(
+        "Generated floorplan TOP_DIE discretization: "
+        f"target {target_top_die_cells}, actual {actual_cells}, pitch {pitch:.6g}"
+    )
 
 def import_module_from_path(module_path):
     """
@@ -92,6 +179,12 @@ if __name__ == "__main__":
     parser.add_argument("arch_file",  nargs="?", default=DEFAULT_ARCH_FILE, help="Path to architecture configuration python file")
     parser.add_argument("geo_file",  nargs="?", default=DEFAULT_GEO_FILE, help="Path to geometry configuration python file")
     parser.add_argument("output_dir", nargs="?", default=DEFAULT_OUTPUT_DIR, help="Output directory for floorplan_nopower.flp")
+    parser.add_argument(
+        "--target-top-die-cells",
+        type=positive_int,
+        default=DEFAULT_TARGET_TOP_DIE_CELLS,
+        help="Approximate total non-uniform TOP_DIE cells to request in the floorplan discretization.",
+    )
     args = parser.parse_args()
     arch_file = args.arch_file
     geo_file = args.geo_file
@@ -122,4 +215,4 @@ if __name__ == "__main__":
 
     # Convert ROI to ICE format
     output_file = os.path.join(output_dir, "floorplan_nopower.flp")
-    roi2ice(geometry, roi, output_file)
+    roi2ice(geometry, roi, output_file, args.target_top_die_cells)

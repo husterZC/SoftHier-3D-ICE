@@ -35,6 +35,7 @@ DICE_RUN_MODE="${DICE_RUN_MODE:-local-server}"
 PWR_INTERVAL_PS="${PWR_INTERVAL_PS:-100000000}"
 ICE_SLOT_SECONDS="${ICE_SLOT_SECONDS:-}"
 ICE_STEP_SECONDS="${ICE_STEP_SECONDS:-}"
+ICE_TARGET_TOP_DIE_CELLS="${ICE_TARGET_TOP_DIE_CELLS:-65536}"
 OTHERS_POWER="${OTHERS_POWER:-0.0}"
 BUILD_SOFTHIER="${BUILD_SOFTHIER:-1}"
 BUILD_3DICE="${BUILD_3DICE:-1}"
@@ -44,6 +45,17 @@ SOFTHIER_LOG_TAIL_LINES="${SOFTHIER_LOG_TAIL_LINES:-5}"
 PYTHON="${PYTHON:-python3}"
 MAKE_CMD="${MAKE:-make}"
 AUTO_BOOTSTRAP="${AUTO_BOOTSTRAP:-0}"
+ICE_GENERATE_GIF="${ICE_GENERATE_GIF:-0}"
+ICE_GIF_FILE="${ICE_GIF_FILE:-$RUN_3DICE_DIR/temperature_map.gif}"
+ICE_GIF_STRIDE="${ICE_GIF_STRIDE:-1}"
+ICE_GIF_WIDTH="${ICE_GIF_WIDTH:-1600}"
+ICE_GIF_FPS="${ICE_GIF_FPS:-8}"
+ICE_GIF_WRITER="${ICE_GIF_WRITER:-auto}"
+if [[ -z "${ICE_GIF_PYTHON:-}" && -x "$ROOT_DIR/.venv_plot/bin/python" ]]; then
+    ICE_GIF_PYTHON="$ROOT_DIR/.venv_plot/bin/python"
+else
+    ICE_GIF_PYTHON="${ICE_GIF_PYTHON:-$PYTHON}"
+fi
 
 GEO_FILE="${GEO_FILE:-$GENERATED_DIR/geo.json}"
 ICE_FLOORPLAN_FILE="${ICE_FLOORPLAN_FILE:-$RUN_3DICE_GEN_DIR/floorplan_nopower.flp}"
@@ -84,10 +96,18 @@ Environment overrides:
   PWR_INTERVAL_PS=$PWR_INTERVAL_PS
   ICE_SLOT_SECONDS=$ICE_SLOT_SECONDS
   ICE_STEP_SECONDS=$ICE_STEP_SECONDS
+  ICE_TARGET_TOP_DIE_CELLS=$ICE_TARGET_TOP_DIE_CELLS
   OTHERS_POWER=$OTHERS_POWER
   BUILD_SOFTHIER=$BUILD_SOFTHIER
   BUILD_3DICE=$BUILD_3DICE
   SOFTHIER_LOG_TAIL_LINES=$SOFTHIER_LOG_TAIL_LINES
+  ICE_GENERATE_GIF=$ICE_GENERATE_GIF
+  ICE_GIF_FILE=$ICE_GIF_FILE
+  ICE_GIF_STRIDE=$ICE_GIF_STRIDE
+  ICE_GIF_WIDTH=$ICE_GIF_WIDTH
+  ICE_GIF_FPS=$ICE_GIF_FPS
+  ICE_GIF_WRITER=$ICE_GIF_WRITER
+  ICE_GIF_PYTHON=$ICE_GIF_PYTHON
 USAGE
 }
 
@@ -158,12 +178,52 @@ validate_softhier_log_tail_lines() {
         die "SOFTHIER_LOG_TAIL_LINES must be a non-negative integer"
 }
 
+validate_target_top_die_cells() {
+    nonnegative_integer "$ICE_TARGET_TOP_DIE_CELLS" ||
+        die "ICE_TARGET_TOP_DIE_CELLS must be a positive integer"
+    [[ "$ICE_TARGET_TOP_DIE_CELLS" != "0" ]] ||
+        die "ICE_TARGET_TOP_DIE_CELLS must be a positive integer"
+}
+
 validate_dice_run_mode() {
     case "$DICE_RUN_MODE" in
         local-server|client-server)
             ;;
         *)
             die "DICE_RUN_MODE must be local-server or client-server"
+            ;;
+    esac
+}
+
+positive_integer() {
+    [[ "$1" =~ ^[1-9][0-9]*$ ]]
+}
+
+positive_number() {
+    [[ "$1" =~ ^([0-9]+([.][0-9]*)?|[.][0-9]+)$ ]] && awk -v value="$1" 'BEGIN { exit !(value > 0) }'
+}
+
+validate_gif_settings() {
+    case "$ICE_GENERATE_GIF" in
+        0|1)
+            ;;
+        *)
+            die "ICE_GENERATE_GIF must be 0 or 1"
+            ;;
+    esac
+
+    positive_integer "$ICE_GIF_STRIDE" ||
+        die "ICE_GIF_STRIDE must be a positive integer"
+    positive_integer "$ICE_GIF_WIDTH" ||
+        die "ICE_GIF_WIDTH must be a positive integer"
+    positive_number "$ICE_GIF_FPS" ||
+        die "ICE_GIF_FPS must be a positive number"
+
+    case "$ICE_GIF_WRITER" in
+        auto|pillow|imagemagick)
+            ;;
+        *)
+            die "ICE_GIF_WRITER must be auto, pillow, or imagemagick"
             ;;
     esac
 }
@@ -209,6 +269,7 @@ reset_runtime_files() {
         "$LOG_DIR/3dice_client.log" \
         "$LOG_DIR/softhier.log" \
         "$LOG_DIR/adapter.log" \
+        "$LOG_DIR/tmap_gif.log" \
         "$PID_DIR/3dice_server.pid" \
         "$PID_DIR/3dice_client.pid" \
         "$PID_DIR/adapter.pid" \
@@ -217,9 +278,12 @@ reset_runtime_files() {
         "$RUN_3DICE_DIR/output_top_die_flp_avg.txt" \
         "$RUN_3DICE_DIR/output_top_die_flp_max.txt" \
         "$RUN_3DICE_DIR/output_top_die_flp_min.txt" \
+        "$RUN_3DICE_DIR/output_top_die.txt" \
+        "$RUN_3DICE_DIR/xyaxis_TOP_DIE.txt" \
         "$RUN_3DICE_DIR/output_top_die_map.txt" \
         "$RUN_3DICE_DIR/output_top_die_map.coords.txt" \
         "$RUN_3DICE_DIR/thermal_map.txt" \
+        "$ICE_GIF_FILE" \
         "$SUMMARY_FILE"
 }
 
@@ -262,6 +326,7 @@ generate_ice_inputs() {
         "--floorplan" "$ICE_FLOORPLAN_FILE"
         "--stk" "$ICE_STK_FILE"
         "--pwr-interval-ps" "$PWR_INTERVAL_PS"
+        "--target-top-die-cells" "$ICE_TARGET_TOP_DIE_CELLS"
     )
 
     if [[ -n "$ICE_SLOT_SECONDS" ]]; then
@@ -306,6 +371,7 @@ write_manifest() {
         kv PORT "$PORT"
         kv SERVER_HOST "$SERVER_HOST"
         kv DICE_RUN_MODE "$DICE_RUN_MODE"
+        kv ICE_TARGET_TOP_DIE_CELLS "$ICE_TARGET_TOP_DIE_CELLS"
         kv PWR_INTERVAL_PS "$PWR_INTERVAL_PS"
         kv ICE_SLOT_SECONDS "$ICE_SLOT_SECONDS"
         kv ICE_STEP_SECONDS "$ICE_STEP_SECONDS"
@@ -315,6 +381,13 @@ write_manifest() {
         kv BUILD_SOFTHIER "$BUILD_SOFTHIER"
         kv BUILD_3DICE "$BUILD_3DICE"
         kv SOFTHIER_LOG_TAIL_LINES "$SOFTHIER_LOG_TAIL_LINES"
+        kv ICE_GENERATE_GIF "$ICE_GENERATE_GIF"
+        kv ICE_GIF_FILE "$ICE_GIF_FILE"
+        kv ICE_GIF_STRIDE "$ICE_GIF_STRIDE"
+        kv ICE_GIF_WIDTH "$ICE_GIF_WIDTH"
+        kv ICE_GIF_FPS "$ICE_GIF_FPS"
+        kv ICE_GIF_WRITER "$ICE_GIF_WRITER"
+        kv ICE_GIF_PYTHON "$ICE_GIF_PYTHON"
         kv GEO_FILE "$GEO_FILE"
         kv ICE_FLOORPLAN_FILE "$ICE_FLOORPLAN_FILE"
         kv ICE_STK_FILE "$ICE_STK_FILE"
@@ -655,7 +728,7 @@ line_count() {
 thermal_row_count() {
     local path="$1"
     if [[ -f "$path" ]]; then
-        awk 'END { rows = NR - 2; if (rows < 0) rows = 0; print rows }' "$path"
+        awk 'NF && $1 !~ /^%/ { rows++ } END { print rows + 0 }' "$path"
     else
         printf '0'
     fi
@@ -664,10 +737,30 @@ thermal_row_count() {
 max_temperature() {
     local path="$1"
     if [[ -f "$path" ]]; then
-        awk 'FNR > 2 { for (i = 2; i <= NF; i++) if ($i + 0 > max) max = $i + 0 } END { if (max == "") print "n/a"; else printf "%.3f", max }' "$path"
+        awk 'NF && $1 !~ /^%/ { for (i = 1; i <= NF; i++) { value = $i + 0; if (!seen || value > max) { max = value; seen = 1 } } } END { if (!seen) print "n/a"; else printf "%.3f", max }' "$path"
     else
         printf 'n/a'
     fi
+}
+
+generate_temperature_gif() {
+    if [[ "$ICE_GENERATE_GIF" != "1" ]]; then
+        return 0
+    fi
+
+    log "Generating temperature dashboard GIF at $ICE_GIF_FILE"
+    mkdir -p "$(dirname "$ICE_GIF_FILE")"
+
+    "$ICE_GIF_PYTHON" "$ROOT_DIR/Interface_scripts/plot_runtime_temperature_map/plot_runtime_tmap.py" \
+        --coords "$RUN_3DICE_DIR/xyaxis_TOP_DIE.txt" \
+        --map "$RUN_3DICE_DIR/output_top_die.txt" \
+        --gif "$ICE_GIF_FILE" \
+        --once \
+        --gif-stride "$ICE_GIF_STRIDE" \
+        --gif-width "$ICE_GIF_WIDTH" \
+        --gif-fps "$ICE_GIF_FPS" \
+        --gif-writer "$ICE_GIF_WRITER" \
+        > "$LOG_DIR/tmap_gif.log" 2>&1
 }
 
 write_summary() {
@@ -675,7 +768,8 @@ write_summary() {
     local adapter_status="$2"
     local client_status="$3"
     local server_status="$4"
-    local thermal_file="$RUN_3DICE_DIR/output_top_die_flp_avg.txt"
+    local gif_status="$5"
+    local thermal_file="$RUN_3DICE_DIR/output_top_die.txt"
 
     {
         printf '%s\n' 'Run summary'
@@ -696,6 +790,7 @@ write_summary() {
         printf 'adapter: %s\n' "$adapter_status"
         printf '3dice_client: %s\n' "$client_status"
         printf '3dice_server: %s\n' "$server_status"
+        printf 'temperature_gif: %s\n' "$gif_status"
         printf '\n'
         printf '%s\n' 'Output counts'
         printf '%s\n' '-------------'
@@ -709,14 +804,20 @@ write_summary() {
         printf 'manifest: %s\n' "$MANIFEST_FILE"
         printf 'softHier raw power: %s\n' "$RAW_POWER_TRACE"
         printf '3D-ICE power trace: %s\n' "$DICE_POWER_TRACE"
-        printf '3D-ICE average temperature: %s\n' "$thermal_file"
+        printf '3D-ICE temperature map: %s\n' "$thermal_file"
+        if [[ "$ICE_GENERATE_GIF" == "1" ]]; then
+            printf 'temperature GIF: %s\n' "$ICE_GIF_FILE"
+            printf 'temperature GIF log: %s\n' "$LOG_DIR/tmap_gif.log"
+        fi
         printf 'logs: %s\n' "$LOG_DIR"
     } > "$SUMMARY_FILE"
 }
 
 run_all() {
     validate_softhier_log_tail_lines
+    validate_target_top_die_cells
     validate_dice_run_mode
+    validate_gif_settings
     make_dirs
     write_latest_link
     reset_runtime_files
@@ -767,13 +868,26 @@ run_all() {
 
     wait_for_exit 3dice_server "$server_pid" "$EXIT_TIMEOUT" || server_status=$?
 
-    write_summary "$softhier_status" "$adapter_status" "$client_status" "$server_status"
+    local gif_status="disabled"
+    if [[ "$ICE_GENERATE_GIF" == "1" ]]; then
+        gif_status=0
+        generate_temperature_gif || gif_status=$?
+    fi
+
+    write_summary "$softhier_status" "$adapter_status" "$client_status" "$server_status" "$gif_status"
 
     log "Run directory: $RUN_DIR"
     log "Logs: $LOG_DIR"
     log "Summary: $SUMMARY_FILE"
 
-    return "$softhier_status"
+    if [[ "$softhier_status" != "0" ]]; then
+        return "$softhier_status"
+    fi
+    if [[ "$gif_status" != "0" && "$gif_status" != "disabled" ]]; then
+        return "$gif_status"
+    fi
+
+    return 0
 }
 
 cmd="${1:-run}"

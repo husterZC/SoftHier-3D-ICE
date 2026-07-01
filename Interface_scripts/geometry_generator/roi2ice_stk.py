@@ -24,6 +24,7 @@ SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_OUTPUT_DIR = os.path.abspath(os.path.join(SCRIPT_DIR, "..", ".."))
 DEFAULT_FLOORPLAN_FILE = os.path.join(DEFAULT_OUTPUT_DIR, "floorplan_nopower.flp")
 DEFAULT_STK_FILE = os.path.join(DEFAULT_OUTPUT_DIR, "ice.stk")
+DEFAULT_HEAT_TRANSFER_COEFFICIENT = 1.0e-7
 
 
 def positive_float(value):
@@ -88,7 +89,7 @@ material BEOL :
    volumetric heat capacity 2.175e-12 ;
 
 top heat sink :
-   heat transfer coefficient 1.0e-8 ;
+   heat transfer coefficient {format_number(DEFAULT_HEAT_TRANSFER_COEFFICIENT)} ;
    temperature               300 ;
 
 dimensions :
@@ -114,7 +115,7 @@ solver:
    numofcores 8 ;   
 
 output:
-     Tflp( TOP_DIE,    "output_top_die_flp_avg.txt",    average, slot );
+     Tmap( TOP_DIE,    "output_top_die.txt",                     slot ) ;
 
 """
 

@@ -43,6 +43,7 @@ DICE_RUN_MODE ?= local-server
 PWR_INTERVAL_PS ?= 100000000
 ICE_SLOT_SECONDS ?=
 ICE_STEP_SECONDS ?=
+ICE_TARGET_TOP_DIE_CELLS ?= 65536
 OTHERS_POWER ?= 0.0
 BUILD_SOFTHIER ?= 1
 BUILD_3DICE ?= 1
@@ -51,6 +52,13 @@ EXIT_TIMEOUT ?= 120
 SOFTHIER_LOG_TAIL_LINES ?= 5
 PYTHON ?= python3
 AUTO_BOOTSTRAP ?= 0
+ICE_GENERATE_GIF ?= 0
+ICE_GIF_FILE ?= $(RUN_3DICE_DIR)/temperature_map.gif
+ICE_GIF_STRIDE ?= 1
+ICE_GIF_WIDTH ?= 1600
+ICE_GIF_FPS ?= 8
+ICE_GIF_WRITER ?= auto
+ICE_GIF_PYTHON ?=
 
 GEO_FILE ?= $(GENERATED_DIR)/geo.json
 ICE_FLOORPLAN_FILE ?= $(RUN_3DICE_GEN_DIR)/floorplan_nopower.flp
@@ -95,6 +103,11 @@ help:
 		'  PWR_INTERVAL_PS=$(PWR_INTERVAL_PS)' \
 		'  ICE_SLOT_SECONDS=$(ICE_SLOT_SECONDS)' \
 		'  ICE_STEP_SECONDS=$(ICE_STEP_SECONDS)' \
+		'  ICE_TARGET_TOP_DIE_CELLS=$(ICE_TARGET_TOP_DIE_CELLS)' \
+		'  ICE_GENERATE_GIF=$(ICE_GENERATE_GIF)' \
+		'  ICE_GIF_FILE=$(ICE_GIF_FILE)' \
+		'  ICE_GIF_STRIDE=$(ICE_GIF_STRIDE)' \
+		'  ICE_GIF_PYTHON=$(ICE_GIF_PYTHON)' \
 		'  BUILD_SOFTHIER=$(BUILD_SOFTHIER)' \
 		'  SOFTHIER_LOG_TAIL_LINES=$(SOFTHIER_LOG_TAIL_LINES)' \
 		'' \
@@ -138,6 +151,7 @@ ice-inputs: dirs
 		--floorplan "$(ICE_FLOORPLAN_FILE)" \
 		--stk "$(ICE_STK_FILE)" \
 		--pwr-interval-ps "$(PWR_INTERVAL_PS)" \
+		--target-top-die-cells "$(ICE_TARGET_TOP_DIE_CELLS)" \
 	); \
 	if [[ -n "$(ICE_SLOT_SECONDS)" ]]; then args+=(--slot-seconds "$(ICE_SLOT_SECONDS)"); fi; \
 	if [[ -n "$(ICE_STEP_SECONDS)" ]]; then args+=(--step-seconds "$(ICE_STEP_SECONDS)"); fi; \
@@ -178,6 +192,7 @@ coupled-run:
 	PWR_INTERVAL_PS="$(PWR_INTERVAL_PS)" \
 	ICE_SLOT_SECONDS="$(ICE_SLOT_SECONDS)" \
 	ICE_STEP_SECONDS="$(ICE_STEP_SECONDS)" \
+	ICE_TARGET_TOP_DIE_CELLS="$(ICE_TARGET_TOP_DIE_CELLS)" \
 	OTHERS_POWER="$(OTHERS_POWER)" \
 	BUILD_SOFTHIER="$(BUILD_SOFTHIER)" \
 	BUILD_3DICE="$(BUILD_3DICE)" \
@@ -186,6 +201,13 @@ coupled-run:
 	SOFTHIER_LOG_TAIL_LINES="$(SOFTHIER_LOG_TAIL_LINES)" \
 	PYTHON="$(PYTHON)" \
 	AUTO_BOOTSTRAP="$(AUTO_BOOTSTRAP)" \
+	ICE_GENERATE_GIF="$(ICE_GENERATE_GIF)" \
+	ICE_GIF_FILE="$(ICE_GIF_FILE)" \
+	ICE_GIF_STRIDE="$(ICE_GIF_STRIDE)" \
+	ICE_GIF_WIDTH="$(ICE_GIF_WIDTH)" \
+	ICE_GIF_FPS="$(ICE_GIF_FPS)" \
+	ICE_GIF_WRITER="$(ICE_GIF_WRITER)" \
+	ICE_GIF_PYTHON="$(ICE_GIF_PYTHON)" \
 	GEO_FILE="$(GEO_FILE)" \
 	ICE_FLOORPLAN_FILE="$(ICE_FLOORPLAN_FILE)" \
 	ICE_STK_FILE="$(ICE_STK_FILE)" \
@@ -244,5 +266,7 @@ adapter-smoke:
 	$(PYTHON) -m py_compile \
 		"$(CO_SIMULATION_SCRIPT_DIR)/ice_trace_adapter.py" \
 		"$(CO_SIMULATION_SCRIPT_DIR)/wait_for_log.py" \
+		"$(ROOT_DIR)/Interface_scripts/plot_runtime_temperature_map/plot_runtime_tmap.py" \
 		"$(GEOMETRY_SCRIPT_DIR)/generate_3dice_inputs.py" \
+		"$(GEOMETRY_SCRIPT_DIR)/roi2ice_floorplan_no_power.py" \
 		"$(GEOMETRY_SCRIPT_DIR)/roi2ice_stk.py"

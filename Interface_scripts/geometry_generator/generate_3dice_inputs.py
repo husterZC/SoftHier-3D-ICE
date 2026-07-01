@@ -52,6 +52,12 @@ def parse_args() -> argparse.Namespace:
         type=positive_float,
         help="3D-ICE transient solver step in seconds. Defaults to slot-seconds / 10.",
     )
+    parser.add_argument(
+        "--target-top-die-cells",
+        type=positive_int,
+        default=256 * 256,
+        help="Approximate total non-uniform TOP_DIE cells requested in the generated floorplan.",
+    )
     return parser.parse_args()
 
 
@@ -84,7 +90,17 @@ def main() -> int:
 
     run([sys.executable, str(GEOGEN), str(arch), str(geo)])
 
-    run([sys.executable, str(ROI2ICE_FLOORPLAN), str(arch), str(geo), str(floorplan.parent)])
+    run(
+        [
+            sys.executable,
+            str(ROI2ICE_FLOORPLAN),
+            str(arch),
+            str(geo),
+            str(floorplan.parent),
+            "--target-top-die-cells",
+            str(args.target_top_die_cells),
+        ]
+    )
     generated_floorplan = floorplan.parent / "floorplan_nopower.flp"
     if generated_floorplan.resolve() != floorplan:
         shutil.move(str(generated_floorplan), str(floorplan))
@@ -107,6 +123,7 @@ def main() -> int:
     print(f"Generated stk: {stk}")
     print(f"Aligned 3D-ICE slot: {slot_seconds:.15g} s")
     print(f"3D-ICE transient step: {step_seconds:.15g} s")
+    print(f"Target TOP_DIE cells: {args.target_top_die_cells}")
     return 0
 
 
