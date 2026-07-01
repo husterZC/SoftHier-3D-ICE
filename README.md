@@ -103,22 +103,6 @@ no 3D-ICE client is started for normal local runs. The 3D-ICE server reads
 `traces/3dice_power_traces.txt` directly with `--follow --until-minus-one`
 and writes stack-declared thermal output files after each slot.
 
-The runtime stack and floorplan are copied into the results directory, and the
-full Tmap outputs are written beside them:
-
-```text
-runs/<run-name>/<timestamp>/results/3dice/
-  floorplan_nopower.flp
-  ice.stk
-  xyaxis_TOP_DIE.txt
-  output_top_die.txt
-```
-
-To use the older socket split, run:
-
-```bash
-make coupled-run RUN_NAME=default_app DICE_RUN_MODE=client-server
-```
 
 During the SoftHier phase, the terminal shows a green framed live window with
 the latest 5 SoftHier log lines. Change the window size with

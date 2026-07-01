@@ -1332,7 +1332,7 @@ def read_latest_existing_tmap_values(map_path, expected_count):
 
 
 
-def read_existing_tmap_slots(map_path, expected_count):
+def read_existing_tmap_slots(map_path, expected_count, follow=False):
     slots = []
     data_min = None
     data_max = None
@@ -1341,7 +1341,7 @@ def read_existing_tmap_slots(map_path, expected_count):
 
     with map_path.open("rb") as stream:
         while True:
-            raw_line, line_number = read_complete_data_line(stream, line_number, follow=False)
+            raw_line, line_number = read_complete_data_line(stream, line_number, follow=follow)
 
             if raw_line is None:
                 break
@@ -2237,7 +2237,11 @@ def render_tmap_html_once(args, coords_path, map_path, html_path, refresh_second
     geometry = load_tmap_geometry_cells(coords_path)
 
     if map_path.exists():
-        slots, row_count, data_min, data_max = read_existing_tmap_slots(map_path, geometry["cell_count"])
+        slots, row_count, data_min, data_max = read_existing_tmap_slots(
+            map_path,
+            geometry["cell_count"],
+            follow=allow_empty,
+        )
     else:
         slots, row_count, data_min, data_max = [], 0, None, None
 
