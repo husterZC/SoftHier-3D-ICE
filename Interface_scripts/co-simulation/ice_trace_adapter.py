@@ -1,50 +1,60 @@
 #!/usr/bin/env python3
-"""Adapt SoftHier power slots to 3D-ICE floorplan order.
+"""Adapt provider power rows to the element order in a 3D-ICE floorplan.
 
-SoftHier currently emits power slots in this per-cluster order:
-
-    redmule, tcdm
-
-The generated 3D-ICE floorplan currently contains this per-cluster order:
-
-    redmule, others, tcdm
-
-This adapter follows the raw SoftHier trace, inserts a configurable value for
-the missing "others" region, and writes complete 3D-ICE slots. When the done
-file appears, it appends an all-minus-one sentinel slot for 3D-ICE-Client's
---until-minus-one mode.
+The simulator-neutral system contract declares the meaning of each input
+column and the power source for every floorplan element.  No simulator module
+or architecture class is imported here.
 """
 
 import argparse
-import importlib.util
+import math
 import os
 import re
 import sys
 import time
 from pathlib import Path
-from typing import Dict, Iterable, List
+from typing import Dict, Iterable, List, Optional
+
+
+INTERFACE_DIR = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(INTERFACE_DIR))
+
+from system_contract import (  # noqa: E402
+    flattened_floorplan_name,
+    floorplan_elements,
+    load_contract,
+    power_columns,
+)
 
 
 FLOORPLAN_ENTRY_RE = re.compile(r"^\s*([A-Za-z0-9_.\-]+)\s*:\s*$")
-SOFTHIER_FLOORPLAN_RE = re.compile(
-    r"^chip__cluster_(?P<cluster>[0-9]+)__(?P<region>redmule|others|tcdm)$"
-)
+
+
+def nonnegative_float(value: str) -> float:
+    parsed = float(value)
+    if not math.isfinite(parsed) or parsed < 0.0:
+        raise argparse.ArgumentTypeError("value must be finite and non-negative")
+    return parsed
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Follow a SoftHier raw power trace and write a 3D-ICE power trace."
+        description="Follow a raw provider power trace and write 3D-ICE slots."
     )
-    parser.add_argument("--arch", required=True, help="SoftHier architecture Python file.")
+    parser.add_argument(
+        "--system-config",
+        required=True,
+        help="Simulator-neutral system contract JSON file.",
+    )
     parser.add_argument(
         "--floorplan",
         required=True,
-        help="Generated 3D-ICE floorplan file that defines element order.",
+        help="Generated floorplan file whose element order must be followed.",
     )
     parser.add_argument(
         "--input",
         required=True,
-        help="Raw SoftHier power trace. Each complete line is one SoftHier slot.",
+        help="Raw provider power trace; each complete line is one slot.",
     )
     parser.add_argument(
         "--output",
@@ -57,124 +67,113 @@ def parse_args() -> argparse.Namespace:
         help="When this file appears, append an all-minus-one slot and exit.",
     )
     parser.add_argument(
+        "--default-power-w",
         "--others-power",
-        type=float,
-        default=0.0,
-        help="Power value used for floorplan 'others' regions not present in SoftHier raw trace.",
+        dest="default_power_w",
+        type=nonnegative_float,
+        default=None,
+        help=(
+            "Override every constant power value declared by the contract. "
+            "--others-power is retained as a compatibility alias."
+        ),
     )
-    parser.add_argument("--poll", type=float, default=0.2, help="Polling interval in seconds.")
+    parser.add_argument("--poll", type=float, default=0.2, help="Polling interval.")
     parser.add_argument(
         "--preserve-output",
         action="store_true",
-        help="Append to output instead of truncating it on adapter startup.",
+        help="Append instead of truncating the output on startup.",
     )
     return parser.parse_args()
 
 
-def import_architecture(arch_path: Path):
-    spec = importlib.util.spec_from_file_location(arch_path.stem, arch_path)
-    if spec is None or spec.loader is None:
-        raise RuntimeError(f"Cannot import architecture file: {arch_path}")
-
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-
-    if not hasattr(module, "FlexClusterArch"):
-        raise RuntimeError(f"{arch_path} does not define FlexClusterArch")
-
-    return module.FlexClusterArch()
-
-
-def cluster_count_from_arch(arch) -> int:
-    try:
-        return int(arch.num_cluster_x) * int(arch.num_cluster_y)
-    except AttributeError as exc:
-        raise RuntimeError("Architecture is missing num_cluster_x or num_cluster_y") from exc
-
-
 def parse_floorplan_entries(floorplan_path: Path) -> List[str]:
-    entries = []  # type: List[str]
-
+    entries: List[str] = []
     with floorplan_path.open("r", encoding="utf-8") as stream:
-        for line_number, line in enumerate(stream, start=1):
+        for line in stream:
             match = FLOORPLAN_ENTRY_RE.match(line)
-            if match is None:
-                continue
-
-            name = match.group(1)
-            if name in {"material", "dimensions", "layer", "die", "stack", "solver", "output"}:
-                continue
-
-            entries.append(name)
+            if match is not None:
+                entries.append(match.group(1))
 
     if not entries:
         raise RuntimeError(f"No floorplan elements found in {floorplan_path}")
-
     return entries
+
+
+def build_power_sources(document: dict) -> Dict[str, dict]:
+    return {
+        flattened_floorplan_name(element["name"]): element["power"]
+        for element in floorplan_elements(document)
+    }
+
+
+def validate_floorplan_entries(entries: List[str], power_sources: Dict[str, dict]) -> None:
+    entry_set = set(entries)
+    if len(entry_set) != len(entries):
+        raise RuntimeError("3D-ICE floorplan contains duplicate element names")
+
+    missing_contract_entries = entry_set - set(power_sources)
+    stale_contract_entries = set(power_sources) - entry_set
+    if missing_contract_entries or stale_contract_entries:
+        details = []
+        if missing_contract_entries:
+            details.append(
+                "floorplan-only: " + ", ".join(sorted(missing_contract_entries))
+            )
+        if stale_contract_entries:
+            details.append(
+                "contract-only: " + ", ".join(sorted(stale_contract_entries))
+            )
+        raise RuntimeError("floorplan/contract element mismatch (" + "; ".join(details) + ")")
 
 
 def parse_power_values(line: str, raw_path: Path, line_number: int) -> List[float]:
     fields = line.strip().split()
     if not fields:
         return []
-
     try:
-        return [float(field) for field in fields]
+        values = [float(field) for field in fields]
     except ValueError as exc:
-        raise RuntimeError(f"{raw_path}:{line_number}: non-numeric power value in {line!r}") from exc
+        raise RuntimeError(
+            f"{raw_path}:{line_number}: non-numeric power value in {line!r}"
+        ) from exc
+    if any(not math.isfinite(value) or value < 0.0 for value in values):
+        raise RuntimeError(
+            f"{raw_path}:{line_number}: power values must be finite and non-negative"
+        )
+    return values
 
 
 def raw_power_map(
-    values: List[float], cluster_count: int, raw_path: Path, line_number: int
+    values: List[float], columns: List[str], raw_path: Path, line_number: int
 ) -> Dict[str, float]:
-    expected = cluster_count * 2
-    if len(values) != expected:
+    if len(values) != len(columns):
         raise RuntimeError(
-            f"{raw_path}:{line_number}: expected {expected} raw values "
-            f"(redmule,tcdm for {cluster_count} clusters), got {len(values)}"
+            f"{raw_path}:{line_number}: expected {len(columns)} raw values "
+            f"from the system contract, got {len(values)}"
         )
-
-    mapped = {}  # type: Dict[str, float]
-    for cluster_index in range(cluster_count):
-        raw_index = cluster_index * 2
-        mapped[f"chip__cluster_{cluster_index}__redmule"] = values[raw_index]
-        mapped[f"chip__cluster_{cluster_index}__tcdm"] = values[raw_index + 1]
-
-    return mapped
+    return dict(zip(columns, values))
 
 
 def adapt_slot(
     values: List[float],
-    floorplan_entries: Iterable[str],
-    cluster_count: int,
-    others_power: float,
+    columns: List[str],
+    floorplan_entries_in_order: Iterable[str],
+    power_sources: Dict[str, dict],
+    default_power_override: Optional[float],
     raw_path: Path,
     line_number: int,
 ) -> List[float]:
-    mapped = raw_power_map(values, cluster_count, raw_path, line_number)
-    output_values = []  # type: List[float]
+    mapped = raw_power_map(values, columns, raw_path, line_number)
+    output_values = []
 
-    for entry in floorplan_entries:
-        match = SOFTHIER_FLOORPLAN_RE.match(entry)
-        if match is None:
-            raise RuntimeError(
-                f"Unsupported floorplan element {entry!r}; "
-                "expected chip__cluster_N__redmule/others/tcdm"
-            )
-
-        cluster_index = int(match.group("cluster"))
-        region = match.group("region")
-
-        if cluster_index >= cluster_count:
-            raise RuntimeError(
-                f"Floorplan element {entry!r} references cluster {cluster_index}, "
-                f"but architecture has {cluster_count} clusters"
-            )
-
-        if region == "others":
-            output_values.append(others_power)
+    for entry in floorplan_entries_in_order:
+        power = power_sources[entry]
+        if "column" in power:
+            output_values.append(mapped[power["column"]])
+        elif default_power_override is not None:
+            output_values.append(default_power_override)
         else:
-            output_values.append(mapped[entry])
+            output_values.append(float(power["constant_w"]))
 
     return output_values
 
@@ -187,32 +186,34 @@ def write_slot(stream, values: Iterable[float]) -> None:
 
 
 def follow_raw_trace(args: argparse.Namespace) -> int:
-    arch_path = Path(args.arch).resolve()
+    document = load_contract(args.system_config)
+    columns = power_columns(document)
+    power_sources = build_power_sources(document)
+
     floorplan_path = Path(args.floorplan).resolve()
     raw_path = Path(args.input).resolve()
     output_path = Path(args.output).resolve()
     done_path = Path(args.done_file).resolve()
-
     if raw_path == output_path:
         raise RuntimeError("--input and --output must be different files")
 
-    arch = import_architecture(arch_path)
-    cluster_count = cluster_count_from_arch(arch)
-    floorplan_entries = parse_floorplan_entries(floorplan_path)
+    floorplan_entries_in_order = parse_floorplan_entries(floorplan_path)
+    validate_floorplan_entries(floorplan_entries_in_order, power_sources)
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     raw_path.parent.mkdir(parents=True, exist_ok=True)
-
     output_mode = "a" if args.preserve_output else "w"
     line_number = 0
     slots_written = 0
-    terminated = False
 
     with output_path.open(output_mode, encoding="utf-8") as output_stream:
         while not raw_path.exists():
             if done_path.exists():
-                write_slot(output_stream, [-1.0] * len(floorplan_entries))
-                print("Done file appeared before raw trace existed; wrote termination slot.", flush=True)
+                write_slot(output_stream, [-1.0] * len(floorplan_entries_in_order))
+                print(
+                    "Done file appeared before raw trace existed; wrote termination slot.",
+                    flush=True,
+                )
                 return 0
             time.sleep(args.poll)
 
@@ -220,24 +221,28 @@ def follow_raw_trace(args: argparse.Namespace) -> int:
             while True:
                 offset = raw_stream.tell()
                 line = raw_stream.readline()
-
                 if not line:
                     raw_stream.seek(offset)
-
                     if done_path.exists():
-                        write_slot(output_stream, [-1.0] * len(floorplan_entries))
-                        terminated = True
+                        write_slot(
+                            output_stream,
+                            [-1.0] * len(floorplan_entries_in_order),
+                        )
                         print(
                             f"Wrote termination slot after {slots_written} adapted slot(s).",
                             flush=True,
                         )
-                        break
-
+                        return 0
                     time.sleep(args.poll)
                     continue
 
                 if not line.endswith("\n"):
                     raw_stream.seek(offset)
+                    if done_path.exists():
+                        raise RuntimeError(
+                            f"{raw_path}:{line_number + 1}: provider exited with "
+                            "an incomplete final power row"
+                        )
                     time.sleep(args.poll)
                     continue
 
@@ -245,24 +250,21 @@ def follow_raw_trace(args: argparse.Namespace) -> int:
                 values = parse_power_values(line, raw_path, line_number)
                 if not values:
                     continue
-
                 adapted_values = adapt_slot(
                     values,
-                    floorplan_entries,
-                    cluster_count,
-                    args.others_power,
+                    columns,
+                    floorplan_entries_in_order,
+                    power_sources,
+                    args.default_power_w,
                     raw_path,
                     line_number,
                 )
                 write_slot(output_stream, adapted_values)
                 slots_written += 1
 
-    return 0 if terminated else 1
-
 
 def main() -> int:
     args = parse_args()
-
     try:
         return follow_raw_trace(args)
     except KeyboardInterrupt:

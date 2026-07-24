@@ -1,207 +1,301 @@
-# SoftHier + 3D-ICE Co-Simulation Tutorial
+# SoftHier + 3D-ICE Closed-Loop Co-Simulation
 
-This repository provides a root-level flow for running SoftHier and 3D-ICE
-together. The intended user path is:
+This repository runs SoftHier and 3D-ICE as a synchronous power/temperature
+feedback loop. SoftHier is integrated through a provider boundary; the generic
+geometry and 3D-ICE code does not import SoftHier.
 
-```bash
-make bootstrap
-make coupled-run RUN_NAME=default_app
-```
-
-For a single first-time command, use:
-
-```bash
-make co-simulation RUN_NAME=default_app
-```
-
-`make co-simulation` runs `bootstrap` first and then launches the coupled simulation.
-
-## What The Flow Does
-
-The co-simulation flow:
-
-1. initializes SoftHier and its nested submodules;
-2. applies/verifies the SoftHier GVSOC/PULP patches;
-3. verifies the runtime power-capture hook needed by the coupled flow;
-4. builds or verifies the required 3D-ICE binaries;
-5. generates 3D-ICE geometry, floorplan, and stack files from the selected
-   SoftHier architecture using the root `Interface_scripts/geometry_generator`
-   tools;
-6. builds SoftHier with the selected runtime power trace path;
-7. starts 3D-ICE server mode;
-8. starts a root-owned adapter that follows SoftHier power rows and writes
-   complete 3D-ICE power slots;
-9. in the default `DICE_RUN_MODE=local-server` mode, has the 3D-ICE server read
-   those power slots directly from `traces/3dice_power_traces.txt`;
-10. runs SoftHier;
-11. has the 3D-ICE server write stack-declared thermal outputs after each slot;
-12. sends the all-`-1` termination slot when SoftHier exits;
-13. optionally generates an end-of-run temperature dashboard GIF when
-    `ICE_GENERATE_GIF=1`;
-14. writes per-run metadata and summary files.
-
-## Host Dependencies
-
-The bootstrap script checks for the required commands before doing work. On
-Debian/Ubuntu, the usual package set is:
-
-```bash
-sudo apt-get install build-essential cmake bison flex libopenblas-dev csh unzip git python3 python3-venv python3-pip
-```
-
-SoftHier may also download or prepare its own toolchain and SystemC tree during
-`source SoftHier/sourceme.sh`. That work is done by SoftHier's existing setup
-logic.
-
-## First-Time Setup
+## Quick Start
 
 From the repository root:
 
 ```bash
 make bootstrap
-```
-
-This target:
-
-- initializes `SoftHier`;
-- initializes nested SoftHier submodules;
-- applies SoftHier's own patches through `make -C SoftHier drmasys_apply_patch`;
-- verifies the runtime power hook from `SoftHier/soft_hier/gvsoc_core.patch`;
-- runs SoftHier's environment preparation;
-- initializes the `3D-ICE` submodule;
-- builds or verifies `3D-ICE/bin/3D-ICE-Server`;
-- builds or verifies `3D-ICE/bin/3D-ICE-Client` for the optional socket mode.
-
-If 3D-ICE is not initialized yet, `Interface_scripts/co-simulation/3dice_client_server.sh`
-initializes the `3D-ICE` submodule and builds in place:
-
-```text
-3D-ICE/
-```
-
-The installation path is inside the `3D-ICE` submodule.
-
-## Running The Default Coupled Simulation
-
-After bootstrap:
-
-```bash
 make coupled-run RUN_NAME=default_app
 ```
 
-The run directory is timestamped by default:
-
-```text
-runs/default_app/YYYYMMDD-HHMMSS/
-```
-
-The latest run for each `RUN_NAME` is also linked at:
-
-```text
-runs/default_app/latest
-```
-
-While SoftHier is running, the coupled runner redraws a green framed live window
-with the latest 5 SoftHier log lines. The full output is still stored in:
-
-```text
-runs/default_app/latest/logs/softhier.log
-```
-
-Change or disable the live view with:
-
-```bash
-make coupled-run RUN_NAME=default_app SOFTHIER_LOG_TAIL_LINES=10
-make coupled-run RUN_NAME=default_app SOFTHIER_LOG_TAIL_LINES=0
-```
-
-## Choosing The 3D-ICE Run Mode
-
-The default mode is local server-only mode:
-
-```bash
-make coupled-run RUN_NAME=default_app DICE_RUN_MODE=local-server
-```
-
-In this mode, the runner starts no 3D-ICE client. The server command is shaped
-like this inside the run-local 3D-ICE result directory:
-
-```bash
-3D-ICE-Server ice.stk --power-trace trace.txt --follow --until-minus-one
-```
-
-The server follows the adapter output file, consumes one complete power row per
-thermal slot, writes the stack-declared output files itself, and exits after the
-adapter appends an all-`-1` termination row.
-
-
-## One-Command First Run
-
-If you want the setup and run in one command:
+The one-command equivalent is:
 
 ```bash
 make co-simulation RUN_NAME=default_app
 ```
 
-This is the closest "push a button" path. It may still take a long time on a
-fresh machine because SoftHier and 3D-ICE have real build dependencies.
+For a short validation workload:
 
-## Run Directory Layout
+```bash
+make coupled-run \
+  RUN_NAME=power_interface_smoke \
+  SIMULATOR_CONFIG=$PWD/SoftHier/soft_hier_sdk/examples/SoftHier/config/arch_test.py \
+  SIMULATOR_APP=$PWD/SoftHier/soft_hier_sdk/examples/SoftHier/software/test \
+  POWER_INTERVAL_PS=10000000 \
+  ICE_TARGET_TOP_DIE_CELLS=256 \
+  SIMULATOR_LOG_TAIL_LINES=0
+```
 
-Each run is self-contained:
+The smoke interval is 10 µs. It is deliberately larger than a high-resolution
+production interval because version 1 starts the Python hook executable once
+per exchange.
+
+## Separation of Responsibilities
+
+The architecture side owns:
+
+- physical geometry and floorplan-element definitions;
+- exact GVSoC component paths to sample;
+- mappings from component power to floorplan power;
+- mappings from floorplan temperatures back to components; and
+- Kelvin-to-Celsius conversion.
+
+The GVSoC engine owns:
+
+- periodic average power sampling from cumulative energy counters;
+- the direct executable invocation;
+- versioned request/response validation;
+- recursive temperature application; and
+- component-temperature readout.
+
+The engine never calls geometry code or links to 3D-ICE.
+
+## What a Run Does
+
+The normal flow is:
+
+1. The selected provider validates SoftHier, the engine hook, and the pinned
+   SDK.
+2. The provider exports `3dice-cosim-system` version 1 JSON.
+3. Generic tools validate the contract and generate geometry, floorplan, and
+   stack files.
+4. The stack requests `Tflp` average temperatures for the top die.
+5. The provider builds the selected SoftHier architecture and workload.
+6. The runner starts 3D-ICE in follow mode.
+7. GVSoC invokes the hook at time zero. The architecture contract supplies
+   exact component paths and initial Celsius temperatures.
+8. After every complete interval, GVSoC sends average dynamic, leakage, and
+   total subtree power in watts.
+9. The hook maps those values into floorplan order and appends one 3D-ICE power
+   slot.
+10. 3D-ICE solves the slot and appends floorplan temperatures in Kelvin.
+11. The hook area-weights the declared floorplan elements, converts to Celsius,
+    and returns `{path, temperature_c}` values.
+12. GVSoC recursively applies each temperature to the selected component and
+    all descendants.
+13. At shutdown, GVSoC sends the remaining partial interval as `final`. The
+    result is recorded but not applied.
+14. The hook appends an all-`-1` power slot so 3D-ICE exits cleanly.
+
+The executable protocol is `gvsoc-power-hook` version 1. See
+[`Interface_scripts/README.md`](Interface_scripts/README.md) for the full
+contract and protocol boundaries.
+
+## Setup and Reproducibility
+
+`make bootstrap` asks the provider to initialize nested SoftHier submodules,
+clone the SoftHier SDK when absent, pin it to:
+
+```text
+1244fdbc34977aff5a6a10ead079053fb5d31d00
+```
+
+and build or verify the 3D-ICE client/server binaries.
+
+The default SDK URL is SSH-based. A mirror can be selected with:
+
+```bash
+SOFTHIER_SDK_URL=/path/to/softhier-sdk.git make bootstrap
+```
+
+If a compatible SDK toolchain already exists, avoid another download with:
+
+```bash
+SOFTHIER_SDK_TOOLCHAIN_SOURCE=/path/to/toolchain make bootstrap
+```
+
+Provider build products and `ccache` data live under
+`SoftHier/.power_interface/`. The SDK checkout is
+`SoftHier/soft_hier_sdk/`. Both are ignored by the SoftHier integration
+branch.
+
+Typical host packages include:
+
+```bash
+sudo apt-get install build-essential cmake bison flex libopenblas-dev csh unzip git python3 python3-venv python3-pip
+```
+
+## Important Run Controls
+
+The most useful overrides are:
+
+| Variable | Meaning |
+|---|---|
+| `RUN_NAME` | Name used under `runs/` and for the `latest` link. |
+| `RUN_DIR` | Exact output directory; overrides timestamped layout. |
+| `SIMULATOR_PROVIDER` | Provider executable. Defaults to SoftHier. |
+| `SIMULATOR_CONFIG` | SoftHier architecture configuration. |
+| `SIMULATOR_APP` | Workload source directory. |
+| `POWER_INTERVAL_PS` | GVSoC exchange interval in picoseconds. |
+| `ICE_TARGET_TOP_DIE_CELLS` | Approximate top-die discretization target. |
+| `DEFAULT_POWER_W` | Optional override for constant-power floorplan blocks. |
+| `BUILD_SIMULATOR` | Set to `0` only when a compatible build already exists. |
+| `BUILD_3DICE` | Set to `0` to require existing 3D-ICE binaries. |
+| `DICE_RUN_MODE` | `local-server` or `client-server`. |
+| `SIMULATOR_LOG_TAIL_LINES` | Live terminal window size; `0` disables it. |
+| `ICE_GENERATE_GIF` | Generate an end-of-run temperature GIF when `1`. |
+
+The compatibility aliases `CFG`, `APP`, `PLD`, `PWR_INTERVAL_PS`,
+`BUILD_SOFTHIER`, and `SOFTHIER_LOG_TAIL_LINES` remain accepted.
+
+### Choosing the Interval
+
+By default:
+
+```text
+3D-ICE slot seconds = POWER_INTERVAL_PS × 1e-12
+3D-ICE transient step seconds = slot seconds / 10
+```
+
+A smaller interval gives more thermal feedback points, but each interval also
+executes the hook and one thermal solve. Choose the interval based on the
+workload duration and required thermal resolution. The request trace records
+the exact `start_ps` and `end_ps` of every interval.
+
+Override the solver time base only deliberately:
+
+```bash
+make coupled-run \
+  RUN_NAME=custom_timebase \
+  POWER_INTERVAL_PS=100000000 \
+  ICE_SLOT_SECONDS=0.0001 \
+  ICE_STEP_SECONDS=0.00001
+```
+
+## 3D-ICE Run Modes
+
+The default uses the server’s local follow mode:
+
+```bash
+make coupled-run RUN_NAME=default_app DICE_RUN_MODE=local-server
+```
+
+The server reads the run-local power file directly. No client is started.
+
+Socket client/server mode remains available:
+
+```bash
+make coupled-run \
+  RUN_NAME=socket_mode \
+  DICE_RUN_MODE=client-server \
+  PORT=54322
+```
+
+The feedback hook is identical in both modes; only transport from the power
+trace file into the 3D-ICE server changes.
+
+## Run Directory
+
+A timestamped run is written under:
 
 ```text
 runs/<run-name>/<timestamp>/
-  run.env
-  summary.txt
-  generated/
-    geo.json
-    3dice/
-      floorplan_nopower.flp
-      ice.stk
-      conductance_layer.txt
-  traces/
-    softhier_power_raw.txt
-    3dice_power_traces.txt
-  results/
-    3dice/
-      floorplan_nopower.flp
-      ice.stk
-      conductance_layer.txt
-      output_top_die.txt
-      xyaxis_TOP_DIE.txt
-      thermal_map.txt
-      temperature_map.gif   # only when ICE_GENERATE_GIF=1
-  logs/
-    3dice_server.log
-    3dice_client.log        # only present in DICE_RUN_MODE=client-server
-    adapter.log
-    softhier.log
-    tmap_gif.log            # only when ICE_GENERATE_GIF=1
-  pids/
-  state/
-    softhier.done
 ```
 
-Important files:
+and linked from:
 
-- `run.env`: exact configuration, paths, ports, and git commits for the run.
-  It also records `ICE_TARGET_TOP_DIE_CELLS`, `EFFECTIVE_ICE_SLOT_SECONDS`,
-  `EFFECTIVE_ICE_STEP_SECONDS`, and the optional `ICE_GENERATE_GIF` settings.
-- `summary.txt`: process statuses, trace row counts, thermal row count, and max
-  temperature.
-- `traces/softhier_power_raw.txt`: SoftHier raw runtime power rows.
-- `traces/3dice_power_traces.txt`: adapter output consumed directly by the
-  3D-ICE server in local-server mode, or by the 3D-ICE client in client-server
-  mode.
-- `results/3dice/output_top_die.txt`: full TOP_DIE `Tmap` temperatures
-  written directly by the 3D-ICE server.
-- `results/3dice/xyaxis_TOP_DIE.txt`: non-uniform Tmap cell geometry used to
-  interpret `output_top_die.txt`.
+```text
+runs/<run-name>/latest
+```
 
-The current generated stack emits a `Tmap`
-output. For SSH/headless runs, render the
-latest full Tmap slot as a self-contained HTML dashboard:
+Important files are:
+
+```text
+run.env
+summary.txt
+generated/
+  system_config.json
+  power_hook_config.json
+  geo.json
+  3dice/
+    floorplan_nopower.flp
+    ice.stk
+traces/
+  power_hook_trace.jsonl
+  component_temperatures.csv
+  3dice_power_traces.txt
+results/3dice/
+  output_top_die_flp_avg.txt
+  output_top_die.txt
+  xyaxis_TOP_DIE.txt
+logs/
+  simulator.log
+  3dice_server.log
+  3dice_client.log
+state/
+  power_hook_request.json
+  power_hook_response.json
+  simulator.done
+```
+
+`power_hook_trace.jsonl` is the authoritative GVSoC power history. Its entries
+are `init`, zero or more complete `update` windows, then `final`.
+`component_temperatures.csv` contains the initial and 3D-ICE-returned
+temperatures. `3dice_power_traces.txt` is in exact generated floorplan order
+and ends with one all-`-1` row.
+
+## Reading Component Temperature
+
+Inside the engine, models can use:
+
+```cpp
+double temperature_c = block->power.get_temperature();
+```
+
+The GVSoC socket proxy also exposes:
+
+```python
+temperature_c = proxy.get_component_temperature(
+    "/chip/cluster_0/redmule"
+)
+```
+
+`temperature_set_all()` stores the value on every visited component and updates
+all local power sources. The shipped SoftHier redmule and memory tables
+currently have only a 25 °C model point, so live temperatures propagate and
+are observable but do not numerically change those models until
+temperature-dependent table data is supplied.
+
+## Geometry-Only Generation
+
+Generate inputs without running the simulators:
+
+```bash
+make ice-inputs \
+  RUN_NAME=geometry_only \
+  SIMULATOR_CONFIG=$PWD/SoftHier/soft_hier_sdk/examples/SoftHier/config/arch_test.py \
+  POWER_INTERVAL_PS=10000000
+```
+
+Or call the generic generator after exporting a contract:
+
+```bash
+SYSTEM_CONFIG_FILE=$PWD/runs/manual/system_config.json \
+SIMULATOR_CONFIG=$PWD/SoftHier/soft_hier_sdk/examples/SoftHier/config/arch_test.py \
+  Interface_scripts/providers/softhier/provider.sh export-system
+
+python Interface_scripts/geometry_generator/generate_3dice_inputs.py \
+  --system-config runs/manual/system_config.json \
+  --geo runs/manual/geo.json \
+  --floorplan runs/manual/floorplan_nopower.flp \
+  --stk runs/manual/ice.stk \
+  --power-interval-ps 10000000
+```
+
+## Plotting
+
+Generate a GIF automatically:
+
+```bash
+make coupled-run RUN_NAME=default_app ICE_GENERATE_GIF=1
+```
+
+Generate or follow an HTML dashboard manually:
 
 ```bash
 python Interface_scripts/plot_runtime_temperature_map/plot_runtime_tmap.py \
@@ -212,181 +306,71 @@ python Interface_scripts/plot_runtime_temperature_map/plot_runtime_tmap.py \
   --poll 2
 ```
 
-
-To keep the runtime HTML smooth, GIF export is offline/end-of-run. Enable it on
-the coupled command with:
-
-```bash
-make coupled-run RUN_NAME=default_app ICE_GENERATE_GIF=1
-```
-
-The default GIF path is
-`runs/<run-name>/latest/results/3dice/temperature_map.gif`.
-
-You can also generate the GIF manually after any run:
-
-```bash
-python Interface_scripts/plot_runtime_temperature_map/plot_runtime_tmap.py \
-  --coords runs/<run-name>/latest/results/3dice/xyaxis_TOP_DIE.txt \
-  --map runs/<run-name>/latest/results/3dice/output_top_die.txt \
-  --gif runs/<run-name>/latest/results/3dice/temperature_map.gif \
-  --once
-```
-
-
-## Running Other Config + App Pairs
-
-Example: SoftHier `arch_test.py` with the `test` application. This app is short,
-so use a smaller power interval to get enough thermal slots:
-
-```bash
-make coupled-run RUN_NAME=arch_test_app \
-  CFG=$PWD/SoftHier/examples/SoftHier/config/arch_test.py \
-  APP=$PWD/SoftHier/examples/SoftHier/software/test \
-  PWR_INTERVAL_PS=100000
-```
-
-Example: NoC512 config with the GEMM systolic app:
-
-```bash
-make coupled-run RUN_NAME=noc512_gemm \
-  CFG=$PWD/SoftHier/examples/SoftHier/config/arch_NoC512.py \
-  APP=$PWD/SoftHier/examples/SoftHier/software/gemm_systolic
-```
-
-To reuse a fixed run directory instead of timestamping:
-
-```bash
-make coupled-run RUN_DIR=$PWD/runs/manual/debug_default
-```
-
-`BUILD_SOFTHIER=0` is only safe when the existing SoftHier binary was built
-with the same `RAW_POWER_TRACE` path. The power trace destination is compiled
-into the simulator. With timestamped run directories, keep `BUILD_SOFTHIER=1`
-unless you intentionally reuse the exact same `RUN_DIR`.
-
-## Useful Targets
-
-Bootstrap and run:
-
-```bash
-make bootstrap
-make coupled-run RUN_NAME=default_app
-make co-simulation RUN_NAME=default_app
-```
-
-Inspect or stop the latest run for a run name:
+## Status and Cleanup
 
 ```bash
 make latest-run RUN_NAME=default_app
 make coupled-status RUN_NAME=default_app
 make coupled-stop RUN_NAME=default_app
-```
-
-List run directories:
-
-```bash
 make list-runs
 ```
 
-Cleanup:
+Cleanup targets are:
 
 ```bash
 make clean-latest RUN_NAME=default_app
-make clean-run RUN_DIR=$PWD/runs/default_app/20260622-101530
+make clean-run RUN_DIR=$PWD/runs/default_app/<timestamp>
 make clean-runs
 ```
 
-`clean-latest` removes the target of `runs/<run-name>/latest` and the symlink.
-`clean-runs` removes the full root `runs/` tree.
+## Validation
+
+Run the interface regression suite:
+
+```bash
+make interface-tests
+```
+
+Check the selected provider and pinned revisions:
+
+```bash
+make simulator-check
+git -C SoftHier status --short --branch
+git -C SoftHier/engine status --short --branch
+git -C SoftHier/soft_hier_sdk rev-parse HEAD
+```
 
 ## Troubleshooting
 
-### 3D-ICE binaries are missing
+### The hook times out waiting for Tflp
 
-Run:
-
-```bash
-make 3dice-build
-```
-
-If dependencies are missing, install the host packages listed above and rerun:
+Inspect:
 
 ```bash
-make bootstrap
+tail -n 50 runs/<run-name>/latest/logs/3dice_server.log
+tail -n 50 runs/<run-name>/latest/logs/simulator.log
+wc -l runs/<run-name>/latest/traces/3dice_power_traces.txt
+wc -l runs/<run-name>/latest/results/3dice/output_top_die_flp_avg.txt
 ```
 
-### 3D-ICE waits forever for slot 0
+The server must be in follow mode, the stack must contain the top-die `Tflp`
+output, and the floorplan header must match the generated order.
 
-Check whether SoftHier is emitting raw power rows:
+### The simulator exits on a hook protocol error
+
+Inspect the last request, response, and simulator log:
 
 ```bash
-tail -n 20 runs/<run-name>/latest/logs/softhier.log
-wc -l runs/<run-name>/latest/traces/softhier_power_raw.txt
+cat runs/<run-name>/latest/state/power_hook_request.json
+cat runs/<run-name>/latest/state/power_hook_response.json
+tail -n 100 runs/<run-name>/latest/logs/simulator.log
 ```
 
-Then verify the runtime power hook:
+Paths must be exact and declared at `init`; powers must be finite and
+non-negative; responses must use protocol version 1 and Celsius.
 
-```bash
-make softhier-power-check
-```
+### A very small interval runs slowly
 
-If the hook is missing, rerun:
-
-```bash
-make bootstrap
-```
-
-### A run is stuck or was interrupted
-
-Stop recorded processes:
-
-```bash
-make coupled-stop RUN_NAME=<run-name>
-```
-
-Then inspect logs under:
-
-```text
-runs/<run-name>/latest/logs/
-```
-
-### Need more or fewer thermal slots
-
-Adjust the SoftHier power capture interval:
-
-```bash
-make coupled-run RUN_NAME=my_run PWR_INTERVAL_PS=100000000
-```
-
-The value is in picoseconds. Smaller values produce more SoftHier power rows
-and more 3D-ICE thermal slots.
-
-The generated `.stk` file uses the same slot duration by default:
-
-```text
-3D-ICE slot seconds = PWR_INTERVAL_PS * 1e-12
-3D-ICE transient step seconds = slot seconds / 10
-```
-
-This alignment matters because SoftHier appends one power row per
-`PWR_INTERVAL_PS`; the 3D-ICE server consumes one appended line as one thermal
-slot in local-server mode. In client-server mode, the 3D-ICE client consumes
-that line and forwards it to the server. In both modes, the server writes the
-corresponding thermal outputs.
-
-Override these only when you intentionally want a different 3D-ICE time base:
-
-```bash
-make coupled-run RUN_NAME=my_run \
-  PWR_INTERVAL_PS=100000000 \
-  ICE_SLOT_SECONDS=0.0001 \
-  ICE_STEP_SECONDS=0.00001
-```
-
-The generated floorplan targets about `256*256` non-uniform TOP_DIE cells by
-default. To request a different total, set `ICE_TARGET_TOP_DIE_CELLS`:
-
-```bash
-make coupled-run RUN_NAME=my_run ICE_TARGET_TOP_DIE_CELLS=65536
-```
+Version 1 directly executes the Python adapter once per exchange. Increase
+`POWER_INTERVAL_PS` for smoke tests or short workloads. This changes thermal
+sampling resolution, not GVSoC’s simulated functional behavior.

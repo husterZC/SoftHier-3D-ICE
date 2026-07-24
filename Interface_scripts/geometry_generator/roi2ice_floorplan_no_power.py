@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 #
 # Copyright (C) 2025 ETH Zurich and University of Bologna
 #
@@ -10,25 +11,24 @@
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
 #
 
-# Author: Chi Zhang <chizhang@ethz.ch>
-#         Kai Zhu   <kai.zhu@epfl.ch>
+"""Generate a non-uniform 3D-ICE floorplan from the system contract."""
 
-import os
 import argparse
-import importlib.util
 import json
 import math
+import os
+import sys
+from pathlib import Path
 
-SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-WORK_DIR = os.path.abspath(os.path.join(SCRIPT_DIR, "..", ".."))
-SOFTHIER_DIR = os.path.join(WORK_DIR, "SoftHier")
-DEFAULT_ARCH_FILE = os.path.join(SOFTHIER_DIR, "soft_hier", "flex_cluster", "flex_cluster_arch.py")
-DEFAULT_GEO_FILE = os.path.join(SOFTHIER_DIR, "geo.json")
-DEFAULT_OUTPUT_DIR = SOFTHIER_DIR
+
+INTERFACE_DIR = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(INTERFACE_DIR))
+
+from system_contract import floorplan_elements, load_contract  # noqa: E402
+
+
 DEFAULT_TARGET_TOP_DIE_CELLS = 256 * 256
 
 
@@ -38,20 +38,16 @@ def positive_int(value):
         raise argparse.ArgumentTypeError("value must be a positive integer")
     return parsed
 
-## Change the roi accroding to the needed granularity.
-def gen_roi(arch):
-    roi_list = []
-    for i in range(arch.num_cluster_x * arch.num_cluster_y):
-        roi_list.append(f"chip/cluster_{i}/redmule")
-        roi_list.append(f"chip/cluster_{i}/others")
-        roi_list.append(f"chip/cluster_{i}/tcdm")
-    return roi_list
+
+def contract_roi(document):
+    return [entry["name"] for entry in floorplan_elements(document)]
+
 
 def ice_template(name, position, dimension, discretization):
-    return f"""{name} : 
+    return f"""{name} :
 
-    position {position[0]}, {position[1]}; 
-    dimension {dimension[0]}, {dimension[1]}; 
+    position {position[0]}, {position[1]};
+    dimension {dimension[0]}, {dimension[1]};
     discretization  {discretization[0]}, {discretization[1]} ;
 """
 
@@ -89,17 +85,15 @@ def discretization_for_pitch(dimension, pitch):
 def total_discretized_cells(entries, pitch):
     total = 0
     for entry in entries:
-        discr_x, discr_y = discretization_for_pitch(entry["dimension"], pitch)
-        total += discr_x * discr_y
+        rows, columns = discretization_for_pitch(entry["dimension"], pitch)
+        total += rows * columns
     return total
 
 
 def choose_target_pitch(entries, target_cells):
     total_area = sum(
-        entry["dimension"][0] * entry["dimension"][1]
-        for entry in entries
+        entry["dimension"][0] * entry["dimension"][1] for entry in entries
     )
-
     if total_area <= 0.0:
         raise RuntimeError("ROI floorplan area must be positive")
 
@@ -110,19 +104,17 @@ def choose_target_pitch(entries, target_cells):
     best_total = total_discretized_cells(entries, base_pitch)
     best_error = abs(best_total - target_cells)
 
-    # The rounded per-element counts form plateaus; a dense deterministic scan is
-    # enough here and keeps the result stable across Python versions.
+    # Rounded element counts form plateaus.  A deterministic dense scan keeps
+    # results stable across Python versions and matches the previous flow.
     samples = 10001
     for index in range(samples):
         pitch = lower + (upper - lower) * index / (samples - 1)
         total = total_discretized_cells(entries, pitch)
         error = abs(total - target_cells)
-
         if error < best_error or (error == best_error and pitch < best_pitch):
             best_pitch = pitch
             best_total = total
             best_error = error
-
             if best_error == 0:
                 break
 
@@ -131,10 +123,10 @@ def choose_target_pitch(entries, target_cells):
 
 def assign_discretization(entries, target_cells):
     pitch, actual_cells = choose_target_pitch(entries, target_cells)
-
     for entry in entries:
-        entry["discretization"] = discretization_for_pitch(entry["dimension"], pitch)
-
+        entry["discretization"] = discretization_for_pitch(
+            entry["dimension"], pitch
+        )
     return actual_cells, pitch
 
 
@@ -143,76 +135,51 @@ def roi2ice(geometry, roi, output_file, target_top_die_cells):
     actual_cells, pitch = assign_discretization(entries, target_top_die_cells)
 
     os.makedirs(os.path.dirname(output_file), exist_ok=True)
-    with open(output_file, "w") as f:
+    with open(output_file, "w", encoding="utf-8") as stream:
         for entry in entries:
-            ice_entry = ice_template(
-                entry["name"],
-                entry["position"],
-                entry["dimension"],
-                entry["discretization"],
+            stream.write(
+                ice_template(
+                    entry["name"],
+                    entry["position"],
+                    entry["dimension"],
+                    entry["discretization"],
+                )
             )
-            f.write(ice_entry + "\n")
+            stream.write("\n")
 
     print(
         "Generated floorplan TOP_DIE discretization: "
         f"target {target_top_die_cells}, actual {actual_cells}, pitch {pitch:.6g}"
     )
 
-def import_module_from_path(module_path):
-    """
-    Dynamically import a module from an absolute path and mimic `from module import *`.
-    """
-    module_name = os.path.splitext(os.path.basename(module_path))[0]  # Extract the file name without extension
-    spec = importlib.util.spec_from_file_location(module_name, module_path)
-    if spec is None:
-        raise ImportError(f"Cannot find a module at path: {module_path}")
-    
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    
-    # Mimic `from module import *`
-    globals().update(vars(module))
-    return module
 
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Generate ROI for ICE")
-    parser.add_argument("arch_file",  nargs="?", default=DEFAULT_ARCH_FILE, help="Path to architecture configuration python file")
-    parser.add_argument("geo_file",  nargs="?", default=DEFAULT_GEO_FILE, help="Path to geometry configuration python file")
-    parser.add_argument("output_dir", nargs="?", default=DEFAULT_OUTPUT_DIR, help="Output directory for floorplan_nopower.flp")
+def main() -> int:
+    parser = argparse.ArgumentParser(
+        description="Generate a 3D-ICE floorplan from a system contract."
+    )
+    parser.add_argument("system_config", help="System contract JSON file.")
+    parser.add_argument("geo_file", help="Geometry JSON generated from the contract.")
+    parser.add_argument("output_file", help="Output 3D-ICE floorplan file.")
     parser.add_argument(
         "--target-top-die-cells",
         type=positive_int,
         default=DEFAULT_TARGET_TOP_DIE_CELLS,
-        help="Approximate total non-uniform TOP_DIE cells to request in the floorplan discretization.",
+        help="Approximate total non-uniform TOP_DIE cells.",
     )
     args = parser.parse_args()
-    arch_file = args.arch_file
-    geo_file = args.geo_file
-    output_dir = args.output_dir
 
-    # Process each provided module path
-    for module_path in [arch_file]:
-        # Convert to absolute path
-        absolute_path = os.path.abspath(module_path)
+    document = load_contract(args.system_config)
+    with Path(args.geo_file).resolve().open("r", encoding="utf-8") as stream:
+        geometry = json.load(stream)
 
-        if not os.path.isfile(absolute_path):
-            print(f"Error: {absolute_path} is not a valid file.")
-            continue
+    roi2ice(
+        geometry,
+        contract_roi(document),
+        str(Path(args.output_file).resolve()),
+        args.target_top_die_cells,
+    )
+    return 0
 
-        try:
-            # Import the module dynamically
-            module = import_module_from_path(absolute_path)
-            # print(f"Successfully imported: {module.__name__} from {absolute_path}")
-        except Exception as e:
-            print(f"Failed to import {absolute_path}: {e}")
 
-    arch = FlexClusterArch()
-    with open(geo_file, "r") as f:
-        geometry = json.load(f)
-
-    # Generate ROI
-    roi = gen_roi(arch)
-
-    # Convert ROI to ICE format
-    output_file = os.path.join(output_dir, "floorplan_nopower.flp")
-    roi2ice(geometry, roi, output_file, args.target_top_die_cells)
+if __name__ == "__main__":
+    raise SystemExit(main())

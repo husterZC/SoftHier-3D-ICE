@@ -1,7 +1,8 @@
 # 🧊 SoftHier-3D-ICE
 
-SoftHier-3D-ICE generates 3D-ICE inputs from the default SoftHier architecture and
-runs them through a local 3D-ICE server workflow.
+SoftHier-3D-ICE couples a simulator power provider to a local 3D-ICE thermal
+workflow. SoftHier is the default provider, while geometry generation and the
+3D-ICE hook consume a simulator-neutral JSON contract.
 
 Unless noted otherwise, run commands from the repository root.
 
@@ -22,6 +23,8 @@ make co-simulation RUN_NAME=default_app
 
 See [co-simulation.md](co-simulation.md) for the detailed tutorial, run directory layout,
 alternate config/app examples, and cleanup targets.
+See [Interface_scripts/README.md](Interface_scripts/README.md) for the provider
+API and instructions for changing or replacing the SoftHier submodule.
 
 ## 🚀 Setup
 
@@ -37,31 +40,40 @@ source init.sh
 For run-local generated files, use the root target:
 
 ```bash
-make ice-inputs RUN_NAME=default_app PWR_INTERVAL_PS=100000000
+make ice-inputs RUN_NAME=default_app POWER_INTERVAL_PS=100000000
 ```
 
 This writes timestamped files under:
 
 ```text
 runs/default_app/<timestamp>/generated/
+  system_config.json
   geo.json
   3dice/
     floorplan_nopower.flp
     ice.stk
 ```
 
-The target uses `Interface_scripts/geometry_generator/generate_3dice_inputs.py`,
-which runs the root geometry, floorplan, and stack generators. It does not call
-SoftHier's `ice_prepare` target.
+The selected provider first exports `system_config.json`. The generic geometry,
+floorplan, and stack generators consume that file; they do not import SoftHier
+or call SoftHier's `ice_prepare` target.
 
 Equivalent direct command:
 
 ```bash
-python Interface_scripts/geometry_generator/generate_3dice_inputs.py   --arch SoftHier/soft_hier/flex_cluster/flex_cluster_arch.py   --geo runs/manual/generated/geo.json   --floorplan runs/manual/generated/3dice/floorplan_nopower.flp   --stk runs/manual/generated/3dice/ice.stk   --pwr-interval-ps 100000000
+SYSTEM_CONFIG_FILE=$PWD/runs/manual/generated/system_config.json \
+  Interface_scripts/providers/softhier/provider.sh export-system
+
+python Interface_scripts/geometry_generator/generate_3dice_inputs.py \
+  --system-config runs/manual/generated/system_config.json \
+  --geo runs/manual/generated/geo.json \
+  --floorplan runs/manual/generated/3dice/floorplan_nopower.flp \
+  --stk runs/manual/generated/3dice/ice.stk \
+  --power-interval-ps 100000000
 ```
 
-The stack slot duration is generated from `PWR_INTERVAL_PS * 1e-12` by default,
-so one SoftHier power row corresponds to one 3D-ICE thermal slot. The transient
+The stack slot duration is generated from `POWER_INTERVAL_PS * 1e-12` by default,
+so one provider power row corresponds to one 3D-ICE thermal slot. The transient
 solver step defaults to one tenth of that slot.
 
 
@@ -97,16 +109,20 @@ make coupled-run RUN_NAME=default_app
 ```
 
 The root runner generates run-local 3D-ICE inputs, starts the 3D-ICE server in
-`DICE_RUN_MODE=local-server` by default, starts the trace adapter, runs SoftHier,
-and writes results under `runs/<run-name>/<timestamp>/`. In local-server mode,
-no 3D-ICE client is started for normal local runs. The 3D-ICE server reads
-`traces/3dice_power_traces.txt` directly with `--follow --until-minus-one`
-and writes stack-declared thermal output files after each slot.
+`DICE_RUN_MODE=local-server`, then runs the provider. GVSoC directly invokes
+the versioned hook after each complete interval: the hook appends one 3D-ICE
+power slot, waits for `Tflp`, converts Kelvin to component temperatures in
+Celsius, and returns them to GVSoC. The final partial interval is reported but
+not applied. Results are written under `runs/<run-name>/<timestamp>/`.
+
+In local-server mode no 3D-ICE client is started. The server reads
+`traces/3dice_power_traces.txt` with `--follow --until-minus-one`.
 
 
-During the SoftHier phase, the terminal shows a green framed live window with
-the latest 5 SoftHier log lines. Change the window size with
-`SOFTHIER_LOG_TAIL_LINES=10`, or disable it with `SOFTHIER_LOG_TAIL_LINES=0`.
+During the simulator phase, the terminal shows a green framed live window with
+the latest 5 provider log lines. Change the window size with
+`SIMULATOR_LOG_TAIL_LINES=10`, or disable it with
+`SIMULATOR_LOG_TAIL_LINES=0`.
 
 For isolated 3D-ICE debugging, use the generated stack file from a run directory
 with the binaries in `3D-ICE/bin/` and a compatible 3D-ICE power trace.
@@ -115,7 +131,7 @@ Example:
 
 ```bash
 REPO_ROOT=$PWD
-RUN_DIR=$PWD/runs/manual make ice-inputs PWR_INTERVAL_PS=100000000
+RUN_DIR=$PWD/runs/manual make ice-inputs POWER_INTERVAL_PS=100000000
 ```
 
 Then run `3D-ICE/bin/3D-ICE-Server` with the generated stack and a compatible
@@ -159,4 +175,3 @@ You can also generate the GIF manually after a run:
 ```bash
 python Interface_scripts/plot_runtime_temperature_map/plot_runtime_tmap.py   --coords runs/<run-name>/latest/results/3dice/xyaxis_TOP_DIE.txt   --map runs/<run-name>/latest/results/3dice/output_top_die.txt   --gif runs/<run-name>/latest/results/3dice/temperature_map.gif   --once
 ```
-

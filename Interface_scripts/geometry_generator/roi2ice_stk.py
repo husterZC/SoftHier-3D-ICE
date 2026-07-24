@@ -16,6 +16,7 @@
 #
 
 import argparse
+import math
 import os
 import re
 
@@ -29,7 +30,7 @@ DEFAULT_HEAT_TRANSFER_COEFFICIENT = 1.0e-7
 
 def positive_float(value):
     parsed = float(value)
-    if parsed <= 0:
+    if not math.isfinite(parsed) or parsed <= 0:
         raise argparse.ArgumentTypeError("value must be positive")
     return parsed
 
@@ -79,7 +80,14 @@ def get_floorplan_path_for_stk(floorplan_file, stk_file):
     return rel_path
 
 
-def stk_template(chip_length, chip_width, floorplan_path, slot_seconds, step_seconds):
+def stk_template(
+    chip_length,
+    chip_width,
+    floorplan_path,
+    slot_seconds,
+    step_seconds,
+    initial_temperature_k,
+):
     return f"""material SILICON :
    thermal conductivity     1.30e-4 ;
    volumetric heat capacity 1.628e-12 ;
@@ -90,7 +98,7 @@ material BEOL :
 
 top heat sink :
    heat transfer coefficient {format_number(DEFAULT_HEAT_TRANSFER_COEFFICIENT)} ;
-   temperature               300 ;
+   temperature               {format_number(initial_temperature_k)} ;
 
 dimensions :
    chip length {format_number(chip_length)}, width {format_number(chip_width)} ;
@@ -111,16 +119,23 @@ layer   CONN_TO_PCB     PCB ;
 
 solver:
    transient step {format_number(step_seconds)}, slot {format_number(slot_seconds)} ;
-   initial temperature 300.0 ;
+   initial temperature {format_number(initial_temperature_k)} ;
    numofcores 8 ;   
 
 output:
+     Tflp( TOP_DIE,   "output_top_die_flp_avg.txt",    average, slot ) ;
      Tmap( TOP_DIE,    "output_top_die.txt",                     slot ) ;
 
 """
 
 
-def roi2ice_stk(floorplan_file, stk_file, slot_seconds, step_seconds):
+def roi2ice_stk(
+    floorplan_file,
+    stk_file,
+    slot_seconds,
+    step_seconds,
+    initial_temperature_k,
+):
     min_x, min_y, max_x, max_y = parse_floorplan_region(floorplan_file)
 
     if min_x != 0 or min_y != 0:
@@ -130,7 +145,16 @@ def roi2ice_stk(floorplan_file, stk_file, slot_seconds, step_seconds):
     os.makedirs(os.path.dirname(os.path.abspath(stk_file)), exist_ok=True)
 
     with open(stk_file, "w", encoding="utf-8") as f:
-        f.write(stk_template(max_x, max_y, floorplan_path, slot_seconds, step_seconds))
+        f.write(
+            stk_template(
+                max_x,
+                max_y,
+                floorplan_path,
+                slot_seconds,
+                step_seconds,
+                initial_temperature_k,
+            )
+        )
 
 
 def main():
@@ -141,12 +165,18 @@ def main():
         "--slot-seconds",
         type=positive_float,
         default=0.2,
-        help="3D-ICE slot duration in seconds. This should match the SoftHier power interval.",
+        help="3D-ICE slot duration in seconds. This should match the provider power interval.",
     )
     parser.add_argument(
         "--step-seconds",
         type=positive_float,
         help="3D-ICE transient solver step in seconds. Defaults to slot-seconds / 10.",
+    )
+    parser.add_argument(
+        "--initial-temperature-k",
+        type=positive_float,
+        default=300.0,
+        help="Initial and heat-sink temperature in Kelvin.",
     )
     args = parser.parse_args()
 
@@ -154,7 +184,13 @@ def main():
     if step_seconds is None:
         step_seconds = args.slot_seconds / 10.0
 
-    roi2ice_stk(args.floorplan_file, args.stk_file, args.slot_seconds, step_seconds)
+    roi2ice_stk(
+        args.floorplan_file,
+        args.stk_file,
+        args.slot_seconds,
+        step_seconds,
+        args.initial_temperature_k,
+    )
 
 
 if __name__ == "__main__":
