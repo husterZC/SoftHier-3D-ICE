@@ -6,6 +6,65 @@ workflow. SoftHier is the default provider, while geometry generation and the
 
 Unless noted otherwise, run commands from the repository root.
 
+## OS Requirements
+
+The supported setup is a 64-bit Linux host with Bash, GNU Make, a C/C++
+compiler with C++17 support, OpenBLAS, and Python 3.12. The automatic
+native-dependency bootstrap currently downloads an x86-64 CMake binary. On
+another CPU architecture, install CMake 3.25 or newer and pass its executable
+with `SOFTHIER_DRAMSYS_CMAKE=/path/to/cmake`.
+
+On Debian or Ubuntu, install the host packages with:
+
+```bash
+sudo apt-get update
+sudo apt-get install -y \
+  build-essential cmake bison flex libopenblas-dev csh unzip \
+  git curl wget ca-certificates pkg-config \
+  python3 python3-pip python3-venv \
+  libsndfile1-dev libsdl2-dev libsdl2-ttf-dev \
+  rsync autoconf automake texinfo libtool
+```
+
+Install a Conda distribution if `conda --version` is not available; the
+[official Conda Linux installation guide](https://docs.conda.io/projects/conda/en/latest/user-guide/install/linux.html)
+describes the available installers. The default SoftHier provider expects an
+existing environment named `py312`. It activates that environment for provider
+commands, but it does not create the environment or install its Python
+packages.
+
+Initialize the requirement-bearing submodules, create the environment, and
+install the required Python packages:
+
+```bash
+git submodule update --init --recursive
+
+conda create -y -n py312 python=3.12 pip
+conda activate py312
+
+python -m pip install --upgrade pip setuptools wheel
+python -m pip install \
+  -r SoftHier/requirements.txt \
+  -r SoftHier/core/requirements.txt \
+  -r SoftHier/gapy/requirements.txt \
+  -r 3D-ICE/requirements.txt
+
+python --version
+python -m pip check
+```
+
+Keep `py312` active while running the root `make` commands because the generic
+geometry and co-simulation scripts use the active `python3`. To use a
+differently named Python 3.12 environment, activate it and export its name:
+
+```bash
+conda activate my-softhier-env
+export SOFTHIER_CONDA_ENV=my-softhier-env
+```
+
+The bootstrap also needs outbound HTTPS access for native dependencies and
+GitHub SSH access for the default SoftHier SDK URL.
+
 ## Recommended Co-Simulation Flow
 
 For the current root-level SoftHier + 3D-ICE coupled flow, start with:
@@ -28,10 +87,12 @@ API and instructions for changing or replacing the SoftHier submodule.
 
 ## 🚀 Setup
 
-Initialize the submodules and set up the SoftHier environment:
+After installing the OS and Python requirements above, initialize and build
+the complete SoftHier and 3D-ICE environment:
 
 ```bash
-source init.sh
+conda activate py312
+make bootstrap
 ```
 
 
