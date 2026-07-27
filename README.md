@@ -85,6 +85,29 @@ alternate config/app examples, and cleanup targets.
 See [Interface_scripts/README.md](Interface_scripts/README.md) for the provider
 API and instructions for changing or replacing the SoftHier submodule.
 
+## Continuous Integration
+
+The GitHub Actions workflow in
+[`.github/workflows/ubuntu-ci.yml`](.github/workflows/ubuntu-ci.yml) runs on an
+Ubuntu 24.04 hosted runner for pushes, pull requests, and manual dispatches. It
+installs the documented host and Python requirements, tests the neutral
+interfaces, bootstraps both simulators, and runs the normal coupled simulation.
+
+The coupled job intentionally leaves the simulation controls at their
+repository defaults:
+
+- architecture: `arch_NoC1024.py`;
+- application: the provider default `soft_hier_sdk/runtime/app_example`, which
+  executes a one-cluster RedMule GEMM;
+- power interval: `100000000` ps;
+- target top-die discretization: `65536` thermal cells.
+
+There is no reduced CI-only architecture, workload, coupling interval, or
+thermal mesh. The job also verifies successful simulator and 3D-ICE exits and
+the `init`, periodic `update`, and final power-hook exchanges. Its summary,
+manifest, logs, traces, generated coupling inputs, and floorplan-average
+temperature output are retained as workflow artifacts.
+
 ## 🚀 Setup
 
 After installing the OS and Python requirements above, initialize and build

@@ -1,0 +1,133 @@
+name: Ubuntu CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  coupled-run:
+    name: Default coupled run
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+
+    env:
+      CC: gcc
+      CXX: g++
+      SOFTHIER_BOOTSTRAP_JOBS: "4"
+      SOFTHIER_CONDA_ENV: py312
+      SOFTHIER_DRAMSYS_CMAKE: /usr/bin/cmake
+      SOFTHIER_SDK_URL: https://github.com/pulp-platform/softhier-sdk.git
+
+    steps:
+      - name: Check out repository and submodules
+        uses: actions/checkout@v7
+        with:
+          submodules: recursive
+          persist-credentials: false
+
+      - name: Install Ubuntu requirements
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            autoconf \
+            automake \
+            bison \
+            build-essential \
+            ca-certificates \
+            ccache \
+            cmake \
+            csh \
+            curl \
+            flex \
+            git \
+            libopenblas-dev \
+            libsndfile1-dev \
+            libsdl2-dev \
+            libsdl2-ttf-dev \
+            libtool \
+            pkg-config \
+            python3 \
+            python3-pip \
+            python3-venv \
+            rsync \
+            texinfo \
+            unzip \
+            wget
+
+      - name: Create the Python 3.12 environment
+        run: |
+          source "$CONDA/etc/profile.d/conda.sh"
+          conda create -y -n "$SOFTHIER_CONDA_ENV" python=3.12 pip
+          python_path="$CONDA/envs/$SOFTHIER_CONDA_ENV/bin/python"
+          "$python_path" -m pip install --upgrade pip setuptools wheel
+          "$python_path" -m pip install \
+            -r SoftHier/requirements.txt \
+            -r SoftHier/core/requirements.txt \
+            -r SoftHier/gapy/requirements.txt \
+            -r 3D-ICE/requirements.txt
+          "$python_path" -m pip check
+          printf 'PYTHON=%s\n' "$python_path" >> "$GITHUB_ENV"
+
+      - name: Test the simulator-neutral interfaces
+        run: make interface-tests
+
+      - name: Bootstrap SoftHier and 3D-ICE
+        run: make bootstrap
+
+      - name: Run the default coupled simulation
+        run: |
+          make coupled-run \
+            RUN_NAME=ci-default \
+            RUN_DIR="$RUNNER_TEMP/softhier-3dice-default"
+
+      - name: Validate the coupled-run result
+        run: |
+          run_dir="$RUNNER_TEMP/softhier-3dice-default"
+          summary="$run_dir/summary.txt"
+          manifest="$run_dir/run.env"
+          hook_trace="$run_dir/traces/power_hook_trace.jsonl"
+
+          test -s "$summary"
+          test -s "$manifest"
+          test -s "$hook_trace"
+          test -s "$run_dir/traces/component_temperatures.csv"
+          test -s "$run_dir/results/3dice/output_top_die_flp_avg.txt"
+
+          grep -Fqx "simulator: 0" "$summary"
+          grep -Fqx "3dice_server: 0" "$summary"
+          grep -Fqx "power_hook: integrated with simulator" "$summary"
+          grep -Fqx "simulator_app: <provider default>" "$summary"
+          grep -Eq '^simulator_config: .*/arch_NoC1024\.py$' "$summary"
+          grep -Fqx "power_interval_ps: 100000000" "$summary"
+          grep -Fqx "ICE_TARGET_TOP_DIE_CELLS=65536" "$manifest"
+
+          exchanges="$(awk -F': ' \
+            '$1 == "gvsoc_power_hook_exchanges" { print $2 }' \
+            "$summary")"
+          test "${exchanges:-0}" -ge 3
+
+          grep -q '"phase":"init"' "$hook_trace"
+          grep -q '"phase":"update"' "$hook_trace"
+          tail -n 1 "$hook_trace" | grep -q '"phase":"final"'
+
+      - name: Upload coupled-run diagnostics
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: default-coupled-run-${{ github.run_id }}-${{ github.run_attempt }}
+          if-no-files-found: ignore
+          retention-days: 14
+          path: |
+            ${{ runner.temp }}/softhier-3dice-default/summary.txt
+            ${{ runner.temp }}/softhier-3dice-default/run.env
+            ${{ runner.temp }}/softhier-3dice-default/logs/
+            ${{ runner.temp }}/softhier-3dice-default/traces/
+            ${{ runner.temp }}/softhier-3dice-default/generated/system_config.json
+            ${{ runner.temp }}/softhier-3dice-default/generated/power_hook_config.json
+            ${{ runner.temp }}/softhier-3dice-default/generated/3dice/floorplan_nopower.flp
+            ${{ runner.temp }}/softhier-3dice-default/generated/3dice/ice.stk
+            ${{ runner.temp }}/softhier-3dice-default/results/3dice/output_top_die_flp_avg.txt
