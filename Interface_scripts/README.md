@@ -219,6 +219,11 @@ The current provider pins SDK commit
 `1244fdbc34977aff5a6a10ead079053fb5d31d00`. Override
 `SOFTHIER_SDK_URL` only to use a mirror; override
 `SOFTHIER_SDK_COMMIT` deliberately when validating a new SDK revision.
+On a fresh clone, `bootstrap` also prepares SystemC `3.0.1` and patched
+DRAMSys commit `8565f18b869c26eab712e3bb6494c4d6ae5dd73f` below the
+provider work directory. The provider exports `SYSTEMC_HOME` while building
+GVSoC and uses the architecture repository's DRAMSys configurations without
+modifying the `core` submodule.
 
 The parent SoftHier repository and its engine submodule both use branch
 `chi/power_interface`. When replacing SoftHier, preserve the engine protocol

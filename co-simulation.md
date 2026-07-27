@@ -95,7 +95,18 @@ clone the SoftHier SDK when absent, pin it to:
 1244fdbc34977aff5a6a10ead079053fb5d31d00
 ```
 
-and build or verify the 3D-ICE client/server binaries.
+It also builds the native dependencies required by the current SoftHier
+branch:
+
+- SystemC `3.0.1`;
+- patched DRAMSys commit
+  `8565f18b869c26eab712e3bb6494c4d6ae5dd73f`; and
+- a pinned CMake `3.28.1` binary used only for native dependency builds.
+
+These dependencies are necessary even when the selected architecture does not
+instantiate DRAMSys, because GVSoC compiles the memory model modules during a
+clean build. Bootstrap then builds or verifies the 3D-ICE client/server
+binaries.
 
 The default SDK URL is SSH-based. A mirror can be selected with:
 
@@ -109,10 +120,20 @@ If a compatible SDK toolchain already exists, avoid another download with:
 SOFTHIER_SDK_TOOLCHAIN_SOURCE=/path/to/toolchain make bootstrap
 ```
 
-Provider build products and `ccache` data live under
-`SoftHier/.power_interface/`. The SDK checkout is
-`SoftHier/soft_hier_sdk/`. Both are ignored by the SoftHier integration
-branch.
+Provider build products, SystemC, DRAMSys, downloaded dependency sources, and
+`ccache` data live under `SoftHier/.power_interface/`. The SDK checkout is
+`SoftHier/soft_hier_sdk/`. Both locations are ignored by the SoftHier
+integration branch.
+
+Use an existing CMake 3.25 or newer for the native dependency builds instead
+of the pinned download when desired:
+
+```bash
+SOFTHIER_DRAMSYS_CMAKE=/path/to/cmake make bootstrap
+```
+
+`SOFTHIER_NATIVE_DEPS_DIR` can relocate the native dependency cache, while
+`SOFTHIER_BOOTSTRAP_JOBS` controls its build parallelism.
 
 Typical host packages include:
 
