@@ -1,5 +1,6 @@
 runs/
 plan.md
+/tmp/
 
 # Python/script caches.
 __pycache__/

@@ -4,7 +4,8 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
 
-SOFTHIER_DIR="${SOFTHIER_DIR:-$ROOT_DIR/SoftHier}"
+SIMULATOR_PROVIDER="${SIMULATOR_PROVIDER:-}"
+SIMULATOR_NAME="${SIMULATOR_NAME:-simulator}"
 DICE_DIR="${DICE_DIR:-$ROOT_DIR/3D-ICE}"
 DICE_BIN_DIR="${DICE_BIN_DIR:-$DICE_DIR/bin}"
 GEOMETRY_SCRIPT_DIR="${GEOMETRY_SCRIPT_DIR:-$ROOT_DIR/Interface_scripts/geometry_generator}"
@@ -26,22 +27,22 @@ RUN_3DICE_GEN_DIR="${RUN_3DICE_GEN_DIR:-$GENERATED_DIR/3dice}"
 RUN_3DICE_DIR="${RUN_3DICE_DIR:-$RESULT_DIR/3dice}"
 LOG_DIR="${LOG_DIR:-$RUN_DIR/logs}"
 PID_DIR="${PID_DIR:-$RUN_DIR/pids}"
-CFG="${CFG:-$SOFTHIER_DIR/soft_hier/flex_cluster/flex_cluster_arch.py}"
-APP="${APP:-}"
-PLD="${PLD:-}"
+SIMULATOR_CONFIG="${SIMULATOR_CONFIG:-}"
+SIMULATOR_APP="${SIMULATOR_APP:-}"
+SIMULATOR_PLATFORM="${SIMULATOR_PLATFORM:-}"
 PORT="${PORT:-54322}"
 SERVER_HOST="${SERVER_HOST:-127.0.0.1}"
 DICE_RUN_MODE="${DICE_RUN_MODE:-local-server}"
-PWR_INTERVAL_PS="${PWR_INTERVAL_PS:-100000000}"
+POWER_INTERVAL_PS="${POWER_INTERVAL_PS:-100000000}"
 ICE_SLOT_SECONDS="${ICE_SLOT_SECONDS:-}"
 ICE_STEP_SECONDS="${ICE_STEP_SECONDS:-}"
 ICE_TARGET_TOP_DIE_CELLS="${ICE_TARGET_TOP_DIE_CELLS:-65536}"
-OTHERS_POWER="${OTHERS_POWER:-0.0}"
-BUILD_SOFTHIER="${BUILD_SOFTHIER:-1}"
+DEFAULT_POWER_W="${DEFAULT_POWER_W:-}"
+BUILD_SIMULATOR="${BUILD_SIMULATOR:-1}"
 BUILD_3DICE="${BUILD_3DICE:-1}"
 WAIT_TIMEOUT="${WAIT_TIMEOUT:-180}"
 EXIT_TIMEOUT="${EXIT_TIMEOUT:-120}"
-SOFTHIER_LOG_TAIL_LINES="${SOFTHIER_LOG_TAIL_LINES:-5}"
+SIMULATOR_LOG_TAIL_LINES="${SIMULATOR_LOG_TAIL_LINES:-5}"
 PYTHON="${PYTHON:-python3}"
 MAKE_CMD="${MAKE:-make}"
 AUTO_BOOTSTRAP="${AUTO_BOOTSTRAP:-0}"
@@ -57,16 +58,27 @@ else
     ICE_GIF_PYTHON="${ICE_GIF_PYTHON:-$PYTHON}"
 fi
 
+SYSTEM_CONFIG_FILE="${SYSTEM_CONFIG_FILE:-$GENERATED_DIR/system_config.json}"
 GEO_FILE="${GEO_FILE:-$GENERATED_DIR/geo.json}"
 ICE_FLOORPLAN_FILE="${ICE_FLOORPLAN_FILE:-$RUN_3DICE_GEN_DIR/floorplan_nopower.flp}"
 ICE_STK_FILE="${ICE_STK_FILE:-$RUN_3DICE_GEN_DIR/ice.stk}"
 ICE_RUNTIME_FLOORPLAN_FILE="${ICE_RUNTIME_FLOORPLAN_FILE:-$RUN_3DICE_DIR/floorplan_nopower.flp}"
 ICE_RUNTIME_STK_FILE="${ICE_RUNTIME_STK_FILE:-$RUN_3DICE_DIR/ice.stk}"
-RAW_POWER_TRACE="${RAW_POWER_TRACE:-$TRACE_DIR/softhier_power_raw.txt}"
+RAW_POWER_TRACE="${RAW_POWER_TRACE:-$TRACE_DIR/power_hook_trace.jsonl}"
 DICE_POWER_TRACE="${DICE_POWER_TRACE:-$TRACE_DIR/3dice_power_traces.txt}"
-DONE_FILE="${DONE_FILE:-$STATE_DIR/softhier.done}"
+DONE_FILE="${DONE_FILE:-$STATE_DIR/simulator.done}"
+POWER_HOOK_EXECUTABLE="${POWER_HOOK_EXECUTABLE:-$SCRIPT_DIR/3dice_power_hook.py}"
+POWER_HOOK_CONFIG_FILE="${POWER_HOOK_CONFIG_FILE:-$GENERATED_DIR/power_hook_config.json}"
+POWER_HOOK_REQUEST_FILE="${POWER_HOOK_REQUEST_FILE:-$STATE_DIR/power_hook_request.json}"
+POWER_HOOK_RESPONSE_FILE="${POWER_HOOK_RESPONSE_FILE:-$STATE_DIR/power_hook_response.json}"
+POWER_HOOK_TRACE_FILE="${POWER_HOOK_TRACE_FILE:-$RAW_POWER_TRACE}"
+COMPONENT_TEMPERATURE_TRACE="${COMPONENT_TEMPERATURE_TRACE:-$TRACE_DIR/component_temperatures.csv}"
+THERMAL_FEEDBACK_FILE="${THERMAL_FEEDBACK_FILE:-$RUN_3DICE_DIR/output_top_die_flp_avg.txt}"
+POWER_HOOK_POLL_SECONDS="${POWER_HOOK_POLL_SECONDS:-0.02}"
+POWER_HOOK_TIMEOUT_SECONDS="${POWER_HOOK_TIMEOUT_SECONDS:-$WAIT_TIMEOUT}"
 MANIFEST_FILE="${MANIFEST_FILE:-$RUN_DIR/run.env}"
 SUMMARY_FILE="${SUMMARY_FILE:-$RUN_DIR/summary.txt}"
+SIMULATOR_LOG_FILE="${SIMULATOR_LOG_FILE:-$LOG_DIR/simulator.log}"
 
 SERVER_BIN="$DICE_BIN_DIR/3D-ICE-Server"
 CLIENT_BIN="$DICE_BIN_DIR/3D-ICE-Client"
@@ -88,19 +100,20 @@ Environment overrides:
   RUN_NAME=$RUN_NAME
   RUN_ID=$RUN_ID
   RUN_DIR=$RUN_DIR
-  CFG=$CFG
-  APP=$APP
-  PLD=$PLD
+  SIMULATOR_PROVIDER=$SIMULATOR_PROVIDER
+  SIMULATOR_CONFIG=$SIMULATOR_CONFIG
+  SIMULATOR_APP=$SIMULATOR_APP
+  SIMULATOR_PLATFORM=$SIMULATOR_PLATFORM
   PORT=$PORT
   DICE_RUN_MODE=$DICE_RUN_MODE
-  PWR_INTERVAL_PS=$PWR_INTERVAL_PS
+  POWER_INTERVAL_PS=$POWER_INTERVAL_PS
   ICE_SLOT_SECONDS=$ICE_SLOT_SECONDS
   ICE_STEP_SECONDS=$ICE_STEP_SECONDS
   ICE_TARGET_TOP_DIE_CELLS=$ICE_TARGET_TOP_DIE_CELLS
-  OTHERS_POWER=$OTHERS_POWER
-  BUILD_SOFTHIER=$BUILD_SOFTHIER
+  DEFAULT_POWER_W=$DEFAULT_POWER_W
+  BUILD_SIMULATOR=$BUILD_SIMULATOR
   BUILD_3DICE=$BUILD_3DICE
-  SOFTHIER_LOG_TAIL_LINES=$SOFTHIER_LOG_TAIL_LINES
+  SIMULATOR_LOG_TAIL_LINES=$SIMULATOR_LOG_TAIL_LINES
   ICE_GENERATE_GIF=$ICE_GENERATE_GIF
   ICE_GIF_FILE=$ICE_GIF_FILE
   ICE_GIF_STRIDE=$ICE_GIF_STRIDE
@@ -108,6 +121,9 @@ Environment overrides:
   ICE_GIF_FPS=$ICE_GIF_FPS
   ICE_GIF_WRITER=$ICE_GIF_WRITER
   ICE_GIF_PYTHON=$ICE_GIF_PYTHON
+  POWER_HOOK_EXECUTABLE=$POWER_HOOK_EXECUTABLE
+  POWER_HOOK_POLL_SECONDS=$POWER_HOOK_POLL_SECONDS
+  POWER_HOOK_TIMEOUT_SECONDS=$POWER_HOOK_TIMEOUT_SECONDS
 USAGE
 }
 
@@ -119,13 +135,6 @@ require_file() {
 require_executable() {
     local path="$1"
     [[ -x "$path" ]] || die "missing executable: $path"
-}
-
-source_softhier_env() {
-    set +u
-    # shellcheck source=/dev/null
-    source ./sourceme.sh
-    set -u
 }
 
 pid_is_running() {
@@ -140,6 +149,38 @@ pid_is_running() {
 git_commit() {
     local dir="$1"
     git -C "$dir" rev-parse --short HEAD 2>/dev/null || printf 'unknown'
+}
+
+provider_command() {
+    ROOT_DIR="$ROOT_DIR" \
+    SOFTHIER_DIR="${SOFTHIER_DIR:-$ROOT_DIR/SoftHier}" \
+    RUN_DIR="$RUN_DIR" \
+    SIMULATOR_CONFIG="$SIMULATOR_CONFIG" \
+    SIMULATOR_APP="$SIMULATOR_APP" \
+    SIMULATOR_PLATFORM="$SIMULATOR_PLATFORM" \
+    POWER_INTERVAL_PS="$POWER_INTERVAL_PS" \
+    RAW_POWER_TRACE="$RAW_POWER_TRACE" \
+    SYSTEM_CONFIG_FILE="$SYSTEM_CONFIG_FILE" \
+    GEO_FILE="$GEO_FILE" \
+    DEFAULT_POWER_W="$DEFAULT_POWER_W" \
+    POWER_HOOK_EXECUTABLE="$POWER_HOOK_EXECUTABLE" \
+    POWER_HOOK_CONFIG_FILE="$POWER_HOOK_CONFIG_FILE" \
+    POWER_HOOK_REQUEST_FILE="$POWER_HOOK_REQUEST_FILE" \
+    POWER_HOOK_RESPONSE_FILE="$POWER_HOOK_RESPONSE_FILE" \
+    POWER_HOOK_TRACE_FILE="$POWER_HOOK_TRACE_FILE" \
+    PYTHON="$PYTHON" \
+    MAKE="$MAKE_CMD" \
+        "$SIMULATOR_PROVIDER" "$@"
+}
+
+resolve_provider() {
+    [[ -n "$SIMULATOR_PROVIDER" ]] || die "SIMULATOR_PROVIDER is required"
+    require_executable "$SIMULATOR_PROVIDER"
+    if [[ -z "$SIMULATOR_CONFIG" ]]; then
+        SIMULATOR_CONFIG="$(provider_command default-config)"
+    fi
+    SIMULATOR_NAME="$(provider_command name)"
+    [[ -n "$SIMULATOR_NAME" ]] || die "simulator provider returned an empty name"
 }
 
 kv() {
@@ -157,7 +198,7 @@ effective_slot_seconds() {
     if [[ -n "$ICE_SLOT_SECONDS" ]]; then
         format_seconds "$ICE_SLOT_SECONDS"
     else
-        awk -v ps="$PWR_INTERVAL_PS" 'BEGIN { printf "%.15g", ps * 1e-12 }'
+        awk -v ps="$POWER_INTERVAL_PS" 'BEGIN { printf "%.15g", ps * 1e-12 }'
     fi
 }
 
@@ -173,9 +214,9 @@ nonnegative_integer() {
     [[ "$1" =~ ^[0-9]+$ ]]
 }
 
-validate_softhier_log_tail_lines() {
-    nonnegative_integer "$SOFTHIER_LOG_TAIL_LINES" ||
-        die "SOFTHIER_LOG_TAIL_LINES must be a non-negative integer"
+validate_simulator_log_tail_lines() {
+    nonnegative_integer "$SIMULATOR_LOG_TAIL_LINES" ||
+        die "SIMULATOR_LOG_TAIL_LINES must be a non-negative integer"
 }
 
 validate_target_top_die_cells() {
@@ -265,16 +306,21 @@ reset_runtime_files() {
         "$RAW_POWER_TRACE" \
         "$DICE_POWER_TRACE" \
         "$DONE_FILE" \
+        "$POWER_HOOK_CONFIG_FILE" \
+        "$POWER_HOOK_REQUEST_FILE" \
+        "$POWER_HOOK_RESPONSE_FILE" \
+        "$POWER_HOOK_TRACE_FILE" \
+        "$COMPONENT_TEMPERATURE_TRACE" \
         "$LOG_DIR/3dice_server.log" \
         "$LOG_DIR/3dice_client.log" \
-        "$LOG_DIR/softhier.log" \
+        "$SIMULATOR_LOG_FILE" \
         "$LOG_DIR/adapter.log" \
         "$LOG_DIR/tmap_gif.log" \
         "$PID_DIR/3dice_server.pid" \
         "$PID_DIR/3dice_client.pid" \
         "$PID_DIR/adapter.pid" \
-        "$PID_DIR/softhier.pid" \
-        "$PID_DIR/softhier_log_tail.pid" \
+        "$PID_DIR/simulator.pid" \
+        "$PID_DIR/simulator_log_tail.pid" \
         "$RUN_3DICE_DIR/output_top_die_flp_avg.txt" \
         "$RUN_3DICE_DIR/output_top_die_flp_max.txt" \
         "$RUN_3DICE_DIR/output_top_die_flp_min.txt" \
@@ -315,17 +361,24 @@ build_or_verify_3dice() {
     fi
 }
 
+prepare_system_config() {
+    log "Exporting system contract through $SIMULATOR_NAME provider"
+    provider_command export-system
+    require_file "$SYSTEM_CONFIG_FILE"
+    "$PYTHON" "$ROOT_DIR/Interface_scripts/system_contract.py" "$SYSTEM_CONFIG_FILE"
+}
+
 generate_ice_inputs() {
-    require_file "$CFG"
+    require_file "$SYSTEM_CONFIG_FILE"
     log "Generating 3D-ICE inputs under $RUN_3DICE_GEN_DIR"
 
     local args=(
         "$GEOMETRY_SCRIPT_DIR/generate_3dice_inputs.py"
-        "--arch" "$CFG"
+        "--system-config" "$SYSTEM_CONFIG_FILE"
         "--geo" "$GEO_FILE"
         "--floorplan" "$ICE_FLOORPLAN_FILE"
         "--stk" "$ICE_STK_FILE"
-        "--pwr-interval-ps" "$PWR_INTERVAL_PS"
+        "--power-interval-ps" "$POWER_INTERVAL_PS"
         "--target-top-die-cells" "$ICE_TARGET_TOP_DIE_CELLS"
     )
 
@@ -350,6 +403,32 @@ prepare_runtime_3dice_inputs() {
     if [[ -f "$RUN_3DICE_GEN_DIR/conductance_layer.txt" ]]; then
         cp -f "$RUN_3DICE_GEN_DIR/conductance_layer.txt" "$RUN_3DICE_DIR/conductance_layer.txt"
     fi
+
+    # Both 3D-ICE follow modes need the file to exist before the first GVSoC
+    # exchange appends a slot.
+    : > "$DICE_POWER_TRACE"
+}
+
+prepare_power_hook_config() {
+    require_executable "$POWER_HOOK_EXECUTABLE"
+    require_file "$SYSTEM_CONFIG_FILE"
+    require_file "$ICE_RUNTIME_FLOORPLAN_FILE"
+
+    local args=(
+        "$SCRIPT_DIR/generate_power_hook_config.py"
+        "--output" "$POWER_HOOK_CONFIG_FILE"
+        "--system-config" "$SYSTEM_CONFIG_FILE"
+        "--floorplan" "$ICE_RUNTIME_FLOORPLAN_FILE"
+        "--power-trace" "$DICE_POWER_TRACE"
+        "--temperature-output" "$THERMAL_FEEDBACK_FILE"
+        "--temperature-history" "$COMPONENT_TEMPERATURE_TRACE"
+        "--poll-seconds" "$POWER_HOOK_POLL_SECONDS"
+        "--timeout-seconds" "$POWER_HOOK_TIMEOUT_SECONDS"
+    )
+    if [[ -n "$DEFAULT_POWER_W" ]]; then
+        args+=("--default-power-w" "$DEFAULT_POWER_W")
+    fi
+    "$PYTHON" "${args[@]}"
 }
 
 write_manifest() {
@@ -365,22 +444,24 @@ write_manifest() {
         kv RESULT_DIR "$RESULT_DIR"
         kv LOG_DIR "$LOG_DIR"
         kv PID_DIR "$PID_DIR"
-        kv CFG "$CFG"
-        kv APP "$APP"
-        kv PLD "$PLD"
+        kv SIMULATOR_PROVIDER "$SIMULATOR_PROVIDER"
+        kv SIMULATOR_NAME "$SIMULATOR_NAME"
+        kv SIMULATOR_CONFIG "$SIMULATOR_CONFIG"
+        kv SIMULATOR_APP "$SIMULATOR_APP"
+        kv SIMULATOR_PLATFORM "$SIMULATOR_PLATFORM"
         kv PORT "$PORT"
         kv SERVER_HOST "$SERVER_HOST"
         kv DICE_RUN_MODE "$DICE_RUN_MODE"
         kv ICE_TARGET_TOP_DIE_CELLS "$ICE_TARGET_TOP_DIE_CELLS"
-        kv PWR_INTERVAL_PS "$PWR_INTERVAL_PS"
+        kv POWER_INTERVAL_PS "$POWER_INTERVAL_PS"
         kv ICE_SLOT_SECONDS "$ICE_SLOT_SECONDS"
         kv ICE_STEP_SECONDS "$ICE_STEP_SECONDS"
         kv EFFECTIVE_ICE_SLOT_SECONDS "$(effective_slot_seconds)"
         kv EFFECTIVE_ICE_STEP_SECONDS "$(effective_step_seconds)"
-        kv OTHERS_POWER "$OTHERS_POWER"
-        kv BUILD_SOFTHIER "$BUILD_SOFTHIER"
+        kv DEFAULT_POWER_W "$DEFAULT_POWER_W"
+        kv BUILD_SIMULATOR "$BUILD_SIMULATOR"
         kv BUILD_3DICE "$BUILD_3DICE"
-        kv SOFTHIER_LOG_TAIL_LINES "$SOFTHIER_LOG_TAIL_LINES"
+        kv SIMULATOR_LOG_TAIL_LINES "$SIMULATOR_LOG_TAIL_LINES"
         kv ICE_GENERATE_GIF "$ICE_GENERATE_GIF"
         kv ICE_GIF_FILE "$ICE_GIF_FILE"
         kv ICE_GIF_STRIDE "$ICE_GIF_STRIDE"
@@ -388,6 +469,7 @@ write_manifest() {
         kv ICE_GIF_FPS "$ICE_GIF_FPS"
         kv ICE_GIF_WRITER "$ICE_GIF_WRITER"
         kv ICE_GIF_PYTHON "$ICE_GIF_PYTHON"
+        kv SYSTEM_CONFIG_FILE "$SYSTEM_CONFIG_FILE"
         kv GEO_FILE "$GEO_FILE"
         kv ICE_FLOORPLAN_FILE "$ICE_FLOORPLAN_FILE"
         kv ICE_STK_FILE "$ICE_STK_FILE"
@@ -395,60 +477,52 @@ write_manifest() {
         kv ICE_RUNTIME_STK_FILE "$ICE_RUNTIME_STK_FILE"
         kv RAW_POWER_TRACE "$RAW_POWER_TRACE"
         kv DICE_POWER_TRACE "$DICE_POWER_TRACE"
+        kv POWER_HOOK_EXECUTABLE "$POWER_HOOK_EXECUTABLE"
+        kv POWER_HOOK_CONFIG_FILE "$POWER_HOOK_CONFIG_FILE"
+        kv POWER_HOOK_REQUEST_FILE "$POWER_HOOK_REQUEST_FILE"
+        kv POWER_HOOK_RESPONSE_FILE "$POWER_HOOK_RESPONSE_FILE"
+        kv POWER_HOOK_TRACE_FILE "$POWER_HOOK_TRACE_FILE"
+        kv COMPONENT_TEMPERATURE_TRACE "$COMPONENT_TEMPERATURE_TRACE"
+        kv THERMAL_FEEDBACK_FILE "$THERMAL_FEEDBACK_FILE"
+        kv POWER_HOOK_POLL_SECONDS "$POWER_HOOK_POLL_SECONDS"
+        kv POWER_HOOK_TIMEOUT_SECONDS "$POWER_HOOK_TIMEOUT_SECONDS"
         kv GEOMETRY_SCRIPT_DIR "$GEOMETRY_SCRIPT_DIR"
         kv ROOT_GIT_COMMIT "$(git_commit "$ROOT_DIR")"
-        kv SOFTHIER_GIT_COMMIT "$(git_commit "$SOFTHIER_DIR")"
-        kv SOFTHIER_CORE_GIT_COMMIT "$(git_commit "$SOFTHIER_DIR/core")"
-        kv SOFTHIER_PULP_GIT_COMMIT "$(git_commit "$SOFTHIER_DIR/pulp")"
         kv DICE_GIT_COMMIT "$(git_commit "$DICE_DIR")"
+        provider_command manifest
     } > "$MANIFEST_FILE"
 }
 
-build_softhier() {
-    if [[ "$BUILD_SOFTHIER" != "1" ]]; then
-        log "Skipping SoftHier build because BUILD_SOFTHIER=$BUILD_SOFTHIER"
-        log "Reusing a SoftHier build is only safe when it was built with RAW_POWER_TRACE=$RAW_POWER_TRACE"
+build_simulator() {
+    if [[ "$BUILD_SIMULATOR" != "1" ]]; then
+        log "Skipping $SIMULATOR_NAME build because BUILD_SIMULATOR=$BUILD_SIMULATOR"
+        log "The existing build must include the GVSoC power-hook interface"
         return
     fi
 
-    local args=(
-        "cfg=$CFG"
-        "pwr_interval_ps=$PWR_INTERVAL_PS"
-        "ice_geo_file=$GEO_FILE"
-        "ice_power_trace_file=$RAW_POWER_TRACE"
-    )
-
-    if [[ -n "$APP" ]]; then
-        args+=("app=$APP")
-    fi
-
-    log "Building SoftHier hardware/software"
-    (
-        cd "$SOFTHIER_DIR"
-        source_softhier_env
-        "$MAKE_CMD" hw sw "${args[@]}"
-    )
+    log "Building $SIMULATOR_NAME through provider"
+    provider_command build
 }
 
-start_softhier_log_tail() {
-    local softhier_pid="$1"
-    local logfile="$LOG_DIR/softhier.log"
+start_simulator_log_tail() {
+    local simulator_pid="$1"
+    local logfile="$SIMULATOR_LOG_FILE"
 
-    validate_softhier_log_tail_lines
+    validate_simulator_log_tail_lines
 
-    if ((SOFTHIER_LOG_TAIL_LINES == 0)); then
+    if ((SIMULATOR_LOG_TAIL_LINES == 0)); then
         return 0
     fi
 
     if [[ ! -t 1 ]]; then
-        log "SoftHier live log window disabled because stdout is not a terminal; full log: $logfile"
+        log "$SIMULATOR_NAME live log window disabled because stdout is not a terminal; full log: $logfile"
         return 0
     fi
 
-    log "Showing latest $SOFTHIER_LOG_TAIL_LINES SoftHier log line(s) in a fixed window; full log: $logfile"
+    log "Showing latest $SIMULATOR_LOG_TAIL_LINES $SIMULATOR_NAME log line(s) in a fixed window; full log: $logfile"
 
     (
-        lines="$SOFTHIER_LOG_TAIL_LINES"
+        lines="$SIMULATOR_LOG_TAIL_LINES"
         window_lines=$((lines + 2))
         printed=0
         green=$'\033[32m'
@@ -528,7 +602,7 @@ start_softhier_log_tail() {
                 printf '\033[%dA' "$window_lines"
             fi
 
-            print_box_border "$width" "SoftHier live log: last $lines line(s)"
+            print_box_border "$width" "$SIMULATOR_NAME live log: last $lines line(s)"
 
             if [[ -f "$logfile" ]]; then
                 mapfile -t recent < <(tail -n "$lines" "$logfile" 2>/dev/null || true)
@@ -548,20 +622,20 @@ start_softhier_log_tail() {
             printed=1
         }
 
-        while pid_is_running "$softhier_pid"; do
+        while pid_is_running "$simulator_pid"; do
             render_window
             sleep 1
         done
         render_window
     ) &
 
-    write_pid softhier_log_tail "$!"
+    write_pid simulator_log_tail "$!"
 }
 
-stop_softhier_log_tail() {
+stop_simulator_log_tail() {
     local pid
 
-    pid="$(read_pid softhier_log_tail || true)"
+    pid="$(read_pid simulator_log_tail || true)"
     if [[ -n "$pid" && "$pid" != "$$" ]] && pid_is_running "$pid"; then
         kill "$pid" >/dev/null 2>&1 || true
         wait "$pid" 2>/dev/null || true
@@ -600,29 +674,6 @@ start_server() {
         --timeout "$WAIT_TIMEOUT"
 }
 
-start_adapter() {
-    log "Starting power trace adapter"
-    "$PYTHON" "$SCRIPT_DIR/ice_trace_adapter.py" \
-        --arch "$CFG" \
-        --floorplan "$ICE_FLOORPLAN_FILE" \
-        --input "$RAW_POWER_TRACE" \
-        --output "$DICE_POWER_TRACE" \
-        --done-file "$DONE_FILE" \
-        --others-power "$OTHERS_POWER" \
-        > "$LOG_DIR/adapter.log" 2>&1 &
-
-    local pid=$!
-    write_pid adapter "$pid"
-
-    for _ in $(seq 1 100); do
-        [[ -f "$DICE_POWER_TRACE" ]] && return 0
-        pid_is_running "$pid" || die "adapter exited before creating $DICE_POWER_TRACE"
-        sleep 0.1
-    done
-
-    die "adapter did not create $DICE_POWER_TRACE"
-}
-
 start_client() {
     log "Starting 3D-ICE client"
     (
@@ -634,33 +685,53 @@ start_client() {
     write_pid 3dice_client "$!"
 }
 
-run_softhier() {
-    local args=()
-    if [[ -n "$PLD" ]]; then
-        args+=("pld=$PLD")
-    fi
-
-    log "Running SoftHier"
-    (
-        cd "$SOFTHIER_DIR"
-        source_softhier_env
-        "$MAKE_CMD" run "${args[@]}"
-    ) > "$LOG_DIR/softhier.log" 2>&1 &
+run_simulator() {
+    log "Running $SIMULATOR_NAME through provider"
+    provider_command run > "$SIMULATOR_LOG_FILE" 2>&1 &
 
     local pid=$!
-    write_pid softhier "$pid"
-    start_softhier_log_tail "$pid"
+    write_pid simulator "$pid"
+    start_simulator_log_tail "$pid"
 
     set +e
     wait "$pid"
     local status=$?
     set -e
-    stop_softhier_log_tail
+    stop_simulator_log_tail
 
     : > "$DONE_FILE"
-    log "SoftHier exited with status $status; signaled adapter with $DONE_FILE"
+    log "$SIMULATOR_NAME exited with status $status"
 
     return "$status"
+}
+
+ensure_3dice_termination() {
+    local width
+    width="$(awk '/^[[:space:]]*[A-Za-z0-9_.-]+[[:space:]]*:[[:space:]]*$/ { count++ } END { print count + 0 }' "$ICE_RUNTIME_FLOORPLAN_FILE")"
+    ((width > 0)) || die "cannot determine 3D-ICE floorplan width"
+
+    if awk -v width="$width" '
+        NF {
+            fields = NF
+            all_minus_one = 1
+            for (field_index = 1; field_index <= NF; field_index++) {
+                if (($field_index + 0) != -1) {
+                    all_minus_one = 0
+                }
+            }
+        }
+        END { exit !(fields == width && all_minus_one) }
+    ' "$DICE_POWER_TRACE"; then
+        return
+    fi
+
+    log "Appending fallback 3D-ICE termination slot"
+    awk -v width="$width" 'BEGIN {
+        for (field_index = 1; field_index <= width; field_index++) {
+            printf "%s-1", field_index == 1 ? "" : " "
+        }
+        printf "\n"
+    }' >> "$DICE_POWER_TRACE"
 }
 
 wait_for_exit() {
@@ -737,7 +808,7 @@ thermal_row_count() {
 max_temperature() {
     local path="$1"
     if [[ -f "$path" ]]; then
-        awk 'NF && $1 !~ /^%/ { for (i = 1; i <= NF; i++) { value = $i + 0; if (!seen || value > max) { max = value; seen = 1 } } } END { if (!seen) print "n/a"; else printf "%.3f", max }' "$path"
+        awk 'NF && $1 !~ /^%/ { for (i = 2; i <= NF; i++) { value = $i + 0; if (!seen || value > max) { max = value; seen = 1 } } } END { if (!seen) print "n/a"; else printf "%.3f", max }' "$path"
     else
         printf 'n/a'
     fi
@@ -764,12 +835,11 @@ generate_temperature_gif() {
 }
 
 write_summary() {
-    local softhier_status="$1"
-    local adapter_status="$2"
-    local client_status="$3"
-    local server_status="$4"
-    local gif_status="$5"
-    local thermal_file="$RUN_3DICE_DIR/output_top_die.txt"
+    local simulator_status="$1"
+    local client_status="$2"
+    local server_status="$3"
+    local gif_status="$4"
+    local thermal_file="$THERMAL_FEEDBACK_FILE"
 
     {
         printf '%s\n' 'Run summary'
@@ -777,34 +847,41 @@ write_summary() {
         printf 'run_name: %s\n' "$RUN_NAME"
         printf 'run_id: %s\n' "$RUN_ID"
         printf 'run_dir: %s\n' "$RUN_DIR"
-        printf 'cfg: %s\n' "$CFG"
-        printf 'app: %s\n' "${APP:-<SoftHier default>}"
-        printf 'pwr_interval_ps: %s\n' "$PWR_INTERVAL_PS"
+        printf 'simulator_provider: %s\n' "$SIMULATOR_PROVIDER"
+        printf 'simulator_name: %s\n' "$SIMULATOR_NAME"
+        printf 'simulator_config: %s\n' "$SIMULATOR_CONFIG"
+        printf 'simulator_app: %s\n' "${SIMULATOR_APP:-<provider default>}"
+        printf 'power_interval_ps: %s\n' "$POWER_INTERVAL_PS"
         printf '3dice_mode: %s\n' "$DICE_RUN_MODE"
         printf '3dice_slot_seconds: %s\n' "$(effective_slot_seconds)"
         printf '3dice_step_seconds: %s\n' "$(effective_step_seconds)"
         printf '\n'
         printf '%s\n' 'Process statuses'
         printf '%s\n' '----------------'
-        printf 'softhier: %s\n' "$softhier_status"
-        printf 'adapter: %s\n' "$adapter_status"
+        printf 'simulator: %s\n' "$simulator_status"
+        printf 'power_hook: integrated with simulator\n'
         printf '3dice_client: %s\n' "$client_status"
         printf '3dice_server: %s\n' "$server_status"
         printf 'temperature_gif: %s\n' "$gif_status"
         printf '\n'
         printf '%s\n' 'Output counts'
         printf '%s\n' '-------------'
-        printf 'softhier_raw_power_rows: %s\n' "$(line_count "$RAW_POWER_TRACE")"
+        printf 'gvsoc_power_hook_exchanges: %s\n' "$(line_count "$POWER_HOOK_TRACE_FILE")"
+        printf 'component_temperature_csv_rows: %s\n' "$(line_count "$COMPONENT_TEMPERATURE_TRACE")"
         printf '3dice_power_trace_rows: %s\n' "$(line_count "$DICE_POWER_TRACE")"
-        printf '3dice_thermal_rows: %s\n' "$(thermal_row_count "$thermal_file")"
+        printf '3dice_tflp_rows: %s\n' "$(thermal_row_count "$thermal_file")"
         printf 'max_temperature_k: %s\n' "$(max_temperature "$thermal_file")"
         printf '\n'
         printf '%s\n' 'Key files'
         printf '%s\n' '---------'
         printf 'manifest: %s\n' "$MANIFEST_FILE"
-        printf 'softHier raw power: %s\n' "$RAW_POWER_TRACE"
+        printf 'system contract: %s\n' "$SYSTEM_CONFIG_FILE"
+        printf 'power-hook configuration: %s\n' "$POWER_HOOK_CONFIG_FILE"
+        printf 'GVSoC power-hook trace: %s\n' "$POWER_HOOK_TRACE_FILE"
+        printf 'component temperature history: %s\n' "$COMPONENT_TEMPERATURE_TRACE"
         printf '3D-ICE power trace: %s\n' "$DICE_POWER_TRACE"
-        printf '3D-ICE temperature map: %s\n' "$thermal_file"
+        printf '3D-ICE floorplan temperatures: %s\n' "$thermal_file"
+        printf '3D-ICE temperature map: %s\n' "$RUN_3DICE_DIR/output_top_die.txt"
         if [[ "$ICE_GENERATE_GIF" == "1" ]]; then
             printf 'temperature GIF: %s\n' "$ICE_GIF_FILE"
             printf 'temperature GIF log: %s\n' "$LOG_DIR/tmap_gif.log"
@@ -814,19 +891,20 @@ write_summary() {
 }
 
 run_all() {
-    validate_softhier_log_tail_lines
+    resolve_provider
+    validate_simulator_log_tail_lines
     validate_target_top_die_cells
     validate_dice_run_mode
     validate_gif_settings
     make_dirs
     write_latest_link
     reset_runtime_files
-    write_manifest
 
     if [[ "$AUTO_BOOTSTRAP" == "1" ]]; then
         log "Running bootstrap because AUTO_BOOTSTRAP=1"
         ROOT_DIR="$ROOT_DIR" \
-        SOFTHIER_DIR="$SOFTHIER_DIR" \
+        SIMULATOR_PROVIDER="$SIMULATOR_PROVIDER" \
+        SIMULATOR_CONFIG="$SIMULATOR_CONFIG" \
         DICE_DIR="$DICE_DIR" \
         DICE_BIN_DIR="$DICE_BIN_DIR" \
         BUILD_3DICE="$BUILD_3DICE" \
@@ -835,29 +913,30 @@ run_all() {
     fi
 
     build_or_verify_3dice
+    prepare_system_config
     generate_ice_inputs
     prepare_runtime_3dice_inputs
-    build_softhier
+    prepare_power_hook_config
+    write_manifest
+    build_simulator
 
     require_file "$ICE_RUNTIME_FLOORPLAN_FILE"
     require_file "$ICE_RUNTIME_STK_FILE"
 
     start_server
-    start_adapter
 
     if [[ "$DICE_RUN_MODE" == "client-server" ]]; then
         start_client
     fi
 
-    local softhier_status=0
-    run_softhier || softhier_status=$?
+    local simulator_status=0
+    run_simulator || simulator_status=$?
+    ensure_3dice_termination
 
-    local adapter_pid client_pid server_pid
-    adapter_pid="$(read_pid adapter)"
+    local client_pid server_pid
     server_pid="$(read_pid 3dice_server)"
 
-    local adapter_status=0 client_status=0 server_status=0
-    wait_for_exit adapter "$adapter_pid" "$EXIT_TIMEOUT" || adapter_status=$?
+    local client_status=0 server_status=0
 
     if [[ "$DICE_RUN_MODE" == "client-server" ]]; then
         client_pid="$(read_pid 3dice_client)"
@@ -874,14 +953,20 @@ run_all() {
         generate_temperature_gif || gif_status=$?
     fi
 
-    write_summary "$softhier_status" "$adapter_status" "$client_status" "$server_status" "$gif_status"
+    write_summary "$simulator_status" "$client_status" "$server_status" "$gif_status"
 
     log "Run directory: $RUN_DIR"
     log "Logs: $LOG_DIR"
     log "Summary: $SUMMARY_FILE"
 
-    if [[ "$softhier_status" != "0" ]]; then
-        return "$softhier_status"
+    if [[ "$simulator_status" != "0" ]]; then
+        return "$simulator_status"
+    fi
+    if [[ "$client_status" != "0" && "$client_status" != "skipped" ]]; then
+        return "$client_status"
+    fi
+    if [[ "$server_status" != "0" ]]; then
+        return "$server_status"
     fi
     if [[ "$gif_status" != "0" && "$gif_status" != "disabled" ]]; then
         return "$gif_status"
@@ -898,16 +983,14 @@ case "$cmd" in
         ;;
     status)
         status_pid_name 3dice_server
-        status_pid_name adapter
         status_pid_name 3dice_client
-        status_pid_name softhier
-        status_pid_name softhier_log_tail
+        status_pid_name simulator
+        status_pid_name simulator_log_tail
         ;;
     stop)
-        stop_pid_name softhier
-        stop_pid_name softhier_log_tail
+        stop_pid_name simulator
+        stop_pid_name simulator_log_tail
         stop_pid_name 3dice_client
-        stop_pid_name adapter
         stop_pid_name 3dice_server
         ;;
     -h|--help|help)
