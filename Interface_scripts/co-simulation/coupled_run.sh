@@ -34,6 +34,7 @@ PORT="${PORT:-54322}"
 SERVER_HOST="${SERVER_HOST:-127.0.0.1}"
 DICE_RUN_MODE="${DICE_RUN_MODE:-local-server}"
 POWER_INTERVAL_PS="${POWER_INTERVAL_PS:-100000000}"
+SOFTHIER_POWER_PROFILE="${SOFTHIER_POWER_PROFILE:-constant}"
 ICE_SLOT_SECONDS="${ICE_SLOT_SECONDS:-}"
 ICE_STEP_SECONDS="${ICE_STEP_SECONDS:-}"
 ICE_TARGET_TOP_DIE_CELLS="${ICE_TARGET_TOP_DIE_CELLS:-65536}"
@@ -107,6 +108,7 @@ Environment overrides:
   PORT=$PORT
   DICE_RUN_MODE=$DICE_RUN_MODE
   POWER_INTERVAL_PS=$POWER_INTERVAL_PS
+  SOFTHIER_POWER_PROFILE=$SOFTHIER_POWER_PROFILE
   ICE_SLOT_SECONDS=$ICE_SLOT_SECONDS
   ICE_STEP_SECONDS=$ICE_STEP_SECONDS
   ICE_TARGET_TOP_DIE_CELLS=$ICE_TARGET_TOP_DIE_CELLS
@@ -159,6 +161,7 @@ provider_command() {
     SIMULATOR_APP="$SIMULATOR_APP" \
     SIMULATOR_PLATFORM="$SIMULATOR_PLATFORM" \
     POWER_INTERVAL_PS="$POWER_INTERVAL_PS" \
+    SOFTHIER_POWER_PROFILE="$SOFTHIER_POWER_PROFILE" \
     RAW_POWER_TRACE="$RAW_POWER_TRACE" \
     SYSTEM_CONFIG_FILE="$SYSTEM_CONFIG_FILE" \
     GEO_FILE="$GEO_FILE" \
@@ -454,6 +457,7 @@ write_manifest() {
         kv DICE_RUN_MODE "$DICE_RUN_MODE"
         kv ICE_TARGET_TOP_DIE_CELLS "$ICE_TARGET_TOP_DIE_CELLS"
         kv POWER_INTERVAL_PS "$POWER_INTERVAL_PS"
+        kv SOFTHIER_POWER_PROFILE "$SOFTHIER_POWER_PROFILE"
         kv ICE_SLOT_SECONDS "$ICE_SLOT_SECONDS"
         kv ICE_STEP_SECONDS "$ICE_STEP_SECONDS"
         kv EFFECTIVE_ICE_SLOT_SECONDS "$(effective_slot_seconds)"
@@ -852,6 +856,7 @@ write_summary() {
         printf 'simulator_config: %s\n' "$SIMULATOR_CONFIG"
         printf 'simulator_app: %s\n' "${SIMULATOR_APP:-<provider default>}"
         printf 'power_interval_ps: %s\n' "$POWER_INTERVAL_PS"
+        printf 'softhier_power_profile: %s\n' "$SOFTHIER_POWER_PROFILE"
         printf '3dice_mode: %s\n' "$DICE_RUN_MODE"
         printf '3dice_slot_seconds: %s\n' "$(effective_slot_seconds)"
         printf '3dice_step_seconds: %s\n' "$(effective_step_seconds)"
@@ -905,6 +910,7 @@ run_all() {
         ROOT_DIR="$ROOT_DIR" \
         SIMULATOR_PROVIDER="$SIMULATOR_PROVIDER" \
         SIMULATOR_CONFIG="$SIMULATOR_CONFIG" \
+        SOFTHIER_POWER_PROFILE="$SOFTHIER_POWER_PROFILE" \
         DICE_DIR="$DICE_DIR" \
         DICE_BIN_DIR="$DICE_BIN_DIR" \
         BUILD_3DICE="$BUILD_3DICE" \

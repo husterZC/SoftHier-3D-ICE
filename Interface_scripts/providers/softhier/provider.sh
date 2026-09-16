@@ -21,6 +21,7 @@ SOFTHIER_CMAKE_VERSION="${SOFTHIER_CMAKE_VERSION:-3.28.1}"
 SOFTHIER_BOOTSTRAP_JOBS="${SOFTHIER_BOOTSTRAP_JOBS:-16}"
 SOFTHIER_TARGET="${SOFTHIER_TARGET:-pulp.chips.soft_hier_old.flex_cluster}"
 SOFTHIER_CORE_MODEL="${SOFTHIER_CORE_MODEL:-fast}"
+SOFTHIER_POWER_PROFILE="${SOFTHIER_POWER_PROFILE:-constant}"
 SOFTHIER_CONDA_ENV="${SOFTHIER_CONDA_ENV:-py312}"
 SOFTHIER_CCACHE_DIR="${SOFTHIER_CCACHE_DIR:-$SOFTHIER_WORKDIR/ccache}"
 SIMULATOR_CONFIG="${SIMULATOR_CONFIG:-${CFG:-$SOFTHIER_SDK_DIR/examples/SoftHier/config/arch_NoC1024.py}}"
@@ -64,6 +65,9 @@ Provider actions:
   build            Build the configured simulator and workload.
   run              Run with the versioned power hook in the foreground.
   manifest         Print provider-specific run.env entries.
+
+Power profiles: constant, temperature_aware. Select one with
+SOFTHIER_POWER_PROFILE (default: constant).
 
 The provider pins softhier-sdk commit
 1244fdbc34977aff5a6a10ead079053fb5d31d00 by default. Override
@@ -118,6 +122,7 @@ source_environment() {
     export CCACHE_DIR="$SOFTHIER_CCACHE_DIR"
     export SYSTEMC_HOME="$SOFTHIER_SYSTEMC_HOME"
     export DRAMSYS_PATH="$SOFTHIER_DIR/add_dramsyslib_patches"
+    export SOFTHIER_POWER_PROFILE
 
     if command -v gcc-14.2.0 >/dev/null 2>&1; then
         export CC=gcc-14.2.0
@@ -401,6 +406,10 @@ power_hook_present() {
 
 
 check_provider() {
+    case "$SOFTHIER_POWER_PROFILE" in
+        constant|temperature_aware) ;;
+        *) die "unsupported SOFTHIER_POWER_PROFILE=$SOFTHIER_POWER_PROFILE (choose constant or temperature_aware)" ;;
+    esac
     require_file "$SOFTHIER_DIR/sourceme.sh"
     require_file "$SOFTHIER_DIR/Makefile"
     require_file "$SIMULATOR_CONFIG"
@@ -444,6 +453,7 @@ export_system() {
     "$PYTHON" "$SCRIPT_DIR/export_system_config.py" \
         --arch "$SIMULATOR_CONFIG" \
         --output "$SYSTEM_CONFIG_FILE" \
+        --power-profile "$SOFTHIER_POWER_PROFILE" \
         --default-power-w "$DEFAULT_POWER_W"
 }
 
@@ -487,6 +497,7 @@ run_simulator() {
         "--target=$SOFTHIER_TARGET"
         "--binary" "$SOFTHIER_WORKDIR/sw_build/softhier.elf"
         "--core-model=$SOFTHIER_CORE_MODEL"
+        "--power-profile=$SOFTHIER_POWER_PROFILE"
         "--power-hook-executable" "$POWER_HOOK_EXECUTABLE"
         "--power-hook-config" "$POWER_HOOK_CONFIG_FILE"
         "--power-hook-interval-ps" "$POWER_INTERVAL_PS"
@@ -526,6 +537,7 @@ write_manifest() {
     kv SOFTHIER_DRAMSYS_HOME "$SOFTHIER_DRAMSYS_HOME"
     kv SOFTHIER_DRAMSYS_COMMIT "$SOFTHIER_DRAMSYS_COMMIT"
     kv SOFTHIER_TARGET "$SOFTHIER_TARGET"
+    kv SOFTHIER_POWER_PROFILE "$SOFTHIER_POWER_PROFILE"
 }
 
 

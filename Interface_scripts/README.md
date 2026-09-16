@@ -66,6 +66,7 @@ SIMULATOR_CONFIG
 SIMULATOR_APP
 SIMULATOR_PLATFORM
 POWER_INTERVAL_PS
+SOFTHIER_POWER_PROFILE
 SYSTEM_CONFIG_FILE
 GEO_FILE
 DEFAULT_POWER_W
@@ -81,6 +82,10 @@ MAKE
 The provider owns all simulator-specific setup and command-line details.
 `run` must remain in the foreground so the generic orchestrator can track its
 status.
+
+The SoftHier provider accepts `SOFTHIER_POWER_PROFILE=constant` or
+`temperature_aware`, records the selection in its manifest, and passes it to
+the target generator. Other providers may ignore this SoftHier-specific value.
 
 ## JSON System Contract
 

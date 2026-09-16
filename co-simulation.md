@@ -153,6 +153,7 @@ The most useful overrides are:
 | `SIMULATOR_CONFIG` | SoftHier architecture configuration. |
 | `SIMULATOR_APP` | Workload source directory. |
 | `POWER_INTERVAL_PS` | GVSoC exchange interval in picoseconds. |
+| `SOFTHIER_POWER_PROFILE` | `constant` or `temperature_aware` component leakage tables. |
 | `ICE_TARGET_TOP_DIE_CELLS` | Approximate top-die discretization target. |
 | `DEFAULT_POWER_W` | Optional override for constant-power floorplan blocks. |
 | `BUILD_SIMULATOR` | Set to `0` only when a compatible build already exists. |
@@ -277,10 +278,30 @@ temperature_c = proxy.get_component_temperature(
 ```
 
 `temperature_set_all()` stores the value on every visited component and updates
-all local power sources. The shipped SoftHier redmule and memory tables
-currently have only a 25 °C model point, so live temperatures propagate and
-are observable but do not numerically change those models until
-temperature-dependent table data is supplied.
+all local power sources. SoftHier provides two selectable component profiles:
+
+- `constant` gives both LightRedMulE and memory plausible 25 °C reference
+  leakage while holding it temperature-invariant;
+- `temperature_aware` uses the same references and samples exponential leakage
+  curves from 25–125 °C.
+
+Select the profile at the root command line:
+
+```bash
+make coupled-run RUN_NAME=temperature_aware \
+  SOFTHIER_POWER_PROFILE=temperature_aware
+```
+
+The profile is recorded in `run.env`, `summary.txt`, and the system-contract
+metadata. The separated component characterization and technology-node
+assumptions live under
+`SoftHier/pulp/pulp/chips/soft_hier_old/power_models/`.
+
+For a controlled comparison, use `constant` as the baseline and
+`temperature_aware` as the treatment. They share the same 25 °C reference, so
+their difference isolates temperature sensitivity. The complete experiment
+and report/figure generator are in
+[`experiments/leakage_temperature/`](experiments/leakage_temperature/README.md).
 
 ## Geometry-Only Generation
 

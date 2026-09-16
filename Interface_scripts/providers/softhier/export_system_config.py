@@ -131,7 +131,10 @@ def build_cluster_geometry(
 
 
 def build_contract(
-    architecture: Any, source_config: Path, default_power_w: float
+    architecture: Any,
+    source_config: Path,
+    default_power_w: float,
+    power_profile: str = "constant",
 ) -> dict:
     cluster_columns = required_int(architecture, "num_cluster_x", minimum=1)
     cluster_rows = required_int(architecture, "num_cluster_y", minimum=1)
@@ -215,6 +218,7 @@ def build_contract(
                 architecture, "num_core_per_cluster", minimum=1
             ),
             "technology_node": str(getattr(architecture, "tech_node", "5nm")),
+            "power_model_profile": power_profile,
         },
         "geometry": geometry,
         "floorplan": {
@@ -248,6 +252,12 @@ def main() -> int:
     parser.add_argument("--arch", required=True, help="SoftHier architecture file.")
     parser.add_argument("--output", required=True, help="Output contract JSON file.")
     parser.add_argument(
+        "--power-profile",
+        choices=("constant", "temperature_aware"),
+        default="constant",
+        help="SoftHier component leakage profile recorded in contract metadata.",
+    )
+    parser.add_argument(
         "--default-power-w",
         type=nonnegative_float,
         default=0.0,
@@ -261,7 +271,12 @@ def main() -> int:
         raise SystemExit(f"missing SoftHier architecture file: {source_config}")
 
     architecture = import_architecture(source_config)
-    contract = build_contract(architecture, source_config, args.default_power_w)
+    contract = build_contract(
+        architecture,
+        source_config,
+        args.default_power_w,
+        args.power_profile,
+    )
     output.parent.mkdir(parents=True, exist_ok=True)
     with output.open("w", encoding="utf-8") as stream:
         json.dump(contract, stream, indent=2)

@@ -80,6 +80,18 @@ For one-command first setup and run:
 make co-simulation RUN_NAME=default_app
 ```
 
+Select the SoftHier component leakage model with
+`SOFTHIER_POWER_PROFILE=constant|temperature_aware`. For example:
+
+```bash
+make co-simulation RUN_NAME=temperature_aware \
+  SOFTHIER_POWER_PROFILE=temperature_aware
+```
+
+The controlled two-run leakage/temperature study, academic report generator,
+and slide-ready figure pipeline are documented in
+[`experiments/leakage_temperature/`](experiments/leakage_temperature/README.md).
+
 See [co-simulation.md](co-simulation.md) for the detailed tutorial, run directory layout,
 alternate config/app examples, and cleanup targets.
 See [Interface_scripts/README.md](Interface_scripts/README.md) for the provider
@@ -184,6 +196,18 @@ For normal co-simulation, use the root target:
 
 ```bash
 make co-simulation RUN_NAME=default_app
+```
+
+The default `constant` profile uses the new 25 °C reference leakage without
+temperature scaling. Select either profile without changing the architecture
+or application:
+
+```bash
+make co-simulation RUN_NAME=leakage_constant \
+  SOFTHIER_POWER_PROFILE=constant
+
+make co-simulation RUN_NAME=leakage_temperature_aware \
+  SOFTHIER_POWER_PROFILE=temperature_aware
 ```
 
 Or, after `make bootstrap` has completed:
