@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SCRIPT_DIR="${SOFTHIER_PROVIDER_SCRIPT_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)}"
 ROOT_DIR="${ROOT_DIR:-$(cd "$SCRIPT_DIR/../../.." && pwd)}"
 SOFTHIER_DIR="${SOFTHIER_DIR:-$ROOT_DIR/SoftHier}"
 SOFTHIER_SDK_DIR="${SOFTHIER_SDK_DIR:-$SOFTHIER_DIR/soft_hier_sdk}"
@@ -9,6 +9,7 @@ SOFTHIER_SDK_URL="${SOFTHIER_SDK_URL:-git@github.com:pulp-platform/softhier-sdk.
 SOFTHIER_SDK_COMMIT="${SOFTHIER_SDK_COMMIT:-1244fdbc34977aff5a6a10ead079053fb5d31d00}"
 SOFTHIER_SDK_TOOLCHAIN_SOURCE="${SOFTHIER_SDK_TOOLCHAIN_SOURCE:-}"
 SOFTHIER_WORKDIR="${SOFTHIER_WORKDIR:-$SOFTHIER_DIR/.power_interface}"
+SOFTHIER_SW_BUILD="${SOFTHIER_SW_BUILD:-$SOFTHIER_WORKDIR/sw_build_staged}"
 SOFTHIER_NATIVE_DEPS_DIR="${SOFTHIER_NATIVE_DEPS_DIR:-$SOFTHIER_WORKDIR/dependencies}"
 SOFTHIER_SYSTEMC_HOME="${SOFTHIER_SYSTEMC_HOME:-$SOFTHIER_NATIVE_DEPS_DIR/systemc-install}"
 SOFTHIER_DRAMSYS_HOME="${SOFTHIER_DRAMSYS_HOME:-$SOFTHIER_NATIVE_DEPS_DIR/dramsys-install}"
@@ -22,6 +23,7 @@ SOFTHIER_BOOTSTRAP_JOBS="${SOFTHIER_BOOTSTRAP_JOBS:-16}"
 SOFTHIER_TARGET="${SOFTHIER_TARGET:-pulp.chips.soft_hier_old.flex_cluster}"
 SOFTHIER_CORE_MODEL="${SOFTHIER_CORE_MODEL:-fast}"
 SOFTHIER_POWER_PROFILE="${SOFTHIER_POWER_PROFILE:-constant}"
+SOFTHIER_FLOORPLAN="${SOFTHIER_FLOORPLAN:-redmule_strip}"
 SOFTHIER_CONDA_ENV="${SOFTHIER_CONDA_ENV:-py312}"
 SOFTHIER_CCACHE_DIR="${SOFTHIER_CCACHE_DIR:-$SOFTHIER_WORKDIR/ccache}"
 SIMULATOR_CONFIG="${SIMULATOR_CONFIG:-${CFG:-$SOFTHIER_SDK_DIR/examples/SoftHier/config/arch_NoC1024.py}}"
@@ -63,11 +65,16 @@ Provider actions:
   check            Verify the decoupled GVSoC power-hook integration.
   export-system    Write SYSTEM_CONFIG_FILE using SIMULATOR_CONFIG.
   build            Build the configured simulator and workload.
+  build-workload   Build only the workload using an already built simulator.
   run              Run with the versioned power hook in the foreground.
+  run-uncoupled    Run without power capture/thermal feedback for timing checks.
   manifest         Print provider-specific run.env entries.
 
 Power profiles: constant, temperature_aware. Select one with
 SOFTHIER_POWER_PROFILE (default: constant).
+
+Floorplan rules: redmule_strip, square_bands. Select one with
+SOFTHIER_FLOORPLAN (default: redmule_strip).
 
 The provider pins softhier-sdk commit
 1244fdbc34977aff5a6a10ead079053fb5d31d00 by default. Override
@@ -123,6 +130,7 @@ source_environment() {
     export SYSTEMC_HOME="$SOFTHIER_SYSTEMC_HOME"
     export DRAMSYS_PATH="$SOFTHIER_DIR/add_dramsyslib_patches"
     export SOFTHIER_POWER_PROFILE
+    export SOFTHIER_ARCH_FILE="$SIMULATOR_CONFIG"
 
     if command -v gcc-14.2.0 >/dev/null 2>&1; then
         export CC=gcc-14.2.0
@@ -454,6 +462,8 @@ export_system() {
         --arch "$SIMULATOR_CONFIG" \
         --output "$SYSTEM_CONFIG_FILE" \
         --power-profile "$SOFTHIER_POWER_PROFILE" \
+        --floorplan "$SOFTHIER_FLOORPLAN" \
+        --core-model "$SOFTHIER_CORE_MODEL" \
         --default-power-w "$DEFAULT_POWER_W"
 }
 
@@ -461,22 +471,29 @@ export_system() {
 build_simulator() {
     check_provider
     mkdir -p "$SOFTHIER_WORKDIR"
-
-    local args=(
-        sh-old-hs
-        "cfg=$SIMULATOR_CONFIG"
-        "SOFTHIER_OLD_SW_BUILD=$SOFTHIER_WORKDIR/sw_build"
-        "SOFTHIER_OLD_CORE_MODEL=$SOFTHIER_CORE_MODEL"
-    )
-    if [[ -n "$SIMULATOR_APP" ]]; then
-        args+=("app=$SIMULATOR_APP")
-    fi
+    local build_hardware="${1:-1}"
 
     log "Building target $SOFTHIER_TARGET and workload"
     (
         cd "$SOFTHIER_DIR"
         source_environment
-        "$MAKE_CMD" "${args[@]}"
+        "$PYTHON" "$SCRIPT_DIR/prepare_workload.py" --sdk "$SOFTHIER_SDK_DIR" \
+            --workdir "$SOFTHIER_WORKDIR" --arch "$SIMULATOR_CONFIG"
+        if [[ "$build_hardware" == 1 ]]; then
+            "$MAKE_CMD" "TARGETS=$SOFTHIER_TARGET" build
+        fi
+        local runtime="$SOFTHIER_WORKDIR/sdk_snapshot/soft_hier_sdk/runtime"
+        local app="${SIMULATOR_APP:-$runtime/app_example}"
+        local isa
+        read -r isa < "$SOFTHIER_WORKDIR/riscv_arch.txt"
+        "${CMAKE:-cmake}" -S "$runtime" -B "$SOFTHIER_SW_BUILD" \
+            "-DSRC_DIR=$app" "-DRISCV_ARCH=$isa"
+        # The upstream custom command does not declare header dependencies.
+        # A clean build avoids silently reusing another kernel's ELF.
+        "${CMAKE:-cmake}" --build "$SOFTHIER_SW_BUILD" --clean-first
+        if rg -q 'ebreak' "$SOFTHIER_SW_BUILD/softhier.dump"; then
+            die "ebreak found in workload disassembly"
+        fi
     )
 }
 
@@ -491,11 +508,11 @@ run_simulator() {
     require_executable "$POWER_HOOK_EXECUTABLE"
     require_file "$POWER_HOOK_CONFIG_FILE"
     require_executable "$SOFTHIER_WORKDIR/install/bin/gvsoc"
-    require_file "$SOFTHIER_WORKDIR/sw_build/softhier.elf"
+    require_file "$SOFTHIER_SW_BUILD/softhier.elf"
 
     local args=(
         "--target=$SOFTHIER_TARGET"
-        "--binary" "$SOFTHIER_WORKDIR/sw_build/softhier.elf"
+        "--binary" "$SOFTHIER_SW_BUILD/softhier.elf"
         "--core-model=$SOFTHIER_CORE_MODEL"
         "--power-profile=$SOFTHIER_POWER_PROFILE"
         "--power-hook-executable" "$POWER_HOOK_EXECUTABLE"
@@ -519,6 +536,23 @@ run_simulator() {
 }
 
 
+run_uncoupled() {
+    check_provider
+    require_executable "$SOFTHIER_WORKDIR/install/bin/gvsoc"
+    require_file "$SOFTHIER_SW_BUILD/softhier.elf"
+    local args=("--target=$SOFTHIER_TARGET" "--binary" "$SOFTHIER_SW_BUILD/softhier.elf"
+        "--core-model=$SOFTHIER_CORE_MODEL" "--power-profile=$SOFTHIER_POWER_PROFILE")
+    if [[ -n "$SIMULATOR_PLATFORM" ]]; then
+        args+=("--preload" "$SIMULATOR_PLATFORM")
+    fi
+    (
+        cd "$SOFTHIER_DIR"
+        source_environment
+        "$SOFTHIER_WORKDIR/install/bin/gvsoc" "${args[@]}" run
+    )
+}
+
+
 write_manifest() {
     kv PROVIDER_NAME softhier
     kv SOFTHIER_DIR "$SOFTHIER_DIR"
@@ -532,12 +566,14 @@ write_manifest() {
     kv SOFTHIER_SDK_GIT_COMMIT "$(git_commit "$SOFTHIER_SDK_DIR")"
     kv SOFTHIER_SDK_PIN "$SOFTHIER_SDK_COMMIT"
     kv SOFTHIER_WORKDIR "$SOFTHIER_WORKDIR"
+    kv SOFTHIER_SW_BUILD "$SOFTHIER_SW_BUILD"
     kv SOFTHIER_SYSTEMC_HOME "$SOFTHIER_SYSTEMC_HOME"
     kv SOFTHIER_SYSTEMC_VERSION "$SOFTHIER_SYSTEMC_VERSION"
     kv SOFTHIER_DRAMSYS_HOME "$SOFTHIER_DRAMSYS_HOME"
     kv SOFTHIER_DRAMSYS_COMMIT "$SOFTHIER_DRAMSYS_COMMIT"
     kv SOFTHIER_TARGET "$SOFTHIER_TARGET"
     kv SOFTHIER_POWER_PROFILE "$SOFTHIER_POWER_PROFILE"
+    kv SOFTHIER_FLOORPLAN "$SOFTHIER_FLOORPLAN"
 }
 
 
@@ -561,8 +597,14 @@ case "$action" in
     build)
         build_simulator
         ;;
+    build-workload)
+        build_simulator 0
+        ;;
     run)
         run_simulator
+        ;;
+    run-uncoupled)
+        run_uncoupled
         ;;
     manifest)
         write_manifest

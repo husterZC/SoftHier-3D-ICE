@@ -25,10 +25,67 @@ MODEL_SPEC.loader.exec_module(MODELS)
 
 
 def table_value(table, temperature, voltage):
-    return table["values"][str(temperature)][str(voltage)]["any"]
+    voltages = table["values"][str(temperature)]
+    return next(value["any"] for key, value in voltages.items() if float(key) == float(voltage))
 
 
 class ComponentPowerModelTests(unittest.TestCase):
+    def test_new_logic_profiles_and_estimate_sensitivity(self):
+        for component, parameters in (
+            ("core", {}),
+            ("spatz", dict(function_units=4, vrf_bytes=1024, vlsu_ports=8)),
+            ("idma", dict(outstanding=64, data_width_bits=1024)),
+            ("floonoc", dict(part="router", data_width_bits=1024)),
+            ("floonoc", dict(part="ni", data_width_bits=32)),
+            ("transpose", dict(buffer_bytes=4096)),
+        ):
+            for node in ("22nm", "12nm", "7nm", "5nm"):
+                with self.subTest(component=component, node=node, parameters=parameters):
+                    kwargs = dict(tech_node=node, **parameters)
+                    constant = MODELS.logic_power_sources(component, profile="constant", **kwargs)
+                    aware = MODELS.logic_power_sources(component, profile="temperature_aware", **kwargs)
+                    double = MODELS.logic_power_sources(component, profile="constant", estimate_scale=2, **kwargs)
+                    voltage = MODELS.technology_spec(node)["nominal_voltage_v"]
+                    for name, source in constant.items():
+                        self.assertEqual(source["dynamic"], aware[name]["dynamic"])
+                        energy = table_value(source["dynamic"], 25, voltage)
+                        self.assertGreaterEqual(energy, 0)
+                        self.assertAlmostEqual(table_value(double[name]["dynamic"], 25, voltage), 2 * energy)
+                    leakage = constant["background"]["leakage"]
+                    self.assertAlmostEqual(table_value(leakage, 25, voltage), table_value(leakage, 125, voltage))
+                    self.assertAlmostEqual(table_value(leakage, 25, voltage), table_value(aware["background"]["leakage"], 25, voltage))
+                    self.assertGreater(table_value(aware["background"]["leakage"], 125, voltage), table_value(leakage, 25, voltage))
+
+    def test_paper_reference_units(self):
+        spatz = MODELS.logic_power_sources("spatz", tech_node="12nm", profile="constant",
+            function_units=4, vrf_bytes=2048, vlsu_ports=4)
+        self.assertAlmostEqual(table_value(spatz["fma_64"]["dynamic"], 25, 0.8), 18.1)
+        self.assertAlmostEqual(table_value(spatz["vrf_byte"]["dynamic"], 25, 0.8) * 24, 5, places=7)
+        # Per-byte router energy is not multiplied by data-path width again.
+        for width in (512, 1024):
+            noc = MODELS.logic_power_sources("floonoc", tech_node="12nm", profile="constant",
+                part="router", data_width_bits=width)
+            self.assertAlmostEqual(table_value(noc["payload_byte"]["dynamic"], 25, 0.8) * 4096, 614.4)
+
+    def test_background_and_events_frequency_units(self):
+        one = MODELS.logic_power_sources("core", tech_node="12nm", profile="constant")
+        two = MODELS.logic_power_sources("core", tech_node="12nm", profile="constant", frequency_hz=2e9)
+        for name in one:
+            ratio = 2 if name == "background" else 1
+            self.assertAlmostEqual(table_value(two[name]["dynamic"], 25, 0.8),
+                ratio * table_value(one[name]["dynamic"], 25, 0.8))
+        self.assertEqual(one["background"]["leakage"], two["background"]["leakage"])
+
+    def test_instruction_groups(self):
+        for label, group in {"add": 0, "c.lw": 1, "flh": 1, "bne": 2,
+            "mul": 3, "divu": 4, "fmadd.h": 5, "vfmul.vv": 6, "wfi": 7}.items():
+            self.assertEqual(MODELS.core_instruction_group(label), group, label)
+
+    def test_invalid_logic_dimensions(self):
+        for width in (-1, 0, 2.5, float("nan"), float("inf")):
+            with self.assertRaisesRegex(ValueError, "positive integer"):
+                MODELS.logic_area_kge("floonoc", part="router", data_width_bits=width)
+
     def test_dynamic_tables_reproduce_original_values(self):
         macs = 4_194_304
         size = 1_049_216

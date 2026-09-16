@@ -78,6 +78,9 @@ jobs:
       - name: Bootstrap SoftHier and 3D-ICE
         run: make bootstrap
 
+      - name: Test the prepared SDK interfaces
+        run: make interface-tests
+
       - name: Run the default coupled simulation
         run: |
           make coupled-run \

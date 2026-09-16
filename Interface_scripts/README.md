@@ -193,7 +193,9 @@ The lifecycle is:
 
 1. `init` at time zero contains no power samples. The hook reads the
    architecture contract and returns every declared path at the initial
-   Celsius temperature.
+   Celsius temperature. If `metadata.power_voltage_v` is supplied, each init
+   entry also contains `voltage_v`; the engine applies the stated fractional
+   voltage to that subtree. The field is optional and init-only.
 2. `update` follows each complete interval. GVSoC sends average dynamic,
    leakage, and total subtree power in watts plus the temperature used during
    that interval. The response explicitly declares
@@ -212,13 +214,53 @@ Requests are atomically replaced. Responses must also be published atomically.
 The engine-side reference is
 `SoftHier/engine/docs/user_manual/power_hook.rst`.
 
+### Expanded SoftHier component mapping
+
+The SoftHier exporter derives areas and paths from the instantiated architecture
+and the provider's `power_models/` package. The SDK implementation architecture
+has 304 separately coupled domains (19 per cluster) and 320 floorplan regions,
+including zero-power `others` residual regions. Scalar and Spatz sources are
+siblings, not overlapping power sums. Router/interface paths are mapped into
+their corresponding cluster's physical region. HBM/PHY and uncharacterized
+local support logic are explicitly listed in contract metadata.
+
+Placement rules live separately in
+[`providers/softhier/floorplans/`](providers/softhier/floorplans/README.md).
+`SOFTHIER_FLOORPLAN=redmule_strip` retains the original layout (default).
+`SOFTHIER_FLOORPLAN=square_bands` selects a square cluster with bottom
+RedMulE/TCDM, middle PE-over-Spatz pairs, and top support-component bands.
+Band/column dimensions preserve component areas; power paths and mappings do
+not change. The rule is recorded in the system contract and run manifest.
+
+The provider stages the runtime and architecture-header generator below
+`SOFTHIER_WORKDIR/sdk_snapshot`, preserving SDK checkout headers. Software
+defaults to `SOFTHIER_WORKDIR/sw_build_staged`; override `SOFTHIER_SW_BUILD`
+for separate kernel builds. `provider.sh build-workload` rebuilds software only
+and requires an already compatible hardware-model build. The study harness in
+`experiments/component_power/` reuses the SDK `implementation/` generators and
+the existing co-simulation/temperature-map renderer, preserving paired binaries
+and preloads in each run's `artifacts/` directory.
+
+The provider passes `SIMULATOR_CONFIG` to GVSoC as `SOFTHIER_ARCH_FILE`, so
+runtime configuration does not depend on an installed copy of a mutable preset.
+After updating this integration, run a full provider build once to install the
+architecture-file loader; later compatible kernel builds may be software-only.
+
+The expanded scalar/Spatz domains currently support `SOFTHIER_CORE_MODEL=fast`;
+the exporter rejects the accurate-core variant rather than silently omitting
+its power. For microsecond floorplan animations, supply `--slot-seconds` to the
+existing renderer: 3D-ICE's printed Tflp time may be rounded to milliseconds.
+This reconstructs thermal slot timestamps without changing the thermal solver
+or the temperature samples. The study harness supplies the actual slot length.
+
 ## Replacing or Updating SoftHier
 
 The default integration is intentionally contained in:
 
 - `providers/softhier/provider.sh` for SDK pinning, build, and execution;
-- `providers/softhier/export_system_config.py` for architecture geometry and
-  exact component mappings.
+- `providers/softhier/export_system_config.py` for architecture inventory and
+  exact component mappings;
+- `providers/softhier/floorplans/` for selectable cluster placement rules.
 
 The current provider pins SDK commit
 `1244fdbc34977aff5a6a10ead079053fb5d31d00`. Override

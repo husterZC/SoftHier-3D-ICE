@@ -59,6 +59,7 @@ EXIT_TIMEOUT ?= 120
 SOFTHIER_LOG_TAIL_LINES ?= 5
 SIMULATOR_LOG_TAIL_LINES ?= $(SOFTHIER_LOG_TAIL_LINES)
 SOFTHIER_POWER_PROFILE ?= constant
+export SOFTHIER_FLOORPLAN ?= redmule_strip
 PYTHON ?= python3
 AUTO_BOOTSTRAP ?= 0
 ICE_GENERATE_GIF ?= 0
@@ -130,6 +131,7 @@ help:
 		'  BUILD_SIMULATOR=$(BUILD_SIMULATOR)' \
 		'  SIMULATOR_LOG_TAIL_LINES=$(SIMULATOR_LOG_TAIL_LINES)' \
 		'  SOFTHIER_POWER_PROFILE=$(SOFTHIER_POWER_PROFILE)  [constant|temperature_aware]' \
+		'  SOFTHIER_FLOORPLAN=$(SOFTHIER_FLOORPLAN)  [redmule_strip|square_bands]' \
 		'  Legacy SoftHier variables remain compatibility aliases.' \
 		'' \
 		'More detail: co-simulation.md'

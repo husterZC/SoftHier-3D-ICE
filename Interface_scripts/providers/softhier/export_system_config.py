@@ -6,6 +6,7 @@ import copy
 import importlib.util
 import json
 import math
+import os
 import sys
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
@@ -19,21 +20,78 @@ from system_contract import (  # noqa: E402
     CONTRACT_VERSION,
     validate_contract,
 )
+from providers.softhier import floorplans  # noqa: E402
 
 
 PNR_UTILIZATION = 0.66
-KGE_TO_UM2 = {
-    "22nm": 200,
-    "12nm": 120,
-    "7nm": 60,
-    "5nm": 30,
-}
 SRAM_BITCELL_UM2 = {
     "22nm": 0.100,
     "12nm": 0.060,
     "7nm": 0.027,
     "5nm": 0.021,
 }
+
+
+def power_models():
+    """Load the provider's single coefficient/area source without importing GVSoC."""
+    softhier = Path(os.environ.get("SOFTHIER_DIR", INTERFACE_DIR.parent / "SoftHier"))
+    path = softhier / "pulp/pulp/chips/soft_hier_old/power_models/__init__.py"
+    spec = importlib.util.spec_from_file_location("softhier_power_models", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def component_inventory(architecture: Any) -> List[Dict[str, Any]]:
+    models = power_models()
+    node = str(getattr(architecture, "tech_node", "5nm"))
+    cell_area = models.technology_spec(node)["cell_um2_per_kge"] / PNR_UTILIZATION
+    cores = required_int(architecture, "num_core_per_cluster", minimum=1)
+    attached = list(getattr(architecture, "spatz_attaced_core_list", []))
+    if len(set(attached)) != len(attached) or any(i not in range(cores) for i in attached):
+        raise ValueError("Spatz attachment indices must be unique valid core indices")
+    if getattr(architecture, "core_model", "fast") != "fast":
+        raise ValueError("expanded thermal mappings currently require core_model='fast'")
+    inventory = []
+
+    def add(name, kind, path, parameters=None, area=None):
+        parameters = parameters or {}
+        if area is None:
+            area = models.logic_area_kge(kind, **parameters) * cell_area
+        if not math.isfinite(area) or area <= 0:
+            raise ValueError(f"invalid area for {name}: {area}")
+        inventory.append(dict(name=name, kind=kind, simulator_path=path,
+                              parameters=parameters, area_um2=area))
+
+    red_kge = 100 + required_int(architecture, "redmule_ce_height", minimum=1) * required_int(architecture, "redmule_ce_width", minimum=1) * 8.59
+    add("redmule", "light_redmule", "/chip/{cluster}/redmule", area=red_kge * cell_area)
+    size = required_int(architecture, "cluster_tcdm_size", minimum=1)
+    add("tcdm", "memory", "/chip/{cluster}/tcdm", {"size_bytes": size}, size * 8 * SRAM_BITCELL_UM2[node])
+    for core in range(cores):
+        add(f"pe{core}", "core", f"/chip/{{cluster}}/pe{core}/scalar_power")
+        if core in attached:
+            ports = required_int(architecture, "spatz_num_vlsu_port", minimum=1)
+            vlen_bits = ports * int(getattr(architecture, "spatz_vlsu_port_width", 32))
+            add(f"spatz{core}", "spatz", f"/chip/{{cluster}}/pe{core}/ara", {
+                "function_units": required_int(architecture, "spatz_num_function_unit", minimum=1),
+                "vrf_bytes": 32 * vlen_bits // 8, "vlsu_ports": ports})
+    width = required_int(architecture, "noc_link_width", minimum=1)
+    dma_names = [f"idma_{i}" for i in range(cores)] if getattr(architecture, "multi_idma_enable", 0) else ["idma"]
+    for name in dma_names:
+        add(name, "idma", f"/chip/{{cluster}}/{name}", {
+            "outstanding": required_int(architecture, "idma_outstand_txn", minimum=1), "data_width_bits": width})
+    for network, bits in (("data_noc", width), ("sync_bus", 32)):
+        for part in ("router", "ni"):
+            add(f"{network}_{part}", "floonoc", f"/chip/{network}/{part}_{{router_x}}_{{router_y}}",
+                {"part": part, "data_width_bits": bits})
+    for name, field in (("instr_mem", "instruction_mem_size"), ("stack_mem", "cluster_stack_size")):
+        size = required_int(architecture, field, minimum=1)
+        add(name, "memory", f"/chip/{{cluster}}/{name}", {"size_bytes": size}, size * 8 * SRAM_BITCELL_UM2[node])
+    add("transpose_engine", "transpose", "/chip/{cluster}/transpose_engine", {
+        # Architecture bank width is in bits; ClusterArch passes bytes to the
+        # transpose model. Keep the physical/power estimate in the same units.
+        "buffer_bytes": required_int(architecture, "cluster_tcdm_bank_width", minimum=8) / 8 * required_int(architecture, "cluster_tcdm_bank_nb", minimum=1)})
+    return inventory
 
 
 def import_architecture(path: Path) -> Any:
@@ -61,73 +119,9 @@ def required_int(architecture: Any, name: str, *, minimum: int = 0) -> int:
 
 def build_cluster_geometry(
     architecture: Any,
+    floorplan_rule: str = floorplans.DEFAULT_RULE,
 ) -> Tuple[Dict[str, Any], List[float]]:
-    tech_node = str(getattr(architecture, "tech_node", "5nm"))
-    if tech_node not in KGE_TO_UM2:
-        raise RuntimeError(
-            f"unsupported SoftHier technology node {tech_node!r}; "
-            f"choose one of {', '.join(KGE_TO_UM2)}"
-        )
-
-    redmule_ce_height = required_int(
-        architecture, "redmule_ce_height", minimum=1
-    )
-    redmule_ce_width = required_int(architecture, "redmule_ce_width", minimum=1)
-    redmule_kge = 100 + redmule_ce_height * redmule_ce_width * 8.59
-    redmule_area = redmule_kge * KGE_TO_UM2[tech_node] / PNR_UTILIZATION
-    redmule_dimension = math.sqrt(redmule_area)
-
-    core_count = required_int(architecture, "num_core_per_cluster", minimum=1)
-    spatz_function_units = required_int(
-        architecture, "spatz_num_function_unit", minimum=0
-    )
-    attached_spatz = list(
-        getattr(architecture, "spatz_attaced_core_list", [])
-    )
-    idma_outstanding = required_int(
-        architecture, "idma_outstand_txn", minimum=0
-    )
-    noc_link_width = required_int(architecture, "noc_link_width", minimum=1)
-
-    snitch_kge = 25 + 126
-    spatz_kge = 169 + 46 + spatz_function_units * 142
-    idma_kge = 7 + idma_outstanding * 6.5 + noc_link_width * 1.3 / 32
-    noc_router_kge = 28 + 168 * noc_link_width / 512
-    others_kge = (
-        snitch_kge * core_count
-        + spatz_kge * len(attached_spatz)
-        + idma_kge
-        + noc_router_kge
-    )
-    others_area = others_kge * KGE_TO_UM2[tech_node] / PNR_UTILIZATION
-    others_height = others_area / redmule_dimension
-
-    tcdm_bytes = required_int(architecture, "cluster_tcdm_size", minimum=1)
-    tcdm_area = tcdm_bytes * 8 * SRAM_BITCELL_UM2[tech_node]
-    cluster_height = redmule_dimension + others_height
-    tcdm_width = tcdm_area / cluster_height
-
-    components = {
-        "redmule": {
-            "type": "comp",
-            "shape": [redmule_dimension, redmule_dimension],
-            "offset": [0.0, 0.0],
-            "subs": {},
-        },
-        "others": {
-            "type": "comp",
-            "shape": [redmule_dimension, others_height],
-            "offset": [0.0, redmule_dimension],
-            "subs": {},
-        },
-        "tcdm": {
-            "type": "comp",
-            "shape": [tcdm_width, cluster_height],
-            "offset": [redmule_dimension, 0.0],
-            "subs": {},
-        },
-    }
-    return components, [redmule_dimension + tcdm_width, cluster_height]
+    return floorplans.build_cluster(component_inventory(architecture), floorplan_rule)
 
 
 def build_contract(
@@ -135,11 +129,14 @@ def build_contract(
     source_config: Path,
     default_power_w: float,
     power_profile: str = "constant",
+    floorplan_rule: str = floorplans.DEFAULT_RULE,
 ) -> dict:
     cluster_columns = required_int(architecture, "num_cluster_x", minimum=1)
     cluster_rows = required_int(architecture, "num_cluster_y", minimum=1)
     cluster_count = cluster_columns * cluster_rows
-    cluster_components, cluster_shape = build_cluster_geometry(architecture)
+    cluster_components, cluster_shape = build_cluster_geometry(architecture, floorplan_rule)
+    inventory = component_inventory(architecture)
+    resolved_components = []
 
     clusters = {}
     floorplan_elements = []
@@ -156,36 +153,16 @@ def build_contract(
                 "subs": copy.deepcopy(cluster_components),
             }
 
-            redmule = f"chip/{cluster_name}/redmule"
             others = f"chip/{cluster_name}/others"
-            tcdm = f"chip/{cluster_name}/tcdm"
-            power_columns.extend([redmule, tcdm])
-            thermal_components.extend(
-                [
-                    {
-                        "path": f"/chip/{cluster_name}/redmule",
-                        "power_column": redmule,
-                        "floorplan_elements": [redmule],
-                        "aggregation": "area-weighted-average",
-                    },
-                    {
-                        "path": f"/chip/{cluster_name}/tcdm",
-                        "power_column": tcdm,
-                        "floorplan_elements": [tcdm],
-                        "aggregation": "area-weighted-average",
-                    },
-                ]
-            )
-            floorplan_elements.extend(
-                [
-                    {"name": redmule, "power": {"column": redmule}},
-                    {
-                        "name": others,
-                        "power": {"constant_w": default_power_w},
-                    },
-                    {"name": tcdm, "power": {"column": tcdm}},
-                ]
-            )
+            for item in inventory:
+                column = f"chip/{cluster_name}/{item['name']}"
+                path = item["simulator_path"].format(cluster=cluster_name, router_x=x + 1, router_y=y + 1)
+                power_columns.append(column)
+                thermal_components.append({"path": path, "power_column": column,
+                    "floorplan_elements": [column], "aggregation": "area-weighted-average"})
+                floorplan_elements.append({"name": column, "power": {"column": column}})
+                resolved_components.append(dict(item, simulator_path=path, power_column=column))
+            floorplan_elements.append({"name": others, "power": {"constant_w": default_power_w}})
 
     geometry = {
         "chip": {
@@ -219,6 +196,17 @@ def build_contract(
             ),
             "technology_node": str(getattr(architecture, "tech_node", "5nm")),
             "power_model_profile": power_profile,
+            "component_power_model_version": 2,
+            "power_voltage_v": power_models().technology_spec(str(getattr(architecture, "tech_node", "5nm")))["nominal_voltage_v"],
+            "power_frequency_hz": 1_000_000_000,
+            "power_estimate_scale": float(getattr(architecture, "power_estimate_scale", 1.0)),
+            "components": resolved_components,
+            "power_model_specs": {name: power_models().model_spec(name) for name in
+                ("technology", "core", "spatz", "idma", "floonoc", "transpose", "memory", "light_redmule")},
+            "floorplan_rule": floorplan_rule,
+            "floorplan_method": floorplans.get_rule(floorplan_rule).DESCRIPTION,
+            "floorplan_residual_area_fraction": floorplans.RESIDUAL_AREA_FRACTION,
+            "unmodeled": ["HBM/PHY", "local interconnect/register logic (others residual)", "global clock distribution beyond component clock budgets"],
         },
         "geometry": geometry,
         "floorplan": {
@@ -251,6 +239,10 @@ def main() -> int:
     )
     parser.add_argument("--arch", required=True, help="SoftHier architecture file.")
     parser.add_argument("--output", required=True, help="Output contract JSON file.")
+    parser.add_argument("--floorplan", choices=tuple(floorplans.RULES), default=floorplans.DEFAULT_RULE,
+                        help="Cluster placement rule; does not change power coefficients or component areas.")
+    parser.add_argument("--core-model", choices=("fast", "accurate"),
+                        help="Apply the same core-model override as the simulator.")
     parser.add_argument(
         "--power-profile",
         choices=("constant", "temperature_aware"),
@@ -271,11 +263,14 @@ def main() -> int:
         raise SystemExit(f"missing SoftHier architecture file: {source_config}")
 
     architecture = import_architecture(source_config)
+    if args.core_model is not None:
+        architecture.core_model = args.core_model
     contract = build_contract(
         architecture,
         source_config,
         args.default_power_w,
         args.power_profile,
+        args.floorplan,
     )
     output.parent.mkdir(parents=True, exist_ok=True)
     with output.open("w", encoding="utf-8") as stream:
