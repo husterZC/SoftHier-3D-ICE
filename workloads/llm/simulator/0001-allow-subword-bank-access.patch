@@ -1,0 +1,17 @@
+--- a/priority_arbiter_filter.cpp
++++ b/priority_arbiter_filter.cpp
+@@ -62,9 +62,12 @@
+     bool is_write = req->get_is_write();
+     uint64_t size = req->get_size();
+     uint8_t *data = req->get_data();
+-    if (size != _this->bank_width)
++    // DMA/HWPE interleavers split requests at bank boundaries. FP16 tails
++    // legitimately occupy half a word and consume one arbitration slot.
++    if (size == 0 || size > _this->bank_width ||
++        (offset % _this->bank_width) + size > _this->bank_width)
+     {
+-        _this->trace.fatal("[PriorityArbiterFilter] Received IO req with size %d, but expect %d\n", size, _this->bank_width);
++        _this->trace.fatal("[PriorityArbiterFilter] Invalid bank access size %d for width %d\n", size, _this->bank_width);
+     }
+ 
+     //Forward Reqeust

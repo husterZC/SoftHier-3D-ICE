@@ -20,7 +20,7 @@ On Debian or Ubuntu, install the host packages with:
 sudo apt-get update
 sudo apt-get install -y \
   build-essential cmake bison flex libopenblas-dev csh unzip \
-  git curl wget ca-certificates pkg-config \
+  git patch curl wget ca-certificates pkg-config \
   python3 python3-pip python3-venv \
   libsndfile1-dev libsdl2-dev libsdl2-ttf-dev \
   rsync autoconf automake texinfo libtool
@@ -100,6 +100,16 @@ are local-only and excluded from Git. Use the experiment guide to generate
 the four implementation-kernel profile pairs with `square_bands`. Optional
 power-estimate sensitivity studies are described in the
 [experiment reference](experiments/component_power/REFERENCE.md).
+
+Synthetic LLM prefill and decode workloads use a validated 4×4 cluster mapping:
+
+```bash
+make llm-run LLM_PHASE=prefill LLM_PRESET=smoke
+make llm-run LLM_PHASE=decode LLM_PRESET=smoke SOFTHIER_POWER_PROFILE=temperature_aware
+```
+
+See [`workloads/llm/`](workloads/llm/README.md) for presets, separate decode cache
+initialization, run artifacts, and validation commands.
 
 Select cluster placement independently with
 `SOFTHIER_FLOORPLAN=redmule_strip|square_bands` (default: `redmule_strip`).

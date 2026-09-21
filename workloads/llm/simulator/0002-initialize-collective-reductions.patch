@@ -1,0 +1,46 @@
+--- a/floonoc/floonoc.hpp
++++ b/floonoc/floonoc.hpp
+@@ -105,7 +105,8 @@
+     static constexpr int REQ_COL_MASK = 12;   // [Collective Only] The col mask for collecitive primitives
+     static constexpr int REQ_PEND_KIDS = 13;   // [Collective Only] How many kids to be waited for response
+     static constexpr int REQ_MOMENTUM = 14;      // [Collective Only] Tree direction
+-    static constexpr int REQ_NB_ARGS = 15;    // Number of request data required by this model
++    static constexpr int REQ_REDUCTION_INITIALIZED = 15;
++    static constexpr int REQ_NB_ARGS = 16;    // Number of request data required by this model
+ 
+     // The following constants gives the index in the queue array of the queue associated to each direction
+     static constexpr int DIR_RIGHT = 0;
+--- a/floonoc/floonoc_router.cpp
++++ b/floonoc/floonoc_router.cpp
+@@ -444,6 +444,7 @@
+ {
+     this->noc->account_power_merge(req, this);
+     int num_req = queue->size();
++    req->set_int(FlooNoc::REQ_REDUCTION_INITIALIZED, 0);
+     for (int i = 0; i < num_req; ++i)
+     {
+         int momentum = queue->front();
+--- a/floonoc/floonoc.cpp
++++ b/floonoc/floonoc.cpp
+@@ -158,8 +158,19 @@
+         if (parent->get_int(FlooNoc::REQ_COLL_TYPE) > 1 &&
+             merge != this->power_routes.end() && merge->second.merge_router != nullptr)
+             merge->second.merge_router->account_reduction(req->get_size());
+-        process_collective_operations(parent, req);
+-        delete req->get_data();
++        // A read buffer may contain a previous DMA's payload. Seed each
++        // reduction from its first child, including max over negative values.
++        if (parent->get_int(FlooNoc::REQ_COLL_TYPE) > 1 &&
++            !parent->get_int(FlooNoc::REQ_REDUCTION_INITIALIZED))
++        {
++            std::memcpy(parent->get_data(), req->get_data(), req->get_size());
++            parent->set_int(FlooNoc::REQ_REDUCTION_INITIALIZED, 1);
++        }
++        else
++        {
++            process_collective_operations(parent, req);
++        }
++        delete[] req->get_data();
+         delete req;
+         parent->set_int(FlooNoc::REQ_PEND_KIDS, parent->get_int(FlooNoc::REQ_PEND_KIDS) - 1);
+         if (parent->get_int(FlooNoc::REQ_PEND_KIDS) <= 0)

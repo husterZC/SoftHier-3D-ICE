@@ -8,6 +8,15 @@ SIMULATOR_PROVIDER ?= $(ROOT_DIR)/Interface_scripts/providers/softhier/provider.
 CO_SIMULATION_SCRIPT_DIR ?= $(ROOT_DIR)/Interface_scripts/co-simulation
 GEOMETRY_SCRIPT_DIR ?= $(ROOT_DIR)/Interface_scripts/geometry_generator
 
+LLM_PHASE ?= prefill
+LLM_PRESET ?= smoke
+ifneq ($(filter llm-run,$(MAKECMDGOALS)),)
+RUN_NAME ?= llm_$(LLM_PHASE)_$(LLM_PRESET)
+ifeq ($(LLM_PRESET),smoke)
+PWR_INTERVAL_PS ?= 10000000
+ICE_TARGET_TOP_DIE_CELLS ?= 4096
+endif
+endif
 RUN_NAME ?= default
 RUN_ROOT ?= $(ROOT_DIR)/runs
 ifeq ($(origin RUN_ID),undefined)
@@ -89,7 +98,7 @@ THERMAL_FEEDBACK_FILE ?= $(RUN_3DICE_DIR)/output_top_die_flp_avg.txt
 POWER_HOOK_POLL_SECONDS ?= 0.02
 POWER_HOOK_TIMEOUT_SECONDS ?= $(WAIT_TIMEOUT)
 
-.PHONY: help bootstrap co-simulation dirs 3dice-build simulator-init simulator-check simulator-build softhier-init softhier-power-check softhier-build ice-inputs coupled-run coupled-status coupled-stop clean-run clean-latest clean-runs list-runs latest-run adapter-smoke interface-tests
+.PHONY: llm-run llm-tests help bootstrap co-simulation dirs 3dice-build simulator-init simulator-check simulator-build softhier-init softhier-power-check softhier-build ice-inputs coupled-run coupled-status coupled-stop clean-run clean-latest clean-runs list-runs latest-run adapter-smoke interface-tests
 
 help:
 	@printf '%s\n' \
@@ -102,6 +111,8 @@ help:
 		'  make ice-inputs       Generate run-local 3D-ICE geo/floorplan/stk files' \
 		'  make simulator-build  Build through the selected provider' \
 		'  make coupled-run      Run the localhost coupled simulation' \
+		'  make llm-run          Run LLM_PHASE=prefill|decode LLM_PRESET=smoke|original' \
+		'  make llm-tests        Validate LLM configurations and address helpers' \
 		'  make interface-tests  Validate the neutral interface contract' \
 		'  make coupled-status   Show recorded process status' \
 		'  make coupled-stop     Stop recorded coupled-run processes' \
@@ -344,3 +355,15 @@ interface-tests: adapter-smoke
 		-s "$(ROOT_DIR)/Interface_scripts/tests" \
 		-p "test_*.py" \
 		-v
+
+llm-run:
+	@RUN_NAME="$(RUN_NAME)" RUN_ROOT="$(RUN_ROOT)" \
+	LLM_BUILD_HARDWARE="$(BUILD_SIMULATOR)" SOFTHIER_DIR="$(SOFTHIER_DIR)" \
+	"$(PYTHON)" "$(ROOT_DIR)/workloads/llm/run.py" \
+		--phase "$(LLM_PHASE)" --preset "$(LLM_PRESET)" --run-dir "$(RUN_DIR)" \
+		--arch "$(if $(SIMULATOR_CONFIG),$(SIMULATOR_CONFIG),$(ROOT_DIR)/workloads/llm/configs/arch_4x4.py)" \
+		--power-profile "$(SOFTHIER_POWER_PROFILE)" --power-interval-ps "$(POWER_INTERVAL_PS)" \
+		--thermal-cells "$(ICE_TARGET_TOP_DIE_CELLS)"
+
+llm-tests:
+	PYTHONDONTWRITEBYTECODE=1 "$(PYTHON)" -m unittest discover -s workloads/llm/tests -p 'test_*.py' -v

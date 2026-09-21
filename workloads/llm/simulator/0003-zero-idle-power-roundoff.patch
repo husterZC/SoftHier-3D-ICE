@@ -1,0 +1,17 @@
+--- a/power_trace.cpp
++++ b/power_trace.cpp
+@@ -261,6 +261,14 @@
+     this->account_dynamic_power();
+     this->current_dynamic_power += power_incr;
+ 
++    // Adding and removing child energy quanta can leave a negative rounding
++    // residue at idle. Do not integrate sub-picowatt noise into negative
++    // energy. Larger negative power remains visible to the power-hook checks.
++    if (this->current_dynamic_power < 0.0 && this->current_dynamic_power > -1.0e-12)
++    {
++        this->current_dynamic_power = 0.0;
++    }
++
+     // Redump VCD trace since the instant power is impacted
+     this->dump_vcd_trace();
+ 

@@ -1,0 +1,5 @@
+{
+  "model": {"d_model": 768, "d_ff": 3072, "n_head": 6, "n_kv_head": 6, "elem_size": 2},
+  "smoke": {"num_layers": 1, "prefill_tokens": 64, "max_ctx": 128, "decode_init_cache_len": 64, "decode_steps": 2},
+  "original": {"num_layers": 12, "prefill_tokens": 2048, "max_ctx": 2048, "decode_init_cache_len": 2047, "decode_steps": 1}
+}

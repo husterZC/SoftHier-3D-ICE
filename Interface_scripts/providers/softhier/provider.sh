@@ -10,6 +10,10 @@ SOFTHIER_SDK_COMMIT="${SOFTHIER_SDK_COMMIT:-1244fdbc34977aff5a6a10ead079053fb5d3
 SOFTHIER_SDK_TOOLCHAIN_SOURCE="${SOFTHIER_SDK_TOOLCHAIN_SOURCE:-}"
 SOFTHIER_WORKDIR="${SOFTHIER_WORKDIR:-$SOFTHIER_DIR/.power_interface}"
 SOFTHIER_SW_BUILD="${SOFTHIER_SW_BUILD:-$SOFTHIER_WORKDIR/sw_build_staged}"
+SOFTHIER_RUNTIME_WORKDIR="${SOFTHIER_RUNTIME_WORKDIR:-$SOFTHIER_WORKDIR}"
+SOFTHIER_CONFIG_OPTIONS_FILE="${SOFTHIER_CONFIG_OPTIONS_FILE:-}"
+SOFTHIER_MODEL_DIR="${SOFTHIER_MODEL_DIR:-}"
+SOFTHIER_ENGINE_DIR="${SOFTHIER_ENGINE_DIR:-}"
 SOFTHIER_NATIVE_DEPS_DIR="${SOFTHIER_NATIVE_DEPS_DIR:-$SOFTHIER_WORKDIR/dependencies}"
 SOFTHIER_SYSTEMC_HOME="${SOFTHIER_SYSTEMC_HOME:-$SOFTHIER_NATIVE_DEPS_DIR/systemc-install}"
 SOFTHIER_DRAMSYS_HOME="${SOFTHIER_DRAMSYS_HOME:-$SOFTHIER_NATIVE_DEPS_DIR/dramsys-install}"
@@ -165,6 +169,10 @@ source_environment() {
     # selection aligned with the GCC 14 compiler used for GVSoC and SystemC.
     export LIBRARY_PATH="/usr/pack/gcc-14.2.0-af/lib64:${LIBRARY_PATH:-}"
     export LD_LIBRARY_PATH="/usr/pack/gcc-14.2.0-af/lib64:$SOFTHIER_WORKDIR/install/lib:$SOFTHIER_SYSTEMC_HOME/lib64:$SOFTHIER_DRAMSYS_HOME:$SOFTHIER_DIR/third_party/systemc_install/lib64:$SOFTHIER_DIR/third_party/DRAMSys:${LD_LIBRARY_PATH:-}"
+    if [[ -n "$SOFTHIER_ENGINE_DIR" ]]; then
+        [[ -d "$SOFTHIER_ENGINE_DIR" ]] || die "missing engine directory: $SOFTHIER_ENGINE_DIR"
+        export LD_LIBRARY_PATH="$SOFTHIER_ENGINE_DIR:$LD_LIBRARY_PATH"
+    fi
 }
 
 
@@ -478,14 +486,14 @@ build_simulator() {
         cd "$SOFTHIER_DIR"
         source_environment
         "$PYTHON" "$SCRIPT_DIR/prepare_workload.py" --sdk "$SOFTHIER_SDK_DIR" \
-            --workdir "$SOFTHIER_WORKDIR" --arch "$SIMULATOR_CONFIG"
+            --workdir "$SOFTHIER_RUNTIME_WORKDIR" --arch "$SIMULATOR_CONFIG"
         if [[ "$build_hardware" == 1 ]]; then
             "$MAKE_CMD" "TARGETS=$SOFTHIER_TARGET" build
         fi
-        local runtime="$SOFTHIER_WORKDIR/sdk_snapshot/soft_hier_sdk/runtime"
+        local runtime="$SOFTHIER_RUNTIME_WORKDIR/sdk_snapshot/soft_hier_sdk/runtime"
         local app="${SIMULATOR_APP:-$runtime/app_example}"
         local isa
-        read -r isa < "$SOFTHIER_WORKDIR/riscv_arch.txt"
+        read -r isa < "$SOFTHIER_RUNTIME_WORKDIR/riscv_arch.txt"
         "${CMAKE:-cmake}" -S "$runtime" -B "$SOFTHIER_SW_BUILD" \
             "-DSRC_DIR=$app" "-DRISCV_ARCH=$isa"
         # The upstream custom command does not declare header dependencies.
@@ -495,6 +503,16 @@ build_simulator() {
             die "ebreak found in workload disassembly"
         fi
     )
+}
+
+
+run_gvsoc() {
+    local frontend="$SOFTHIER_WORKDIR/install/bin/gvsoc"
+    if [[ -n "$SOFTHIER_ENGINE_DIR" ]]; then
+        frontend="$SOFTHIER_ENGINE_DIR/gvsoc"
+    fi
+    require_executable "$frontend"
+    "$frontend" "$@"
 }
 
 
@@ -522,6 +540,19 @@ run_simulator() {
         "--power-hook-response-file" "$POWER_HOOK_RESPONSE_FILE"
         "--power-hook-trace-file" "$POWER_HOOK_TRACE_FILE"
     )
+    if [[ -n "$SOFTHIER_MODEL_DIR" ]]; then
+        [[ -d "$SOFTHIER_MODEL_DIR" ]] || die "missing model directory: $SOFTHIER_MODEL_DIR"
+        args+=("--model-dir=$SOFTHIER_MODEL_DIR")
+    fi
+    if [[ -n "$SOFTHIER_CONFIG_OPTIONS_FILE" ]]; then
+        require_file "$SOFTHIER_CONFIG_OPTIONS_FILE"
+        local option
+        while IFS= read -r option || [[ -n "$option" ]]; do
+            [[ -z "$option" || "$option" == \#* ]] && continue
+            [[ "$option" == *=* ]] || die "invalid simulator option: $option"
+            args+=("--config-opt=$option")
+        done < "$SOFTHIER_CONFIG_OPTIONS_FILE"
+    fi
     if [[ -n "$SIMULATOR_PLATFORM" ]]; then
         args+=("--preload" "$SIMULATOR_PLATFORM")
     fi
@@ -531,7 +562,8 @@ run_simulator() {
     (
         cd "$SOFTHIER_DIR"
         source_environment
-        "$SOFTHIER_WORKDIR/install/bin/gvsoc" "${args[@]}"
+        ulimit -c 0
+        run_gvsoc "${args[@]}"
     )
 }
 
@@ -542,13 +574,27 @@ run_uncoupled() {
     require_file "$SOFTHIER_SW_BUILD/softhier.elf"
     local args=("--target=$SOFTHIER_TARGET" "--binary" "$SOFTHIER_SW_BUILD/softhier.elf"
         "--core-model=$SOFTHIER_CORE_MODEL" "--power-profile=$SOFTHIER_POWER_PROFILE")
+    if [[ -n "$SOFTHIER_MODEL_DIR" ]]; then
+        [[ -d "$SOFTHIER_MODEL_DIR" ]] || die "missing model directory: $SOFTHIER_MODEL_DIR"
+        args+=("--model-dir=$SOFTHIER_MODEL_DIR")
+    fi
+    if [[ -n "$SOFTHIER_CONFIG_OPTIONS_FILE" ]]; then
+        require_file "$SOFTHIER_CONFIG_OPTIONS_FILE"
+        local option
+        while IFS= read -r option || [[ -n "$option" ]]; do
+            [[ -z "$option" || "$option" == \#* ]] && continue
+            [[ "$option" == *=* ]] || die "invalid simulator option: $option"
+            args+=("--config-opt=$option")
+        done < "$SOFTHIER_CONFIG_OPTIONS_FILE"
+    fi
     if [[ -n "$SIMULATOR_PLATFORM" ]]; then
         args+=("--preload" "$SIMULATOR_PLATFORM")
     fi
     (
         cd "$SOFTHIER_DIR"
         source_environment
-        "$SOFTHIER_WORKDIR/install/bin/gvsoc" "${args[@]}" run
+        ulimit -c 0
+        run_gvsoc "${args[@]}" run
     )
 }
 
@@ -567,6 +613,10 @@ write_manifest() {
     kv SOFTHIER_SDK_PIN "$SOFTHIER_SDK_COMMIT"
     kv SOFTHIER_WORKDIR "$SOFTHIER_WORKDIR"
     kv SOFTHIER_SW_BUILD "$SOFTHIER_SW_BUILD"
+    kv SOFTHIER_RUNTIME_WORKDIR "$SOFTHIER_RUNTIME_WORKDIR"
+    kv SOFTHIER_CONFIG_OPTIONS_FILE "$SOFTHIER_CONFIG_OPTIONS_FILE"
+    kv SOFTHIER_MODEL_DIR "$SOFTHIER_MODEL_DIR"
+    kv SOFTHIER_ENGINE_DIR "$SOFTHIER_ENGINE_DIR"
     kv SOFTHIER_SYSTEMC_HOME "$SOFTHIER_SYSTEMC_HOME"
     kv SOFTHIER_SYSTEMC_VERSION "$SOFTHIER_SYSTEMC_VERSION"
     kv SOFTHIER_DRAMSYS_HOME "$SOFTHIER_DRAMSYS_HOME"

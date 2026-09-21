@@ -1,0 +1,4 @@
+{
+  "prefill": {"gemm": {"group_x": 4, "group_y": 4, "m_tile": 16, "n_tile": 64, "k_tile": 64}, "attention": {"group_x": 4, "group_y": 4, "block_x": 64, "block_y": 64}},
+  "decode": {"gemm": {"group_x": 4, "group_y": 1, "m_tile": 1, "n_tile": 64, "k_tile": 64}, "attention": {"group_x": 1, "group_y": 1, "block_x": 1, "block_y": 1}}
+}

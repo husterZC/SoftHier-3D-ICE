@@ -1,0 +1,10 @@
+--- a/SummaGEMM/include/SummaGEMM.h
++++ b/SummaGEMM/include/SummaGEMM.h
+@@ -450,6 +450,7 @@
+                                 //Clear Z
+                                 flex_dma_async_1d(DMA_L1_Z,zomem(0),info->L1_Z_size);
+                                 flex_dma_async_wait_all(); // Wait for iDMA Finishing
++                                info->store_recorded = 0; // Reused tile no longer contains a stored accumulator.
+                             }
+                             info->store_id = start_id;
+                         }
