@@ -1608,6 +1608,8 @@ def add_tmap_poly_collection(args, gif_data, np, plt, axis, Normalize):
         edgecolors="none",
         linewidths=0,
         antialiased=False,
+        # Rounded coordinates can straddle a pixel boundary; snapping exposes seams.
+        snap=False,
         rasterized=True,
     )
     axis.add_collection(collection)
