@@ -251,6 +251,11 @@ after execution finishes. Results are written under `runs/<run-name>/<timestamp>
 In local-server mode no 3D-ICE client is started. The server reads
 `traces/3dice_power_traces.txt` with `--follow --until-minus-one`.
 
+In `--follow` mode, each power slot is a newline-terminated row with one finite,
+non-negative value per floorplan element, in floorplan order. With
+`--until-minus-one`, a row containing only `-1` values ends the simulation.
+Without `--follow`, power values are whitespace-separated, and the final value
+can end at EOF without a newline.
 
 During the simulator phase, the terminal shows a green framed live window with
 the latest 5 provider log lines. Change the window size with
@@ -292,8 +297,10 @@ appended, and the page refreshes at the `--poll` interval. Manual slot selection
 is preserved across refreshes; click `Latest` to resume following the newest
 slot. 
 
-To generate a dashboard-style animated GIF after the run finishes, enable the
-end-of-run export:
+To generate an animated temperature map after the run finishes, enable the
+end-of-run export. The default GIF shows the map with cluster outlines, x/y axes
+in micrometers, a title with the current slot and minimum/maximum temperature,
+and a vertical temperature colorbar:
 
 ```bash
 make coupled-run RUN_NAME=default_app ICE_GENERATE_GIF=1
@@ -301,10 +308,33 @@ make coupled-run RUN_NAME=default_app ICE_GENERATE_GIF=1
 
 The GIF is written to `runs/<run-name>/latest/results/3dice/temperature_map.gif`
 by default. It uses the same `xyaxis_TOP_DIE.txt` and `output_top_die.txt`
-source files as the HTML dashboard. 
+source files as the HTML dashboard. Cluster outlines are derived from component
+names such as `chip__cluster_0__redmule` in `floorplan_nopower.flp` beside the
+coordinate file. Both square and rectangular cluster layouts are supported. If
+that file is absent or has no cluster names, the map renders without outlines.
+The color scale stays fixed across all frames.
+
+Use `ICE_GIF_LAYOUT=interface` to select the dashboard layout. This setting also
+works with `make llm-run`. Use `ICE_GIF_WIDTH`, `ICE_GIF_FPS`, `ICE_GIF_STRIDE`,
+and `ICE_GIF_WRITER` to control image width, playback speed, frame sampling,
+and the GIF encoder, respectively.
 
 You can also generate the GIF manually after a run:
 
 ```bash
-python Interface_scripts/plot_runtime_temperature_map/plot_runtime_tmap.py   --coords runs/<run-name>/latest/results/3dice/xyaxis_TOP_DIE.txt   --map runs/<run-name>/latest/results/3dice/output_top_die.txt   --gif runs/<run-name>/latest/results/3dice/temperature_map.gif   --once
+python Interface_scripts/plot_runtime_temperature_map/plot_runtime_tmap.py \
+  --coords runs/<run-name>/latest/results/3dice/xyaxis_TOP_DIE.txt \
+  --map runs/<run-name>/latest/results/3dice/output_top_die.txt \
+  --gif runs/<run-name>/latest/results/3dice/temperature_map.gif \
+  --gif-layout map \
+  --gif-width 800 \
+  --gif-writer pillow \
+  --once
 ```
+
+`--gif-layout map` is the default; use `--gif-layout interface` for the dashboard.
+An 800-pixel width is useful for tall floorplans and keeps Pillow's animation
+memory use lower. Manual export uses saved results and does not rerun simulation.
+For component-average GIFs, `--floorplan` supplies the geometry used for cluster
+outlines alongside `--tflp` temperatures. Their titles also include the simulation
+timestamp from the temperature data (or reconstructed using `--slot-seconds`).

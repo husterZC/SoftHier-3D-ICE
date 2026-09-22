@@ -24,10 +24,10 @@ Headless full Tmap dashboard mode:
 Headless floorplan dashboard mode:
   python3 plot_runtime_tmap.py --floorplan FLOORPLAN_FILE --tflp TFLP_FILE --html HTML_FILE
 
-Animated full Tmap dashboard GIF mode:
+Animated full Tmap GIF mode:
   python3 plot_runtime_tmap.py --coords COORDS_FILE --map TMAP_FILE --gif GIF_FILE --once
 
-Animated floorplan dashboard GIF mode:
+Animated floorplan GIF mode:
   python3 plot_runtime_tmap.py --floorplan FLOORPLAN_FILE --tflp TFLP_FILE --gif GIF_FILE --once
 
 Examples:
@@ -49,7 +49,11 @@ Notes:
     complete rows are appended.
   - GIF modes are offline exports. Full Tmap GIF uses --coords/--map/--gif/--once;
     floorplan GIF uses --floorplan/--tflp/--gif/--once.
-  - GIF renders a dashboard-style interface by default; use --gif-layout map for a map-only view.
+  - GIF defaults to a map with coordinate axes, an animated slot/temperature title,
+    cluster outlines, and a temperature colorbar.
+    Use --gif-layout interface for a dashboard-style view.
+  - Full Tmap GIF finds cluster geometry in floorplan_nopower.flp beside --coords.
+    Without cluster geometry, the temperature map is still rendered.
 """
 
 import argparse
@@ -186,8 +190,9 @@ def parse_args():
     parser.add_argument(
         "--gif-layout",
         choices=("interface", "map"),
-        default="interface",
-        help="GIF layout to render. Interface records the dashboard-style view; map renders only the temperature map.",
+        default="map",
+        help="GIF layout: map (default) shows coordinate axes, an animated title, "
+             "cluster outlines, and a colorbar; interface shows the dashboard.",
     )
     parser.add_argument(
         "--gif-labels",
@@ -739,8 +744,128 @@ def save_animation_atomic(animation, gif_path, writer, dpi):
             temp_path.unlink()
 
 
+def cluster_outline_segments(regions):
+    """Merge the rectangle edges of named clusters into a single static overlay."""
+    clusters = {}
+    for region in regions:
+        parts = re.split(r"__|/", region["name"])
+        for index, part in enumerate(parts):
+            if re.fullmatch(r"cluster_\d+", part):
+                clusters.setdefault(tuple(parts[:index + 1]), []).append(region)
+                break
+
+    if not clusters:
+        return []
+
+    boxes = [floorplan_bounds(items) for items in clusters.values()]
+    extent = max(
+        max(box["maxX"] for box in boxes) - min(box["minX"] for box in boxes),
+        max(box["maxY"] for box in boxes) - min(box["minY"] for box in boxes),
+    )
+    tolerance = extent * 1e-9
+    edges = []
+    for box in boxes:
+        x0, y0, x1, y1 = (box[key] for key in ("minX", "minY", "maxX", "maxY"))
+        edges.extend((("h", y0, x0, x1), ("h", y1, x0, x1),
+                      ("v", x0, y0, y1), ("v", x1, y0, y1)))
+
+    # Small differences in floating-point placement must not double shared edges.
+    groups = []
+    for direction, coordinate, start, end in sorted(edges):
+        if (groups and groups[-1][0] == direction
+                and abs(groups[-1][1] - coordinate) <= tolerance):
+            groups[-1][2].append((start, end))
+        else:
+            groups.append((direction, coordinate, [(start, end)]))
+
+    segments = []
+    for direction, coordinate, intervals in groups:
+        merged = []
+        for start, end in sorted(intervals):
+            if merged and start <= merged[-1][1] + tolerance:
+                merged[-1][1] = max(merged[-1][1], end)
+            else:
+                merged.append([start, end])
+        for start, end in merged:
+            if direction == "h":
+                segments.append(((start, coordinate), (end, coordinate)))
+            else:
+                segments.append(((coordinate, start), (coordinate, end)))
+    return segments
+
+
+def add_cluster_outlines(axis, gif_data):
+    segments = gif_data["cluster_outlines"]
+    if not segments:
+        return
+
+    from matplotlib.collections import LineCollection
+    from matplotlib.patheffects import Normal, Stroke
+
+    outlines = LineCollection(
+        segments, colors="#263238", linewidths=0.65, zorder=3,
+        # Thermal coordinate files round positions; keep the outer stroke visible.
+        clip_on=False, capstyle="butt", antialiaseds=True,
+    )
+    outlines.set_path_effects([Stroke(linewidth=1.5, foreground="white"), Normal()])
+    axis.add_collection(outlines, autolim=False)
+
+
+def create_gif_map_axes(args, bounds, plt):
+    """Reserve space for spatial axes, a per-frame title, and the colorbar."""
+    from matplotlib.ticker import MaxNLocator
+
+    figure_width = args.gif_width / args.gif_dpi
+    scale = min(1.0, figure_width / 3.0)
+    left, right, bottom, top = (size * scale for size in (0.75, 0.16, 0.52, 0.62))
+    gap, bar_width, label_width = (size * scale for size in (0.22, 0.14, 0.65))
+    map_width = figure_width - left - right - gap - bar_width - label_width
+    map_height = map_width * bounds["height"] / bounds["width"]
+    figure_height = map_height + bottom + top
+    figure = plt.figure(figsize=(figure_width, figure_height), dpi=args.gif_dpi,
+                        facecolor="white")
+    axis = figure.add_axes([left / figure_width, bottom / figure_height,
+                           map_width / figure_width, map_height / figure_height])
+    axis.set_aspect("equal", adjustable="box")
+    axis.set_xlim(bounds["minX"], bounds["maxX"])
+    axis.set_ylim(bounds["minY"], bounds["maxY"])
+    axis.set_xlabel("x (µm)", fontsize=10 * scale, color="#263238", labelpad=6 * scale)
+    axis.set_ylabel("y (µm)", fontsize=10 * scale, color="#263238", labelpad=6 * scale)
+    axis.tick_params(labelsize=9 * scale, colors="#263238", length=3 * scale,
+                     width=0.6, pad=4 * scale)
+    axis.xaxis.set_major_locator(MaxNLocator(nbins=4, min_n_ticks=2))
+    axis.yaxis.set_major_locator(MaxNLocator(nbins=6, min_n_ticks=2))
+    for spine in axis.spines.values():
+        spine.set_edgecolor("#9ca3af")
+        spine.set_linewidth(0.6)
+    axis.set_title("", fontsize=10 * scale, color="#263238", pad=7 * scale)
+    colorbar_axis = figure.add_axes([
+        (left + map_width + gap) / figure_width, bottom / figure_height,
+        bar_width / figure_width, map_height / figure_height,
+    ])
+    return figure, axis, colorbar_axis
+
+
+def gif_map_title(slot, row_count, temperatures, timestamp=None):
+    title = f"Slot {slot + 1}/{row_count}"
+    if timestamp is not None:
+        title += f" | time {timestamp:.6g} s"
+    return (title + f"\nmin {temperatures.min():.1f} K | "
+            f"max {temperatures.max():.1f} K")
+
+
+def add_gif_map_colorbar(figure, collection, colorbar_axis):
+    colorbar = figure.colorbar(collection, cax=colorbar_axis)
+    scale = min(1.0, figure.get_size_inches()[0] / 3.0)
+    colorbar.set_label("Temperature (K)", fontsize=10 * scale, color="#263238", labelpad=9 * scale)
+    colorbar.ax.tick_params(labelsize=9 * scale, colors="#263238", length=3 * scale, width=0.6, pad=4 * scale)
+    colorbar.outline.set_edgecolor("#9ca3af")
+    colorbar.outline.set_linewidth(0.6)
+
+
 def prepare_gif_data(args, floorplan_path, tflp_path, np):
     regions = load_floorplan_regions(floorplan_path)
+    cluster_outlines = cluster_outline_segments(regions)
     names, rows = load_tflp_rows(tflp_path, follow=False, slot_seconds=getattr(args, "slot_seconds", None))
 
     if not rows:
@@ -763,6 +888,7 @@ def prepare_gif_data(args, floorplan_path, tflp_path, np):
 
     return {
         "regions": regions,
+        "cluster_outlines": cluster_outlines,
         "names": names,
         "rows": rows,
         "frame_indices": frame_indices,
@@ -865,18 +991,7 @@ def render_gif_map_layout(args, gif_data, modules, gif_path):
     vmin = gif_data["vmin"]
     vmax = gif_data["vmax"]
 
-    figure_width = args.gif_width / args.gif_dpi
-    figure_height = max(4.0, figure_width * bounds["height"] / bounds["width"] * 0.82)
-    figure, axis = plt.subplots(
-        figsize=(figure_width, figure_height),
-        dpi=args.gif_dpi,
-        constrained_layout=True,
-    )
-    axis.set_aspect("equal", adjustable="box")
-    axis.set_xlim(bounds["minX"], bounds["maxX"])
-    axis.set_ylim(bounds["minY"], bounds["maxY"])
-    axis.set_xlabel("x")
-    axis.set_ylabel("y")
+    figure, axis, colorbar_axis = create_gif_map_axes(args, bounds, plt)
 
     patches = [
         Rectangle(
@@ -891,14 +1006,13 @@ def render_gif_map_layout(args, gif_data, modules, gif_path):
         patches,
         cmap=plt.get_cmap(args.cmap),
         norm=norm,
-        edgecolors=(0.08, 0.1, 0.13, 0.35),
-        linewidths=0.45,
+        edgecolors="none",
+        linewidths=0,
         antialiased=False,
     )
     axis.add_collection(collection)
-    colorbar = figure.colorbar(collection, ax=axis, fraction=0.046, pad=0.04)
-    colorbar.set_label("Temperature (K)", fontsize=11)
-    colorbar.ax.tick_params(labelsize=9)
+    add_cluster_outlines(axis, gif_data)
+    add_gif_map_colorbar(figure, collection, colorbar_axis)
 
     if args.gif_labels:
         label_size = max(4.5, min(8.0, args.gif_width / 250.0))
@@ -914,18 +1028,13 @@ def render_gif_map_layout(args, gif_data, modules, gif_path):
                 clip_on=True,
             )
 
-    title = axis.set_title("")
+    title = axis.title
 
     def update(frame_index):
         row = rows[frame_index]
         temperatures = np.asarray(row["values"], dtype=np.float64)
-        min_temp = float(temperatures.min())
-        max_temp = float(temperatures.max())
         collection.set_array(temperatures)
-        title.set_text(
-            f"Slot {frame_index + 1}/{len(rows)} | time {row['time']:.6g} s | "
-            f"min {min_temp:.1f} K | max {max_temp:.1f} K"
-        )
+        title.set_text(gif_map_title(frame_index, len(rows), temperatures, row["time"]))
         return collection, title
 
     update(frame_indices[0])
@@ -1060,6 +1169,7 @@ def render_gif_interface_layout(args, floorplan_path, tflp_path, gif_data, modul
         antialiased=False,
     )
     map_axis.add_collection(collection)
+    add_cluster_outlines(map_axis, gif_data)
 
     if args.gif_labels:
         label_size = max(4.0, min(7.0, args.gif_width / 270.0))
@@ -1476,6 +1586,7 @@ def prepare_tmap_gif_data(args, coords_path, map_path, np):
 
     return {
         "geometry": geometry,
+        "cluster_outlines": cluster_outline_segments(load_optional_floorplan_regions(coords_path)),
         "row_count": row_count,
         "frame_indices": frame_indices,
         "frame_rows": frame_rows,
@@ -1500,6 +1611,7 @@ def add_tmap_poly_collection(args, gif_data, np, plt, axis, Normalize):
         rasterized=True,
     )
     axis.add_collection(collection)
+    add_cluster_outlines(axis, gif_data)
     return collection
 
 
@@ -1516,34 +1628,17 @@ def render_tmap_gif_map_layout(args, gif_data, modules, gif_path):
     ) = modules
 
     bounds = gif_data["geometry"]["bounds"]
-    figure_width = args.gif_width / args.gif_dpi
-    figure_height = max(4.0, figure_width * bounds["height"] / bounds["width"] * 0.82)
-    figure, axis = plt.subplots(
-        figsize=(figure_width, figure_height),
-        dpi=args.gif_dpi,
-        constrained_layout=True,
-    )
-    axis.set_aspect("equal", adjustable="box")
-    axis.set_xlim(bounds["minX"], bounds["maxX"])
-    axis.set_ylim(bounds["minY"], bounds["maxY"])
-    axis.set_xlabel("x")
-    axis.set_ylabel("y")
+    figure, axis, colorbar_axis = create_gif_map_axes(args, bounds, plt)
 
     collection = add_tmap_poly_collection(args, gif_data, np, plt, axis, Normalize)
-    colorbar = figure.colorbar(collection, ax=axis, fraction=0.046, pad=0.04)
-    colorbar.set_label("Temperature (K)", fontsize=11)
-    colorbar.ax.tick_params(labelsize=9)
-    title = axis.set_title("")
+    add_gif_map_colorbar(figure, collection, colorbar_axis)
+
+    title = axis.title
 
     def update(frame_row):
         temperatures = frame_row["values"]
-        min_temp = float(temperatures.min())
-        max_temp = float(temperatures.max())
         collection.set_array(temperatures)
-        title.set_text(
-            f"Slot {frame_row['slot'] + 1}/{gif_data['row_count']} | "
-            f"min {min_temp:.1f} K | max {max_temp:.1f} K"
-        )
+        title.set_text(gif_map_title(frame_row["slot"], gif_data["row_count"], temperatures))
         return collection, title
 
     update(gif_data["frame_rows"][0])

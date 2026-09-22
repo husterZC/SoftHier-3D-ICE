@@ -49,6 +49,7 @@ MAKE_CMD="${MAKE:-make}"
 AUTO_BOOTSTRAP="${AUTO_BOOTSTRAP:-0}"
 ICE_GENERATE_GIF="${ICE_GENERATE_GIF:-0}"
 ICE_GIF_FILE="${ICE_GIF_FILE:-$RUN_3DICE_DIR/temperature_map.gif}"
+ICE_GIF_LAYOUT="${ICE_GIF_LAYOUT:-map}"
 ICE_GIF_STRIDE="${ICE_GIF_STRIDE:-1}"
 ICE_GIF_WIDTH="${ICE_GIF_WIDTH:-1600}"
 ICE_GIF_FPS="${ICE_GIF_FPS:-8}"
@@ -118,6 +119,7 @@ Environment overrides:
   SIMULATOR_LOG_TAIL_LINES=$SIMULATOR_LOG_TAIL_LINES
   ICE_GENERATE_GIF=$ICE_GENERATE_GIF
   ICE_GIF_FILE=$ICE_GIF_FILE
+  ICE_GIF_LAYOUT=$ICE_GIF_LAYOUT (map or interface)
   ICE_GIF_STRIDE=$ICE_GIF_STRIDE
   ICE_GIF_WIDTH=$ICE_GIF_WIDTH
   ICE_GIF_FPS=$ICE_GIF_FPS
@@ -262,6 +264,14 @@ validate_gif_settings() {
         die "ICE_GIF_WIDTH must be a positive integer"
     positive_number "$ICE_GIF_FPS" ||
         die "ICE_GIF_FPS must be a positive number"
+
+    case "$ICE_GIF_LAYOUT" in
+        map|interface)
+            ;;
+        *)
+            die "ICE_GIF_LAYOUT must be map or interface"
+            ;;
+    esac
 
     case "$ICE_GIF_WRITER" in
         auto|pillow|imagemagick)
@@ -468,6 +478,7 @@ write_manifest() {
         kv SIMULATOR_LOG_TAIL_LINES "$SIMULATOR_LOG_TAIL_LINES"
         kv ICE_GENERATE_GIF "$ICE_GENERATE_GIF"
         kv ICE_GIF_FILE "$ICE_GIF_FILE"
+        kv ICE_GIF_LAYOUT "$ICE_GIF_LAYOUT"
         kv ICE_GIF_STRIDE "$ICE_GIF_STRIDE"
         kv ICE_GIF_WIDTH "$ICE_GIF_WIDTH"
         kv ICE_GIF_FPS "$ICE_GIF_FPS"
@@ -823,13 +834,14 @@ generate_temperature_gif() {
         return 0
     fi
 
-    log "Generating temperature dashboard GIF at $ICE_GIF_FILE"
+    log "Generating temperature GIF ($ICE_GIF_LAYOUT layout) at $ICE_GIF_FILE"
     mkdir -p "$(dirname "$ICE_GIF_FILE")"
 
     "$ICE_GIF_PYTHON" "$ROOT_DIR/Interface_scripts/plot_runtime_temperature_map/plot_runtime_tmap.py" \
         --coords "$RUN_3DICE_DIR/xyaxis_TOP_DIE.txt" \
         --map "$RUN_3DICE_DIR/output_top_die.txt" \
         --gif "$ICE_GIF_FILE" \
+        --gif-layout "$ICE_GIF_LAYOUT" \
         --once \
         --gif-stride "$ICE_GIF_STRIDE" \
         --gif-width "$ICE_GIF_WIDTH" \
