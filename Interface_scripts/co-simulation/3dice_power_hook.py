@@ -561,6 +561,16 @@ def run(args: argparse.Namespace) -> int:
             }
             for component in thermal_components(document)
         ]
+        # Optional additive protocol field. Old providers need not supply it.
+        # Apply the stated voltage, rather than silently clamping the engine's
+        # default 1.2 V to the last point of a lower-voltage technology table.
+        voltage = document.get("metadata", {}).get("power_voltage_v")
+        if voltage is not None:
+            voltage = _finite(voltage, "metadata.power_voltage_v")
+            if voltage <= 0:
+                raise HookError("metadata.power_voltage_v must be positive")
+            for update in updates:
+                update["voltage_v"] = voltage
         write_history(
             config["temperature_history"],
             "init",

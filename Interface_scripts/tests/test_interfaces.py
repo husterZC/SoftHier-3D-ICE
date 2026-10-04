@@ -407,6 +407,17 @@ class PowerHookTests(unittest.TestCase):
         thread.start()
         return thread
 
+    def test_explicit_voltage_at_initialization(self):
+        contract = json.loads(self.contract_path.read_text())
+        contract["metadata"] = {"power_voltage_v": 0.7}
+        self.contract_path.write_text(json.dumps(contract))
+        result = self.invoke("init", 0, 0, [])
+        self.assertTrue(all(t["voltage_v"] == 0.7 for t in result["temperatures"]))
+        contract["metadata"]["power_voltage_v"] = 0
+        self.contract_path.write_text(json.dumps(contract))
+        with self.assertRaisesRegex(HOOK.HookError, "positive"):
+            self.invoke("init", 0, 0, [])
+
     def test_complete_init_update_and_final_lifecycle(self):
         init_response = self.invoke("init", 0, 0, [])
         self.assertEqual(

@@ -1,6 +1,7 @@
 [submodule "SoftHier"]
 	path = SoftHier
 	url = https://github.com/gvsoc/gvsoc.git
+	branch = chi/power_interface
 [submodule "3D-ICE"]
 	path = 3D-ICE
 	url = git@github.com:kaizhu657/3d-ice_softhier_interface.git

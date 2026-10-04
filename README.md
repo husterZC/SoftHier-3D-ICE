@@ -80,6 +80,32 @@ For one-command first setup and run:
 make co-simulation RUN_NAME=default_app
 ```
 
+Select the SoftHier component leakage model with
+`SOFTHIER_POWER_PROFILE=constant|temperature_aware`. For example:
+
+```bash
+make co-simulation RUN_NAME=temperature_aware \
+  SOFTHIER_POWER_PROFILE=temperature_aware
+```
+
+The controlled two-run leakage/temperature study, academic report generator,
+and slide-ready figure pipeline are documented in
+[`experiments/leakage_temperature/`](experiments/leakage_temperature/README.md).
+
+The expanded scalar-core, Spatz, iDMA and NoC models, implementation-kernel
+experiments, updated floorplan, and reused thermal animations are documented in
+[`experiments/component_power/`](experiments/component_power/README.md).
+Generated reports, figures and CSVs under `experiments/component_power/results/`
+are local-only and excluded from Git. Use the experiment guide to generate
+the four implementation-kernel profile pairs with `square_bands`. Optional
+power-estimate sensitivity studies are described in the
+[experiment reference](experiments/component_power/REFERENCE.md).
+
+Select cluster placement independently with
+`SOFTHIER_FLOORPLAN=redmule_strip|square_bands` (default: `redmule_strip`).
+The [floorplan-rule directory](Interface_scripts/providers/softhier/floorplans/README.md)
+documents the original layout and the new square, three-band layout.
+
 See [co-simulation.md](co-simulation.md) for the detailed tutorial, run directory layout,
 alternate config/app examples, and cleanup targets.
 See [Interface_scripts/README.md](Interface_scripts/README.md) for the provider
@@ -186,6 +212,18 @@ For normal co-simulation, use the root target:
 make co-simulation RUN_NAME=default_app
 ```
 
+The default `constant` profile uses the new 25 °C reference leakage without
+temperature scaling. Select either profile without changing the architecture
+or application:
+
+```bash
+make co-simulation RUN_NAME=leakage_constant \
+  SOFTHIER_POWER_PROFILE=constant
+
+make co-simulation RUN_NAME=leakage_temperature_aware \
+  SOFTHIER_POWER_PROFILE=temperature_aware
+```
+
 Or, after `make bootstrap` has completed:
 
 ```bash
@@ -196,8 +234,9 @@ The root runner generates run-local 3D-ICE inputs, starts the 3D-ICE server in
 `DICE_RUN_MODE=local-server`, then runs the provider. GVSoC directly invokes
 the versioned hook after each complete interval: the hook appends one 3D-ICE
 power slot, waits for `Tflp`, converts Kelvin to component temperatures in
-Celsius, and returns them to GVSoC. The final partial interval is reported but
-not applied. Results are written under `runs/<run-name>/<timestamp>/`.
+Celsius, and returns them to GVSoC. The final partial power interval is recorded
+and advances one full thermal slot; no feedback update is applied to GVSoC
+after execution finishes. Results are written under `runs/<run-name>/<timestamp>/`.
 
 In local-server mode no 3D-ICE client is started. The server reads
 `traces/3dice_power_traces.txt` with `--follow --until-minus-one`.

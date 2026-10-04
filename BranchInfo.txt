@@ -1,0 +1,5 @@
+SoftHier-3D-ICE             https://github.com/husterZC/SoftHier-3D-ICE/tree/chi/update_soft_hier
+- SoftHier                 https://github.com/gvsoc/gvsoc/tree/chi/power_interface
+  - core                   https://github.com/gvsoc/gvsoc-core/tree/chi/power_interface
+  - engine                 https://github.com/husterZC/gvsoc-engine/tree/chi/power_interface
+  - pulp                   https://github.com/gvsoc/gvsoc-pulp/tree/chi/update_soft_hier

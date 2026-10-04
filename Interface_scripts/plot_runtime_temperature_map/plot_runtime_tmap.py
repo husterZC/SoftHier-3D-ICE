@@ -55,6 +55,7 @@ Notes:
 import argparse
 import html
 import json
+import math
 import re
 import shutil
 import sys
@@ -150,6 +151,8 @@ def parse_args():
     parser.add_argument("--cmap", default="turbo")
     parser.add_argument("--vmin", type=float)
     parser.add_argument("--vmax", type=float)
+    parser.add_argument("--slot-seconds", type=float,
+        help="Reconstruct rounded Tflp timestamps from the known thermal slot length in seconds.")
     parser.add_argument(
         "--gif-width",
         type=int,
@@ -335,7 +338,9 @@ def parse_tflp_header(line):
     return names if names else None
 
 
-def load_tflp_rows(tflp_path, follow=False):
+def load_tflp_rows(tflp_path, follow=False, slot_seconds=None):
+    if slot_seconds is not None and (not math.isfinite(slot_seconds) or slot_seconds <= 0):
+        raise ValueError("--slot-seconds must be finite and positive")
     names = None
     rows = []
 
@@ -364,7 +369,8 @@ def load_tflp_rows(tflp_path, follow=False):
             if len(parts) != expected:
                 raise ValueError(f"{tflp_path}:{line_number}: expected {expected} values, got {len(parts)}")
 
-            rows.append({"time": float(parts[0]), "values": [float(value) for value in parts[1:]]})
+            timestamp = float(parts[0]) if slot_seconds is None else (len(rows) + 1) * slot_seconds
+            rows.append({"time": timestamp, "values": [float(value) for value in parts[1:]]})
 
     return names or [], rows
 
@@ -665,7 +671,7 @@ init();
 
 def render_html_once(args, floorplan_path, tflp_path, html_path, refresh_seconds=0.0, allow_empty=False):
     regions = load_floorplan_regions(floorplan_path)
-    names, rows = load_tflp_rows(tflp_path, follow=allow_empty)
+    names, rows = load_tflp_rows(tflp_path, follow=allow_empty, slot_seconds=getattr(args, "slot_seconds", None))
 
     if not rows and not allow_empty:
         raise ValueError(f"{tflp_path}: no complete Tflp rows found")
@@ -735,7 +741,7 @@ def save_animation_atomic(animation, gif_path, writer, dpi):
 
 def prepare_gif_data(args, floorplan_path, tflp_path, np):
     regions = load_floorplan_regions(floorplan_path)
-    names, rows = load_tflp_rows(tflp_path, follow=False)
+    names, rows = load_tflp_rows(tflp_path, follow=False, slot_seconds=getattr(args, "slot_seconds", None))
 
     if not rows:
         raise ValueError(f"{tflp_path}: no complete Tflp rows found")
