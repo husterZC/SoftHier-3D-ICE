@@ -92,7 +92,7 @@ contract and protocol boundaries.
 clone the SoftHier SDK when absent, pin it to:
 
 ```text
-1244fdbc34977aff5a6a10ead079053fb5d31d00
+16b52e5244be9c6695e9069096bcc871d716b963
 ```
 
 It also builds the native dependencies required by the current SoftHier

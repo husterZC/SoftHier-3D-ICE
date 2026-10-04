@@ -262,8 +262,8 @@ The default integration is intentionally contained in:
   exact component mappings;
 - `providers/softhier/floorplans/` for selectable cluster placement rules.
 
-The current provider pins SDK commit
-`1244fdbc34977aff5a6a10ead079053fb5d31d00`. Override
+The current provider pins SDK branch `chi/soft_hier_old_llm_map` at commit
+`16b52e5244be9c6695e9069096bcc871d716b963`. Override
 `SOFTHIER_SDK_URL` only to use a mirror; override
 `SOFTHIER_SDK_COMMIT` deliberately when validating a new SDK revision.
 On a fresh clone, `bootstrap` also prepares SystemC `3.0.1` and patched
@@ -271,6 +271,16 @@ DRAMSys commit `8565f18b869c26eab712e3bb6494c4d6ae5dd73f` below the
 provider work directory. The provider exports `SYSTEMC_HOME` while building
 GVSoC and uses the architecture repository's DRAMSys configurations without
 modifying the `core` submodule.
+
+The provider also supports `build-hardware` for SDK applications with their own
+build script. `SOFTHIER_BINARY` selects their prebuilt ELF;
+`SOFTHIER_INPUT_PRELOAD` adds an input ELF to the common `SIMULATOR_PLATFORM`
+preload. `SOFTHIER_PRELOAD_MODE=direct` is the default and consumes no simulated
+cycles. `SOFTHIER_RUN_CWD` isolates output dumps, and `SOFTHIER_DRAMSYS_PATH`
+selects a private configuration directory. The
+[LLM decoder study](../experiments/llm_decode/README.md) exercises these controls.
+An explicitly empty `SOFTHIER_CONDA_ENV` preserves an activated Python virtual
+environment; the default remains `py312`.
 
 The parent SoftHier repository and its engine submodule both use branch
 `chi/power_interface`. When replacing SoftHier, preserve the engine protocol
