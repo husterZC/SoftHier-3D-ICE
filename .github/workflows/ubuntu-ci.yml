@@ -53,6 +53,7 @@ jobs:
             python3 \
             python3-pip \
             python3-venv \
+            ripgrep \
             rsync \
             texinfo \
             unzip \
@@ -68,6 +69,7 @@ jobs:
             -r SoftHier/requirements.txt \
             -r SoftHier/core/requirements.txt \
             -r SoftHier/gapy/requirements.txt \
+            -r SoftHier/gvrun/requirements.txt \
             -r 3D-ICE/requirements.txt
           "$python_path" -m pip check
           printf 'PYTHON=%s\n' "$python_path" >> "$GITHUB_ENV"

@@ -20,7 +20,7 @@ On Debian or Ubuntu, install the host packages with:
 sudo apt-get update
 sudo apt-get install -y \
   build-essential cmake bison flex libopenblas-dev csh unzip \
-  git curl wget ca-certificates pkg-config \
+  git curl wget ca-certificates pkg-config ripgrep \
   python3 python3-pip python3-venv \
   libsndfile1-dev libsdl2-dev libsdl2-ttf-dev \
   rsync autoconf automake texinfo libtool
@@ -47,6 +47,7 @@ python -m pip install \
   -r SoftHier/requirements.txt \
   -r SoftHier/core/requirements.txt \
   -r SoftHier/gapy/requirements.txt \
+  -r SoftHier/gvrun/requirements.txt \
   -r 3D-ICE/requirements.txt
 
 python --version
@@ -100,6 +101,11 @@ are local-only and excluded from Git. Use the experiment guide to generate
 the four implementation-kernel profile pairs with `square_bands`. Optional
 power-estimate sensitivity studies are described in the
 [experiment reference](experiments/component_power/REFERENCE.md).
+
+The [LLM decode experiment](experiments/llm_decode/README.md) runs the SDK's
+`gpt-oss-120b` decoder layer with untimed ELF preload, configurable
+`--llm_model` and `--decode_batch`, a default 20 µs thermal interval, paired
+leakage profiles, numerical validation, and thermal GIFs.
 
 Select cluster placement independently with
 `SOFTHIER_FLOORPLAN=redmule_strip|square_bands` (default: `redmule_strip`).

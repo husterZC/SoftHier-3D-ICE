@@ -6,13 +6,15 @@ ROOT_DIR="${ROOT_DIR:-$(cd "$SCRIPT_DIR/../../.." && pwd)}"
 SOFTHIER_DIR="${SOFTHIER_DIR:-$ROOT_DIR/SoftHier}"
 SOFTHIER_SDK_DIR="${SOFTHIER_SDK_DIR:-$SOFTHIER_DIR/soft_hier_sdk}"
 SOFTHIER_SDK_URL="${SOFTHIER_SDK_URL:-git@github.com:pulp-platform/softhier-sdk.git}"
-SOFTHIER_SDK_COMMIT="${SOFTHIER_SDK_COMMIT:-1244fdbc34977aff5a6a10ead079053fb5d31d00}"
+SOFTHIER_SDK_BRANCH="${SOFTHIER_SDK_BRANCH:-chi/soft_hier_old_llm_map}"
+SOFTHIER_SDK_COMMIT="${SOFTHIER_SDK_COMMIT:-16b52e5244be9c6695e9069096bcc871d716b963}"
 SOFTHIER_SDK_TOOLCHAIN_SOURCE="${SOFTHIER_SDK_TOOLCHAIN_SOURCE:-}"
 SOFTHIER_WORKDIR="${SOFTHIER_WORKDIR:-$SOFTHIER_DIR/.power_interface}"
 SOFTHIER_SW_BUILD="${SOFTHIER_SW_BUILD:-$SOFTHIER_WORKDIR/sw_build_staged}"
 SOFTHIER_NATIVE_DEPS_DIR="${SOFTHIER_NATIVE_DEPS_DIR:-$SOFTHIER_WORKDIR/dependencies}"
 SOFTHIER_SYSTEMC_HOME="${SOFTHIER_SYSTEMC_HOME:-$SOFTHIER_NATIVE_DEPS_DIR/systemc-install}"
 SOFTHIER_DRAMSYS_HOME="${SOFTHIER_DRAMSYS_HOME:-$SOFTHIER_NATIVE_DEPS_DIR/dramsys-install}"
+SOFTHIER_DRAMSYS_PATH="${SOFTHIER_DRAMSYS_PATH:-$SOFTHIER_DIR/add_dramsyslib_patches}"
 SOFTHIER_SYSTEMC_URL="${SOFTHIER_SYSTEMC_URL:-https://github.com/accellera-official/systemc.git}"
 SOFTHIER_SYSTEMC_VERSION="${SOFTHIER_SYSTEMC_VERSION:-3.0.1}"
 SOFTHIER_DRAMSYS_URL="${SOFTHIER_DRAMSYS_URL:-https://github.com/tukl-msd/DRAMSys.git}"
@@ -24,11 +26,16 @@ SOFTHIER_TARGET="${SOFTHIER_TARGET:-pulp.chips.soft_hier_old.flex_cluster}"
 SOFTHIER_CORE_MODEL="${SOFTHIER_CORE_MODEL:-fast}"
 SOFTHIER_POWER_PROFILE="${SOFTHIER_POWER_PROFILE:-constant}"
 SOFTHIER_FLOORPLAN="${SOFTHIER_FLOORPLAN:-redmule_strip}"
-SOFTHIER_CONDA_ENV="${SOFTHIER_CONDA_ENV:-py312}"
+# An explicitly empty value keeps an already activated virtual environment.
+SOFTHIER_CONDA_ENV="${SOFTHIER_CONDA_ENV-py312}"
 SOFTHIER_CCACHE_DIR="${SOFTHIER_CCACHE_DIR:-$SOFTHIER_WORKDIR/ccache}"
 SIMULATOR_CONFIG="${SIMULATOR_CONFIG:-${CFG:-$SOFTHIER_SDK_DIR/examples/SoftHier/config/arch_NoC1024.py}}"
 SIMULATOR_APP="${SIMULATOR_APP:-${APP:-}}"
 SIMULATOR_PLATFORM="${SIMULATOR_PLATFORM:-${PLD:-}}"
+SOFTHIER_BINARY="${SOFTHIER_BINARY:-$SOFTHIER_SW_BUILD/softhier.elf}"
+SOFTHIER_INPUT_PRELOAD="${SOFTHIER_INPUT_PRELOAD:-}"
+SOFTHIER_RUN_CWD="${SOFTHIER_RUN_CWD:-$SOFTHIER_DIR}"
+SOFTHIER_PRELOAD_MODE="${SOFTHIER_PRELOAD_MODE:-direct}"
 POWER_INTERVAL_PS="${POWER_INTERVAL_PS:-${PWR_INTERVAL_PS:-100000000}}"
 RAW_POWER_TRACE="${RAW_POWER_TRACE:-}"
 SYSTEM_CONFIG_FILE="${SYSTEM_CONFIG_FILE:-}"
@@ -66,6 +73,7 @@ Provider actions:
   export-system    Write SYSTEM_CONFIG_FILE using SIMULATOR_CONFIG.
   build            Build the configured simulator and workload.
   build-workload   Build only the workload using an already built simulator.
+  build-hardware   Build only native simulator models for a separately built app.
   run              Run with the versioned power hook in the foreground.
   run-uncoupled    Run without power capture/thermal feedback for timing checks.
   manifest         Print provider-specific run.env entries.
@@ -77,8 +85,15 @@ Floorplan rules: redmule_strip, square_bands. Select one with
 SOFTHIER_FLOORPLAN (default: redmule_strip).
 
 The provider pins softhier-sdk commit
-1244fdbc34977aff5a6a10ead079053fb5d31d00 by default. Override
+16b52e5244be9c6695e9069096bcc871d716b963 on chi/soft_hier_old_llm_map. Override
 SOFTHIER_SDK_URL only to use a mirror of the same repository.
+
+SOFTHIER_BINARY selects a prebuilt application (default: SOFTHIER_SW_BUILD/softhier.elf).
+SIMULATOR_PLATFORM supplies the common HBM preload; SOFTHIER_INPUT_PRELOAD
+adds a batch-specific ELF. SOFTHIER_PRELOAD_MODE defaults to direct (untimed).
+SOFTHIER_RUN_CWD selects the simulator output directory; SOFTHIER_DRAMSYS_PATH
+selects a private dramsys_configs parent. Set SOFTHIER_CONDA_ENV to an empty
+string to keep the caller's activated Python virtual environment.
 
 Bootstrap also prepares SystemC 3.0.1 and the patched DRAMSys source at commit
 8565f18b869c26eab712e3bb6494c4d6ae5dd73f under the provider work directory.
@@ -128,22 +143,22 @@ source_environment() {
     export GVSOC_WORKDIR="$SOFTHIER_WORKDIR"
     export CCACHE_DIR="$SOFTHIER_CCACHE_DIR"
     export SYSTEMC_HOME="$SOFTHIER_SYSTEMC_HOME"
-    export DRAMSYS_PATH="$SOFTHIER_DIR/add_dramsyslib_patches"
+    export DRAMSYS_PATH="$SOFTHIER_DRAMSYS_PATH"
     export SOFTHIER_POWER_PROFILE
     export SOFTHIER_ARCH_FILE="$SIMULATOR_CONFIG"
 
-    if command -v gcc-14.2.0 >/dev/null 2>&1; then
+    if [[ -z "${CC:-}" ]] && command -v gcc-14.2.0 >/dev/null 2>&1; then
         export CC=gcc-14.2.0
     fi
-    if command -v g++-14.2.0 >/dev/null 2>&1; then
+    if [[ -z "${CXX:-}" ]] && command -v g++-14.2.0 >/dev/null 2>&1; then
         export CXX=g++-14.2.0
     fi
-    if command -v cmake-3.18.1 >/dev/null 2>&1; then
+    if [[ -z "${CMAKE:-}" ]] && command -v cmake-3.18.1 >/dev/null 2>&1; then
         export CMAKE=cmake-3.18.1
     fi
 
     set +u
-    if command -v conda >/dev/null 2>&1; then
+    if [[ -n "$SOFTHIER_CONDA_ENV" ]] && command -v conda >/dev/null 2>&1; then
         local conda_hook
         conda_hook="$(conda shell.bash hook 2>/dev/null || true)"
         if [[ -n "$conda_hook" ]]; then
@@ -161,10 +176,14 @@ source_environment() {
     set -u
 
     export PYTHONPATH="$SOFTHIER_SDK_DIR/utilities:${PYTHONPATH:-}"
-    # The site environment defaults LIBRARY_PATH to GCC 11. Keep link-time
-    # selection aligned with the GCC 14 compiler used for GVSoC and SystemC.
-    export LIBRARY_PATH="/usr/pack/gcc-14.2.0-af/lib64:${LIBRARY_PATH:-}"
-    export LD_LIBRARY_PATH="/usr/pack/gcc-14.2.0-af/lib64:$SOFTHIER_WORKDIR/install/lib:$SOFTHIER_SYSTEMC_HOME/lib64:$SOFTHIER_DRAMSYS_HOME:$SOFTHIER_DIR/third_party/systemc_install/lib64:$SOFTHIER_DIR/third_party/DRAMSys:${LD_LIBRARY_PATH:-}"
+    # Match the host C++ runtime to the compiler, including caller overrides.
+    local cxx_runtime
+    cxx_runtime="$("${CXX:-g++}" -print-file-name=libstdc++.so)"
+    if [[ "$cxx_runtime" == /* ]]; then
+        export LIBRARY_PATH="$(dirname "$cxx_runtime"):${LIBRARY_PATH:-}"
+        export LD_LIBRARY_PATH="$(dirname "$cxx_runtime"):${LD_LIBRARY_PATH:-}"
+    fi
+    export LD_LIBRARY_PATH="$SOFTHIER_WORKDIR/install/lib:$SOFTHIER_SYSTEMC_HOME/lib64:$SOFTHIER_DRAMSYS_HOME:${LD_LIBRARY_PATH:-}"
 }
 
 
@@ -180,7 +199,7 @@ prepare_sdk() {
         [[ ! -e "$SOFTHIER_SDK_DIR" ]] ||
             die "$SOFTHIER_SDK_DIR exists but is not a Git repository"
         log "Cloning SoftHier SDK from $SOFTHIER_SDK_URL"
-        git clone --no-checkout "$SOFTHIER_SDK_URL" "$SOFTHIER_SDK_DIR"
+        git clone --no-checkout --branch "$SOFTHIER_SDK_BRANCH" "$SOFTHIER_SDK_URL" "$SOFTHIER_SDK_DIR"
         cloned=1
     fi
 
@@ -319,6 +338,17 @@ apply_dramsys_patch() {
     local patch_file="$SOFTHIER_DIR/add_dramsyslib_patches/build_dynlib_from_github_dramsys5/patch"
     require_file "$patch_file"
 
+    # Remove only our supplemental CMake line before checking the upstream
+    # patch, whose final hunk is anchored to the end of this file.
+    "$PYTHON" - "$source_dir/apps/simulator/CMakeLists.txt" <<'PY'
+from pathlib import Path
+import sys
+path = Path(sys.argv[1])
+text = path.read_text()
+extension = "\ntarget_sources(simulator PRIVATE simulator/elfloader.cpp)\n"
+if extension in text:
+    path.write_text(text.replace(extension, ""))
+PY
     if git -C "$source_dir" apply --check "$patch_file" >/dev/null 2>&1; then
         git -C "$source_dir" apply "$patch_file"
     elif git -C "$source_dir" apply --reverse --check "$patch_file" >/dev/null 2>&1; then
@@ -326,6 +356,19 @@ apply_dramsys_patch() {
     else
         die "DRAMSys integration patch cannot be applied cleanly in $source_dir"
     fi
+    # The upstream integration patch adds this source but omits it from the
+    # shared-library target. Direct initialization requires its ELF symbols.
+    "$PYTHON" - "$source_dir/apps/simulator/CMakeLists.txt" <<'PY'
+from pathlib import Path
+import sys
+path = Path(sys.argv[1])
+text = path.read_text()
+if "simulator/elfloader.cpp" not in text:
+    if "    simulator/dramsys_lib.cpp\n" not in text:
+        raise SystemExit("Cannot locate DRAMSys simulator sources")
+    # Keep the supplemental source separate from the upstream patch.
+    path.write_text(text + "\ntarget_sources(simulator PRIVATE simulator/elfloader.cpp)\n")
+PY
 }
 
 
@@ -498,6 +541,16 @@ build_simulator() {
 }
 
 
+build_hardware() {
+    check_provider
+    (
+        cd "$SOFTHIER_DIR"
+        source_environment
+        "$MAKE_CMD" "TARGETS=$SOFTHIER_TARGET" build
+    )
+}
+
+
 run_simulator() {
     check_provider
     require_value POWER_HOOK_EXECUTABLE "$POWER_HOOK_EXECUTABLE"
@@ -508,11 +561,16 @@ run_simulator() {
     require_executable "$POWER_HOOK_EXECUTABLE"
     require_file "$POWER_HOOK_CONFIG_FILE"
     require_executable "$SOFTHIER_WORKDIR/install/bin/gvsoc"
-    require_file "$SOFTHIER_SW_BUILD/softhier.elf"
+    require_file "$SOFTHIER_BINARY"
+    case "$SOFTHIER_PRELOAD_MODE" in
+        direct|timed) ;;
+        *) die "unsupported SOFTHIER_PRELOAD_MODE=$SOFTHIER_PRELOAD_MODE" ;;
+    esac
 
     local args=(
         "--target=$SOFTHIER_TARGET"
-        "--binary" "$SOFTHIER_SW_BUILD/softhier.elf"
+        "--binary" "$SOFTHIER_BINARY"
+        "--preload-mode=$SOFTHIER_PRELOAD_MODE"
         "--core-model=$SOFTHIER_CORE_MODEL"
         "--power-profile=$SOFTHIER_POWER_PROFILE"
         "--power-hook-executable" "$POWER_HOOK_EXECUTABLE"
@@ -523,14 +581,23 @@ run_simulator() {
         "--power-hook-trace-file" "$POWER_HOOK_TRACE_FILE"
     )
     if [[ -n "$SIMULATOR_PLATFORM" ]]; then
+        require_file "$SIMULATOR_PLATFORM"
         args+=("--preload" "$SIMULATOR_PLATFORM")
     fi
-    args+=(run "--trace=/chip/cluster_0/redmule")
+    if [[ -n "$SOFTHIER_INPUT_PRELOAD" ]]; then
+        require_file "$SOFTHIER_INPUT_PRELOAD"
+        args+=("--config-opt=**/hbm_preloader/binary=$SOFTHIER_INPUT_PRELOAD")
+        args+=(run "--trace=loader" "--trace=ctrl_registers")
+    else
+        args+=(run "--trace=/chip/cluster_0/redmule")
+    fi
 
     log "Running target $SOFTHIER_TARGET with closed-loop thermal feedback"
     (
         cd "$SOFTHIER_DIR"
         source_environment
+        mkdir -p "$SOFTHIER_RUN_CWD"
+        cd "$SOFTHIER_RUN_CWD"
         "$SOFTHIER_WORKDIR/install/bin/gvsoc" "${args[@]}"
     )
 }
@@ -539,15 +606,24 @@ run_simulator() {
 run_uncoupled() {
     check_provider
     require_executable "$SOFTHIER_WORKDIR/install/bin/gvsoc"
-    require_file "$SOFTHIER_SW_BUILD/softhier.elf"
-    local args=("--target=$SOFTHIER_TARGET" "--binary" "$SOFTHIER_SW_BUILD/softhier.elf"
-        "--core-model=$SOFTHIER_CORE_MODEL" "--power-profile=$SOFTHIER_POWER_PROFILE")
+    require_file "$SOFTHIER_BINARY"
+    local args=("--target=$SOFTHIER_TARGET" "--binary" "$SOFTHIER_BINARY"
+        "--core-model=$SOFTHIER_CORE_MODEL" "--power-profile=$SOFTHIER_POWER_PROFILE"
+        "--preload-mode=$SOFTHIER_PRELOAD_MODE")
     if [[ -n "$SIMULATOR_PLATFORM" ]]; then
+        require_file "$SIMULATOR_PLATFORM"
         args+=("--preload" "$SIMULATOR_PLATFORM")
+    fi
+    if [[ -n "$SOFTHIER_INPUT_PRELOAD" ]]; then
+        require_file "$SOFTHIER_INPUT_PRELOAD"
+        args+=("--config-opt=**/hbm_preloader/binary=$SOFTHIER_INPUT_PRELOAD"
+               "--trace=loader" "--trace=ctrl_registers")
     fi
     (
         cd "$SOFTHIER_DIR"
         source_environment
+        mkdir -p "$SOFTHIER_RUN_CWD"
+        cd "$SOFTHIER_RUN_CWD"
         "$SOFTHIER_WORKDIR/install/bin/gvsoc" "${args[@]}" run
     )
 }
@@ -565,15 +641,21 @@ write_manifest() {
     kv SOFTHIER_SDK_DIR "$SOFTHIER_SDK_DIR"
     kv SOFTHIER_SDK_GIT_COMMIT "$(git_commit "$SOFTHIER_SDK_DIR")"
     kv SOFTHIER_SDK_PIN "$SOFTHIER_SDK_COMMIT"
+    kv SOFTHIER_SDK_BRANCH "$SOFTHIER_SDK_BRANCH"
     kv SOFTHIER_WORKDIR "$SOFTHIER_WORKDIR"
     kv SOFTHIER_SW_BUILD "$SOFTHIER_SW_BUILD"
     kv SOFTHIER_SYSTEMC_HOME "$SOFTHIER_SYSTEMC_HOME"
     kv SOFTHIER_SYSTEMC_VERSION "$SOFTHIER_SYSTEMC_VERSION"
     kv SOFTHIER_DRAMSYS_HOME "$SOFTHIER_DRAMSYS_HOME"
+    kv SOFTHIER_DRAMSYS_PATH "$SOFTHIER_DRAMSYS_PATH"
     kv SOFTHIER_DRAMSYS_COMMIT "$SOFTHIER_DRAMSYS_COMMIT"
     kv SOFTHIER_TARGET "$SOFTHIER_TARGET"
     kv SOFTHIER_POWER_PROFILE "$SOFTHIER_POWER_PROFILE"
     kv SOFTHIER_FLOORPLAN "$SOFTHIER_FLOORPLAN"
+    kv SOFTHIER_BINARY "$SOFTHIER_BINARY"
+    kv SOFTHIER_INPUT_PRELOAD "$SOFTHIER_INPUT_PRELOAD"
+    kv SOFTHIER_PRELOAD_MODE "$SOFTHIER_PRELOAD_MODE"
+    kv SOFTHIER_RUN_CWD "$SOFTHIER_RUN_CWD"
 }
 
 
@@ -599,6 +681,9 @@ case "$action" in
         ;;
     build-workload)
         build_simulator 0
+        ;;
+    build-hardware)
+        build_hardware
         ;;
     run)
         run_simulator

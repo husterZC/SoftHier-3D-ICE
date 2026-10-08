@@ -116,6 +116,15 @@ def metrics(run):
             "leakage_growth_during_run_pct": 100 * (last / first - 1)}
 
 
+def file_sha256(path):
+    """Hash large preload artifacts without loading the whole ELF into memory."""
+    digest = hashlib.sha256()
+    with Path(path).open("rb") as stream:
+        for chunk in iter(lambda: stream.read(8 * 1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
 def validate_pair(constant, aware):
     for run in (constant, aware):
         validate_inventory(run)
@@ -131,7 +140,7 @@ def validate_pair(constant, aware):
         if constant.metadata[key] != aware.metadata[key]:
             raise ValueError(f"A/B model mismatch: {key}")
     for name in ("softhier.elf", "preload.elf"):
-        digests = [hashlib.sha256((r.path / "artifacts" / name).read_bytes()).hexdigest() for r in (constant, aware)]
+        digests = [file_sha256(r.path / "artifacts" / name) for r in (constant, aware)]
         if digests[0] != digests[1]:
             raise ValueError(f"A/B artifact mismatch: {name}")
     if len(constant.power_records) != len(aware.power_records):
