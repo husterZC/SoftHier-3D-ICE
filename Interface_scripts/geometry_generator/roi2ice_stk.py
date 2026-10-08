@@ -25,7 +25,8 @@ SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_OUTPUT_DIR = os.path.abspath(os.path.join(SCRIPT_DIR, "..", ".."))
 DEFAULT_FLOORPLAN_FILE = os.path.join(DEFAULT_OUTPUT_DIR, "floorplan_nopower.flp")
 DEFAULT_STK_FILE = os.path.join(DEFAULT_OUTPUT_DIR, "ice.stk")
-DEFAULT_HEAT_TRANSFER_COEFFICIENT = 1.0e-7
+# Natural-convection baseline: 10 W/(m^2 K), in W/(um^2 K) for 3D-ICE.
+DEFAULT_HEAT_TRANSFER_COEFFICIENT = 1.0e-11
 
 
 def positive_float(value):
