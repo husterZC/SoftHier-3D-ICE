@@ -1,4 +1,5 @@
 runs/
+/experiments/thermal_replay/results/
 plan.md
 /tmp/
 

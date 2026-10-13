@@ -304,3 +304,20 @@ You can also generate the GIF manually after a run:
 ```bash
 python Interface_scripts/plot_runtime_temperature_map/plot_runtime_tmap.py   --coords runs/<run-name>/latest/results/3dice/xyaxis_TOP_DIE.txt   --map runs/<run-name>/latest/results/3dice/output_top_die.txt   --gif runs/<run-name>/latest/results/3dice/temperature_map.gif   --once
 ```
+
+### Repeated-Layer Thermal Replay
+
+For long heating experiments with the same layer and input, capture a
+constant-profile block of layers once, then replay its activity through one
+persistent 3D-ICE process. This preserves the cold-start heating curve and
+temperature-dependent leakage while avoiding repeated GVSoC execution and
+per-interval file polling. Separate recordings are required for each batch/input.
+Replay defaults to one thermal step per power slot (20 µs for the saved decode
+recordings) and a 1-second simulated-time cap. The B1/B8 examples use local
+ten-layer recordings at h = 15000 W/(m²·K); recordings and generated results
+are not included in Git. `--thermal-step 2e-06` restores the finer archived step
+for validation.
+
+See [the thermal replay workflow](experiments/thermal_replay/README.md) for
+capture/replay commands, explicit run limits, output files, and validation
+against the saved ten-repeat experiments.
