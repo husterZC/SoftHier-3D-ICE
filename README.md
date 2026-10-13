@@ -192,6 +192,38 @@ The stack slot duration is generated from `POWER_INTERVAL_PS * 1e-12` by default
 so one provider power row corresponds to one 3D-ICE thermal slot. The transient
 solver step defaults to one tenth of that slot.
 
+The default thermal stack has 11 layers, ordered top to bottom:
+
+| Layer | Material | Thickness |
+| --- | --- | --- |
+| `HEATSINK` | Copper | 50 µm |
+| `TIM_1`–`TIM_4` | TIM | 4 × 7.5 µm |
+| `TOP_DIE` | Active silicon | 50 µm |
+| `BUMP` | Anisotropic bump material | 50 µm |
+| `PCB_1`–`PCB_4` | Silicon | 4 × 250 µm |
+
+The total thickness is 1,180 µm. All layers cover the same length
+and width derived from the generated die floorplan; the thicknesses stay fixed.
+The layer sequence, thicknesses, and material properties match the prepared
+B1/B8 thermal replay recordings: the four layers named PCB use silicon
+properties. The bump material has conductivity `(5.5, 5.5, 113) W/(m·K)` along
+the x, y, and z axes.
+`TOP_DIE` is the only powered die and remains the temperature-feedback target,
+even though it now sits inside the stack. The other ten layers are passive
+and require no additional floorplan files or power-trace columns.
+
+The top copper surface uses a heat-transfer coefficient of `1.5e-8 W/(µm²·K)`
+(**15,000 W/(m²·K)**), matching the prepared B1/B8 replay recordings.
+Its ambient temperature and the initial stack temperature come from the
+existing initial-temperature setting (300 K by default).
+These defaults are embedded in the generator and apply to newly generated
+inputs; existing experiment files are not rewritten.
+New `llm_decode` runs use this stack. Replay inherits the physical stack and
+cooling coefficient archived by `capture` or `record`, so recordings made from
+new source runs use these defaults unless a cooling override is supplied.
+When using a copied generator through `GEOMETRY_SCRIPT_DIR`, select
+`$PWD/Interface_scripts/geometry_generator` to use these repository defaults.
+
 
 ## 🧩 Build 3D-ICE
 

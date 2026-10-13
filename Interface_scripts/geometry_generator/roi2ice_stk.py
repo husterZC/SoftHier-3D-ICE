@@ -25,8 +25,8 @@ SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_OUTPUT_DIR = os.path.abspath(os.path.join(SCRIPT_DIR, "..", ".."))
 DEFAULT_FLOORPLAN_FILE = os.path.join(DEFAULT_OUTPUT_DIR, "floorplan_nopower.flp")
 DEFAULT_STK_FILE = os.path.join(DEFAULT_OUTPUT_DIR, "ice.stk")
-# Natural-convection baseline: 10 W/(m^2 K), in W/(um^2 K) for 3D-ICE.
-DEFAULT_HEAT_TRANSFER_COEFFICIENT = 1.0e-11
+# Cooling boundary: 15000 W/(m^2 K), expressed in W/(um^2 K) for 3D-ICE.
+DEFAULT_HEAT_TRANSFER_COEFFICIENT = 1.5e-8
 
 
 def positive_float(value):
@@ -89,13 +89,24 @@ def stk_template(
     step_seconds,
     initial_temperature_k,
 ):
+    # Reference stack: copper, four TIM layers, active silicon, bumps, four PCB layers.
+    # All layers share the chip footprint; only TOP_DIE receives power inputs.
+    # The reference models the PCB layers using silicon's material properties.
     return f"""material SILICON :
    thermal conductivity     1.30e-4 ;
-   volumetric heat capacity 1.628e-12 ;
+   volumetric heat capacity 1.61e-12 ;
 
-material BEOL :
-   thermal conductivity     2.25e-6 ;
-   volumetric heat capacity 2.175e-12 ;
+material CU :
+   thermal conductivity     3.85e-4 ;
+   volumetric heat capacity 3.45e-12 ;
+
+material TIM :
+   thermal conductivity     5e-6 ;
+   volumetric heat capacity 2.5e-12 ;
+
+material BUMP :
+   thermal conductivity     5.5e-6, 5.5e-6, 1.13e-4 ;
+   volumetric heat capacity 1.845e-12 ;
 
 top heat sink :
    heat transfer coefficient {format_number(DEFAULT_HEAT_TRANSFER_COEFFICIENT)} ;
@@ -106,17 +117,37 @@ dimensions :
    cell length  50, width  50 ;
    non-uniform true;
 
-layer PCB :
+layer HEATSINK_LAYER :
    height 50 ;
-   material BEOL ;
+   material CU ;
+
+layer TIM_LAYER :
+   height 7.5 ;
+   material TIM ;
+
+layer BUMP_LAYER :
+   height 50 ;
+   material BUMP ;
+
+layer PCB :
+   height 250 ;
+   material SILICON ;
 
 die IC :
    source  50 SILICON ;
-    
 
 stack:
-die     TOP_DIE         IC      floorplan "{floorplan_path}" ;
-layer   CONN_TO_PCB     PCB ;
+   layer   HEATSINK  HEATSINK_LAYER ;
+   layer   TIM_1     TIM_LAYER ;
+   layer   TIM_2     TIM_LAYER ;
+   layer   TIM_3     TIM_LAYER ;
+   layer   TIM_4     TIM_LAYER ;
+   die     TOP_DIE   IC      floorplan "{floorplan_path}" ;
+   layer   BUMP      BUMP_LAYER ;
+   layer   PCB_1     PCB ;
+   layer   PCB_2     PCB ;
+   layer   PCB_3     PCB ;
+   layer   PCB_4     PCB ;
 
 solver:
    transient step {format_number(step_seconds)}, slot {format_number(slot_seconds)} ;

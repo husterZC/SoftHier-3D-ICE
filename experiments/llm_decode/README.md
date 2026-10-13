@@ -109,6 +109,12 @@ It does not build 3D-ICE; `make bootstrap` supplies the thermal solver.
 | `--build-hardware` | Off | Build native GVSoC models before running the decoder. |
 
 There is no attention-specific interval: all 14 stages use `--interval-ps`.
+New runs use the repository's default 11-layer thermal stack: copper heatsink,
+four TIM layers, active silicon, bumps, and four PCB layers modeled as silicon.
+The top heat-sink coefficient is **h = 15000 W/(m²·K)**
+(`1.5e-8 W/(µm²·K)` in 3D-ICE), matching the prepared B1/B8 replay recordings.
+See the [thermal stack specification](../../README.md) for thicknesses and materials.
+
 The thermal integration step is one tenth of that interval. Repeats accumulate
 stage counters and extend the thermal history; they do not advance the token
 position or perform autoregressive generation. With one repeat the staged

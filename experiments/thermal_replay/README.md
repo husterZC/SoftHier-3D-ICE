@@ -5,6 +5,13 @@ one persistent 3D-ICE process. Temperature-aware replay recomputes leakage every
 power slot while retaining the complete die and package thermal state. Startup
 runs once and the heating curve begins at the archived initial temperature.
 
+New `llm_decode` source runs use the default 11-layer thermal package and
+**h = 15000 W/(m²·K)**, matching the prepared B1/B8 recordings below.
+`capture` and `record` preserve the source run's physical stack and cooling
+coefficient unless `--heat-transfer-coefficient` overrides the latter.
+Replay uses the recording's archived stack; changing repository defaults does
+not alter existing recordings or results.
+
 ## Run the prepared B1 and B8 workloads
 
 Run commands from the repository root. These recordings are local experiment
