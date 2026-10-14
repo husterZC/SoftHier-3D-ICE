@@ -90,8 +90,10 @@ the target generator. Other providers may ignore this SoftHier-specific value.
 ## JSON System Contract
 
 The authoritative validator is
-[`system_contract.py`](system_contract.py). The current discriminator is
-`3dice-cosim-system` version `1`.
+[`system_contract.py`](system_contract.py). The discriminator is
+`3dice-cosim-system`: version `1` describes the original single-die interface,
+and version `2` adds explicit physical dies and stack layers. Existing version
+1 documents remain supported.
 
 A compact valid example is:
 
@@ -175,6 +177,60 @@ The exact-path and one-column rules prevent hierarchical or floorplan double
 counting. A future contract version can add explicit power-distribution
 fractions if one component must be split across multiple powered blocks.
 
+### Memory-on-logic contract and package
+
+For a stacked-only SoftHier architecture with `dram3d_enable=1`, the exporter
+produces version 2. The SDK's 4×4 architecture has 304 logic power domains plus
+16 DRAM channel domains, and 336 floorplan regions including the logic residual
+regions. One DRAM die is divided into channel regions; channel
+`cid = y * num_cluster_x + x` has exactly the corresponding cluster's footprint.
+
+Version 2 retains the existing geometry, power columns, and feedback fields.
+Every floorplan element and feedback component also identifies its `die`.
+`thermal_stack` supplies materials in SI units, bottom-to-top physical layers,
+die thicknesses and active-face orientations, and the top cooling boundary.
+The validator checks complete per-die coverage, disjoint rectangles, matching
+footprints, contiguous die layers, and one correctly positioned source layer
+per die. Logic and DRAM components receive their own source-layer temperatures.
+
+The default bottom-to-top package is substrate → package bumps → logic bulk →
+logic source → face-to-face bond → DRAM source → DRAM bulk → TIM → copper
+heatsink → top cooling boundary. Each die is 50 µm thick, including a 1 µm
+source layer; the bond is 5 µm. DRAM uses silicon thermal properties, and the
+bond initially borrows the existing anisotropic bump material. These are
+engineering assumptions, with provenance recorded in the contract. The
+existing package and cooling settings are preserved. See the complete
+[input configuration documentation](providers/softhier/configs/README.md).
+
+Override the checked-in inputs with `SOFTHIER_THERMAL_CONFIG` and
+`SOFTHIER_DRAM_POWER_CONFIG`, or the exporter's `--thermal-config` and
+`--dram-power-config` arguments. Resolved inputs and their hashes are archived
+in contract metadata. DRAM electrical rails are independent of the logic
+initialization voltage. Controller and PHY/interface power are excluded.
+The initial electrical DRAM model uses fixed characterization; selecting
+`temperature_aware` changes logic leakage and does not imply temperature
+scaling of DRAM currents.
+
+The geometry generator writes separate floorplans and `Tflp`/`Tmap` outputs
+for `LOGIC_DIE` and `DRAM_DIE`, plus `thermal_manifest.json`. The manifest
+records per-die files and flattened element names in the native solver's
+bottom-to-top power order: logic followed by DRAM, including residual regions.
+The `.stk` declarations use the opposite, top-to-bottom physical order.
+Single-die generation also emits a manifest for `TOP_DIE` while retaining
+its existing filenames and stack.
+
+The hook configuration accepts `--thermal-manifest` for multi-die operation;
+the legacy `--floorplan` and `--temperature-output` pair remains supported
+for version 1. Each update appends one combined power row and waits for the
+next complete temperature row from every die. Synchronization uses row
+indices because 3D-ICE's printed timestamps can round several microsecond
+slots to the same value. The offline trace adapter also accepts
+`--thermal-manifest`. The runner stages the listed inputs, appends a sentinel
+covering every region, reports both dies, and renders separate maps.
+
+The [LLM DRAM3D study](../experiments/llm_dram3d/README.md) exercises the new
+SDK workload. The existing single-die decoder remains available separately.
+
 ## GVSoC Power-Hook Protocol
 
 GVSoC invokes the configured executable directly:
@@ -193,9 +249,11 @@ The lifecycle is:
 
 1. `init` at time zero contains no power samples. The hook reads the
    architecture contract and returns every declared path at the initial
-   Celsius temperature. If `metadata.power_voltage_v` is supplied, each init
-   entry also contains `voltage_v`; the engine applies the stated fractional
-   voltage to that subtree. The field is optional and init-only.
+   Celsius temperature. A component's optional `voltage_v` is also included
+   at initialization; version 1 retains the fallback to
+   `metadata.power_voltage_v`. The engine applies the stated fractional
+   voltage to that subtree. Version 2 sets logic voltages per component and
+   leaves DRAM rails to its electrical model. The field is init-only.
 2. `update` follows each complete interval. GVSoC sends average dynamic,
    leakage, and total subtree power in watts plus the temperature used during
    that interval. The response explicitly declares
@@ -262,8 +320,8 @@ The default integration is intentionally contained in:
   exact component mappings;
 - `providers/softhier/floorplans/` for selectable cluster placement rules.
 
-The current provider pins SDK branch `chi/soft_hier_old_llm_map` at commit
-`16b52e5244be9c6695e9069096bcc871d716b963`. Override
+The current provider pins SDK branch `chi/soft_hier_dram3d` at commit
+`b454aeee4278bb00ecbfcdcc4d1366fe8451d7c8`. Override
 `SOFTHIER_SDK_URL` only to use a mirror; override
 `SOFTHIER_SDK_COMMIT` deliberately when validating a new SDK revision.
 On a fresh clone, `bootstrap` also prepares SystemC `3.0.1` and patched
@@ -271,6 +329,12 @@ DRAMSys commit `8565f18b869c26eab712e3bb6494c4d6ae5dd73f` below the
 provider work directory. The provider exports `SYSTEMC_HOME` while building
 GVSoC and uses the architecture repository's DRAMSys configurations without
 modifying the `core` submodule.
+
+Native build stamps include every source submodule's commit and SystemC's
+resolved installation path, release version and library hash. The provider
+checks the installed SystemC headers and exported library ABI against the
+requested release. Changed source modules or native dependencies require a
+hardware rebuild; tracked edits in the pinned source checkouts are rejected.
 
 The provider also supports `build-hardware` for SDK applications with their own
 build script. `SOFTHIER_BINARY` selects their prebuilt ELF;

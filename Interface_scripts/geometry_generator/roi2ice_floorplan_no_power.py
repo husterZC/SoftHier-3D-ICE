@@ -39,8 +39,14 @@ def positive_int(value):
     return parsed
 
 
-def contract_roi(document):
-    return [entry["name"] for entry in floorplan_elements(document)]
+def contract_roi(document, die=None):
+    if document["contract"]["version"] == 2 and die is None:
+        raise ValueError("version 2 floorplan generation requires --die")
+    entries = [entry["name"] for entry in floorplan_elements(document)
+               if die is None or entry.get("die", "TOP_DIE") == die]
+    if not entries:
+        raise ValueError(f"no floorplan regions for die {die!r}")
+    return entries
 
 
 def ice_template(name, position, dimension, discretization):
@@ -160,6 +166,7 @@ def main() -> int:
     parser.add_argument("system_config", help="System contract JSON file.")
     parser.add_argument("geo_file", help="Geometry JSON generated from the contract.")
     parser.add_argument("output_file", help="Output 3D-ICE floorplan file.")
+    parser.add_argument("--die", help="Generate only the selected thermal die.")
     parser.add_argument(
         "--target-top-die-cells",
         type=positive_int,
@@ -174,7 +181,7 @@ def main() -> int:
 
     roi2ice(
         geometry,
-        contract_roi(document),
+        contract_roi(document, args.die),
         str(Path(args.output_file).resolve()),
         args.target_top_die_cells,
     )

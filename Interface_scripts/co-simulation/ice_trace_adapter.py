@@ -46,11 +46,12 @@ def parse_args() -> argparse.Namespace:
         required=True,
         help="Simulator-neutral system contract JSON file.",
     )
-    parser.add_argument(
+    floorplan_source = parser.add_mutually_exclusive_group(required=True)
+    floorplan_source.add_argument(
         "--floorplan",
-        required=True,
         help="Generated floorplan file whose element order must be followed.",
     )
+    floorplan_source.add_argument("--thermal-manifest", help="Generated per-die artifact and power-order manifest.")
     parser.add_argument(
         "--input",
         required=True,
@@ -190,14 +191,28 @@ def follow_raw_trace(args: argparse.Namespace) -> int:
     columns = power_columns(document)
     power_sources = build_power_sources(document)
 
-    floorplan_path = Path(args.floorplan).resolve()
     raw_path = Path(args.input).resolve()
     output_path = Path(args.output).resolve()
     done_path = Path(args.done_file).resolve()
     if raw_path == output_path:
         raise RuntimeError("--input and --output must be different files")
 
-    floorplan_entries_in_order = parse_floorplan_entries(floorplan_path)
+    if getattr(args, "thermal_manifest", None):
+        from thermal_manifest import artifact_path, load_manifest
+        manifest = load_manifest(args.thermal_manifest)
+        for die in manifest["dies"]:
+            if parse_floorplan_entries(artifact_path(manifest, die, "floorplan")) != die["elements"]:
+                raise RuntimeError("floorplan differs from thermal manifest")
+        floorplan_entries_in_order = manifest["power_order"]
+        if document["contract"]["version"] == 2:
+            from system_contract import power_order_elements
+            expected = [flattened_floorplan_name(e["name"]) for e in power_order_elements(document)]
+            if floorplan_entries_in_order != expected:
+                raise RuntimeError("thermal manifest differs from native contract power order")
+    else:
+        if document["contract"]["version"] != 1:
+            raise RuntimeError("multi-die trace adaptation requires --thermal-manifest")
+        floorplan_entries_in_order = parse_floorplan_entries(Path(args.floorplan).resolve())
     validate_floorplan_entries(floorplan_entries_in_order, power_sources)
 
     output_path.parent.mkdir(parents=True, exist_ok=True)

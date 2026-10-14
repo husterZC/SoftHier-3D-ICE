@@ -1,0 +1,62 @@
+{
+  "schema_version": 1,
+  "bases": {
+    "SoftHier": "a453fa09fe53ff306c91072066ea3ff559a0853a",
+    "DRAMSys": "8565f18b869c26eab712e3bb6494c4d6ae5dd73f",
+    "DRAMPower": "v5.4.1",
+    "core": "4be5293a4976eea02d224e425493b755d46b1d15",
+    "engine": "16dadd30d76a0aa2a33a85d3bdc52a75558a83c3"
+  },
+  "groups": {
+    "softhier": {
+      "files": {
+        "engine/engine/include/vp/power/block_power.hpp": {
+          "before": "97657e8b08931ad8e588c7d2194310a8e820e7958d27465afde4e881f2a8c0b3",
+          "after": "0c43118095f617ec89b54ed38a07201d5c961943d6446fea651de91b4f7e615a"
+        },
+        "engine/engine/src/power/block_power.cpp": {
+          "before": "e1534809eb939212d2766effa1f20777a219986d59550d8bd0e18201da480c94",
+          "after": "a790f6b5ff647a90fc132306069648d492bd33dfae0dd907c4aedf571038e011"
+        },
+        "core/models/memory/dramsys.cpp": {
+          "before": "519f57d26297dc1e1fbc5c4fcadea56a1b88801bc67d69915b714d03cdeab265",
+          "after": "d75ad6a596570722ee6cef002e42167294a9e9955ba995766441dca7d45eb80d"
+        },
+        "core/models/memory/dramsys_v2.cpp": {
+          "before": "63b7b87fbb47f5ef16fb1b62becbf731cd546fdba45de40f39467c15a46c23e0",
+          "after": "d58f562b56a82728137faec03f369b9913b89d88e9b745b81f1ab64d0ee323ff"
+        }
+      },
+      "patch_sha256": "a8c992dd0ac2f3a72d6e51098e547ed618a56bafa51bfa64bb20eca43738fc52"
+    },
+    "dramsys": {
+      "files": {
+        "src/DRAMSys/simulation/Dram.cpp": {
+          "before": "49a3b03b60a6ab768b7003381432a4214096f880cfb45900f14d09fee2680d82",
+          "after": "dfe85ce1f6acc33b1c25cdc222de848bf766a13bfbbfe6c9d8292e76360fb956"
+        },
+        "src/DRAMSys/simulation/Dram.h": {
+          "before": "71704acc00106f67f90a5cf44f92d9b3cc4636ac74ae3036948e5b31d4edb9da",
+          "after": "29144212bf9cbefb0ec134f86a4ab3437451bf55775665f4fcb75fc76bd9ae26"
+        },
+        "src/DRAMSys/DRAMSys.h": {
+          "before": "c46f456dd943625fc51fc02981765a3d5b2ea3b966c97e648e4d97520b24b8e8",
+          "after": "fceb2ec92431789ca387502d9faaab7c74bc7e92bb3d5913d6bc13bb5f98a338"
+        },
+        "src/DRAMSys/DRAMSys.cpp": {
+          "before": "cc5ac5777253e97c483ce473ce42ea49611fe608f388aae392c2c2fab462a7c8",
+          "after": "6e59db11167704f52f9b1338454b17a83dc91af52f177277db6db52d2b4be46e"
+        },
+        "src/DRAMSys/controller/Command.cpp": {
+          "before": "e38fd5991be6895c724aed5baa60172022942b055cae57f9aa3463feb198a866",
+          "after": "3ca15f94c0471293f2100e13c98ff5510865ab8e583164d90c0ee120e44a2a4a"
+        },
+        "apps/simulator/simulator/dramsys_lib.cpp": {
+          "before": "ee050c6a660f260c9dd6cba5f70dfa45a3bd18a1c1f77cc8e06d60574210ec7f",
+          "after": "5e032b101def2ef522a5d98d4840322ae998126038ab586b1b22f260ec8230b2"
+        }
+      },
+      "patch_sha256": "a6ae0ca738aa11cd2d0ea635cc3e9a0adb98f1efe7552e002b8ac9024e999d45"
+    }
+  }
+}

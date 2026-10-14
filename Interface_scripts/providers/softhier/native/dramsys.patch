@@ -1,0 +1,144 @@
+--- a/src/DRAMSys/simulation/Dram.cpp
++++ b/src/DRAMSys/simulation/Dram.cpp
+@@ -55,6 +55,7 @@
+ 
+ #ifdef USE_DRAMPOWER
+ #include <DRAMPower/command/Command.h>
++#include "softhier_hbm2_power.hpp"
+ #endif
+ 
+ using namespace sc_core;
+@@ -111,8 +112,12 @@
+     if (simConfig.powerAnalysis)
+     {
+ #ifdef USE_DRAMPOWER
+-        DRAMPower = memSpec.toDramPowerObject();
+-        if (DRAMPower && storeMode == Config::StoreModeType::NoStorage) {
++        if (const auto *hbm = dynamic_cast<const MemSpecHBM2 *>(&memSpec))
++            DRAMPower = std::make_unique<DRAMPower::SoftHierHBM2>(*hbm);
++        else
++            DRAMPower = memSpec.toDramPowerObject();
++        if (DRAMPower && storeMode == Config::StoreModeType::NoStorage &&
++            !dynamic_cast<DRAMPower::SoftHierHBM2 *>(DRAMPower.get())) {
+             if (simConfig.togglingRate) {
+                 DRAMPower->setToggleRate(0, simConfig.togglingRate);
+             }
+@@ -192,8 +197,36 @@
+     }
+ }
+ 
++int Dram::coreEnergyJ(uint64_t time_ps, double &command_j, double &background_j)
++{
++#ifdef USE_DRAMPOWER
++    if (auto *hbm = dynamic_cast<DRAMPower::SoftHierHBM2 *>(DRAMPower.get()))
++    {
++        hbm->snapshot_ps(time_ps, command_j, background_j);
++        return 0;
++    }
++#endif
++    return 1; // Power disabled or a different backend; never silently report zero.
++}
++
+ void Dram::reportPower()
+ {
++#ifdef USE_DRAMPOWER
++    if (dynamic_cast<DRAMPower::SoftHierHBM2 *>(DRAMPower.get()))
++    {
++        double command_j = 0.0, background_j = 0.0;
++        const uint64_t time_ps = sc_time_stamp() / sc_time(1, SC_PS);
++        coreEnergyJ(time_ps, command_j, background_j);
++        const auto saved_flags = std::cout.flags();
++        const auto saved_precision = std::cout.precision();
++        std::cout << std::scientific << std::setprecision(9)
++                  << name() << "  HBM2 Core Energy: " << command_j + background_j
++                  << " J (command " << command_j << ", background " << background_j << ")" << std::endl;
++        std::cout.flags(saved_flags);
++        std::cout.precision(saved_precision);
++        return;
++    }
++#endif
+     if (!DRAMPower)
+         return;
+ 
+--- a/src/DRAMSys/simulation/Dram.h
++++ b/src/DRAMSys/simulation/Dram.h
+@@ -137,6 +137,7 @@
+     void pimRead(uint64_t base_addr, uint64_t length, uint64_t stride, uint64_t count, const void* buf);
+     void pimWrite(uint64_t base_addr, uint64_t length, uint64_t stride, uint64_t count, const void* buf);
+ 
++    int coreEnergyJ(uint64_t time_ps, double &command_j, double &background_j);
+     virtual void reportPower();
+ 
+     void serialize(std::ostream& stream) const override;
+--- a/src/DRAMSys/DRAMSys.h
++++ b/src/DRAMSys/DRAMSys.h
+@@ -98,6 +98,7 @@
+      * Registers a callback that is called whenever a memory controller switches to the idle state.
+      * Check afterwards with idle() if all memory controllers are now idle.
+      */
++    int coreEnergyJ(uint64_t time_ps, double &command_j, double &background_j);
+     void registerIdleCallback(const std::function<void()>& idleCallback);
+ 
+     unsigned char * getDramBasePointer();
+--- a/src/DRAMSys/DRAMSys.cpp
++++ b/src/DRAMSys/DRAMSys.cpp
+@@ -298,6 +298,20 @@
+ void DRAMSys::pimWrite(int channel, uint64_t base_addr, uint64_t length, uint64_t stride, uint64_t count, const void* buf)
+ {
+     drams[channel]->pimWrite(base_addr, length, stride, count, buf);
++}
++
++int DRAMSys::coreEnergyJ(uint64_t time_ps, double &command_j, double &background_j)
++{
++    command_j = background_j = 0.0;
++    for (auto &dram : drams)
++    {
++        double commands = 0.0, background = 0.0;
++        const int status = dram->coreEnergyJ(time_ps, commands, background);
++        if (status != 0) return status;
++        command_j += commands;
++        background_j += background;
++    }
++    return drams.empty() ? 1 : 0;
+ }
+ 
+ void DRAMSys::end_of_simulation()
+--- a/src/DRAMSys/controller/Command.cpp
++++ b/src/DRAMSys/controller/Command.cpp
+@@ -189,10 +189,10 @@
+         DRAMPower::CmdType::NOP,    // 0
+         DRAMPower::CmdType::RD,     // 1
+         DRAMPower::CmdType::WR,     // 2
+-        DRAMPower::CmdType::NOP,    // 3
++        DRAMPower::CmdType::WR,     // 3, masked write consumes a full core burst
+         DRAMPower::CmdType::RDA,    // 4
+         DRAMPower::CmdType::WRA,    // 5
+-        DRAMPower::CmdType::NOP,    // 6
++        DRAMPower::CmdType::WRA,    // 6, masked write with auto-precharge
+         DRAMPower::CmdType::ACT,    // 7
+         DRAMPower::CmdType::PRE,    // 8, PREPB
+         DRAMPower::CmdType::REFB,   // 9, REFPB
+--- a/apps/simulator/simulator/dramsys_lib.cpp
++++ b/apps/simulator/simulator/dramsys_lib.cpp
+@@ -303,3 +303,21 @@
+ }
+      
+ 
++
++// ABI version is also a build-cache capability marker. Energies are cumulative J.
++extern "C" int softhier_dram_energy_abi_version() { return 1; }
++extern "C" int dram_get_core_energy_j(int dram_id, uint64_t time_ps,
++                                      double *command_j, double *background_j)
++{
++    if (!command_j || !background_j || dram_id < 0 ||
++        static_cast<size_t>(dram_id) >= list_of_DRAMsys.size()) return -1;
++    try
++    {
++        return list_of_DRAMsys[dram_id]->coreEnergyJ(time_ps, *command_j, *background_j);
++    }
++    catch (const std::exception &error)
++    {
++        std::cerr << "HBM2 energy snapshot failed: " << error.what() << std::endl;
++        return -1;
++    }
++}

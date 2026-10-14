@@ -18,6 +18,7 @@ from typing import Any, Dict, List
 
 CONTRACT_NAME = "3dice-cosim-system"
 CONTRACT_VERSION = 1
+SUPPORTED_CONTRACT_VERSIONS = (1, 2)
 GEOMETRY_NAME_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
 
 
@@ -127,6 +128,130 @@ def geometry_entry(geometry: Dict[str, Any], entry_name: str) -> Dict[str, Any]:
     raise ContractError(f"invalid floorplan element name {entry_name!r}")
 
 
+def geometry_rectangle(geometry, name):
+    """Return absolute x, y, width, height for a geometry node."""
+    current, x, y = geometry, 0.0, 0.0
+    for part in name.split("/"):
+        node = current[part]
+        x += node["offset"][0]
+        y += node["offset"][1]
+        current = node["subs"]
+    return x, y, node["shape"][0], node["shape"][1]
+
+
+def _positive_number(value, location):
+    parsed = _finite_number(value, location)
+    if parsed <= 0:
+        raise ContractError(f"{location} must be positive")
+    return parsed
+
+
+def _validate_thermal_stack(root):
+    stack = _mapping(root.get("thermal_stack"), "thermal_stack")
+    if stack.get("order") != "bottom-to-top":
+        raise ContractError("thermal_stack.order must be 'bottom-to-top'")
+    materials = _mapping(stack.get("materials"), "thermal_stack.materials")
+    for name, material in materials.items():
+        _geometry_name(name, "thermal_stack.materials key")
+        material = _mapping(material, f"thermal_stack.materials.{name}")
+        conductivity = material.get("thermal_conductivity_w_m_k")
+        if isinstance(conductivity, list):
+            if len(conductivity) != 3:
+                raise ContractError(f"material {name} conductivity must contain x/y/z values")
+            for value in conductivity:
+                _positive_number(value, f"material {name} conductivity")
+        else:
+            _positive_number(conductivity, f"material {name} conductivity")
+        _positive_number(material.get("volumetric_heat_capacity_j_m3_k"), f"material {name} heat capacity")
+    dies = _list(stack.get("dies"), "thermal_stack.dies")
+    if not dies:
+        raise ContractError("thermal_stack.dies must not be empty")
+    die_ids, geometry_roots, footprint = set(), set(), None
+    for die in dies:
+        die = _mapping(die, "thermal_stack.die")
+        die_id = _geometry_name(die.get("id"), "thermal_stack.die.id")
+        if die_id in die_ids:
+            raise ContractError(f"duplicate thermal die {die_id}")
+        die_ids.add(die_id)
+        geometry_root = _nonempty_string(die.get("geometry_root"), "thermal_stack.die.geometry_root")
+        if geometry_root in geometry_roots or geometry_root not in root["geometry"]:
+            raise ContractError("thermal dies must map distinct known geometry roots")
+        geometry_roots.add(geometry_root)
+        node = root["geometry"][geometry_root]
+        if node["type"] != "die" or any(node["offset"]):
+            raise ContractError("thermal die geometry roots must be dies at the origin")
+        if footprint is not None and footprint != node["shape"]:
+            raise ContractError("thermal dies must share a footprint")
+        footprint = node["shape"]
+        _positive_number(die.get("total_thickness_um"), f"{die_id}.total_thickness_um")
+        if die.get("active_face") not in {"top", "bottom"}:
+            raise ContractError(f"{die_id}.active_face must be 'top' or 'bottom'")
+    if geometry_roots != set(root["geometry"]):
+        raise ContractError("every geometry root must belong to a thermal die")
+    layers = _list(stack.get("layers"), "thermal_stack.layers")
+    layer_ids = set()
+    die_layers = {die_id: [] for die_id in die_ids}
+    for index, layer in enumerate(layers):
+        layer = _mapping(layer, f"thermal_stack.layers[{index}]")
+        layer_id = _geometry_name(layer.get("id"), "thermal layer id")
+        if layer_id in layer_ids or layer_id in die_ids:
+            raise ContractError("thermal layer and die IDs must be unique")
+        layer_ids.add(layer_id)
+        if layer.get("material") not in materials:
+            raise ContractError(f"{layer_id} references an unknown material")
+        _positive_number(layer.get("thickness_um"), f"{layer_id}.thickness_um")
+        if "source" in layer and not isinstance(layer["source"], bool):
+            raise ContractError(f"{layer_id}.source must be boolean")
+        if "die" in layer:
+            if layer["die"] not in die_ids:
+                raise ContractError(f"{layer_id} references an unknown die")
+            die_layers[layer["die"]].append(index)
+        elif layer.get("source"):
+            raise ContractError("a thermal source layer must belong to a die")
+    for die in dies:
+        indices = die_layers[die["id"]]
+        if not indices or indices != list(range(indices[0], indices[-1] + 1)):
+            raise ContractError(f"{die['id']} physical layers must be present and contiguous")
+        sources = [i for i in indices if layers[i].get("source")]
+        if len(sources) != 1:
+            raise ContractError(f"{die['id']} requires exactly one source layer")
+        face_index = indices[-1] if die["active_face"] == "top" else indices[0]
+        if sources[0] != face_index:
+            raise ContractError(f"{die['id']} source layer does not match its active_face")
+        if not math.isclose(sum(layers[i]["thickness_um"] for i in indices), die["total_thickness_um"], rel_tol=1e-10):
+            raise ContractError(f"{die['id']} layers do not preserve total thickness")
+    cooling = _mapping(stack.get("cooling"), "thermal_stack.cooling")
+    _positive_number(cooling.get("heat_transfer_coefficient_w_m2_k"), "cooling heat transfer coefficient")
+    _positive_number(cooling.get("temperature_k"), "cooling temperature_k")
+
+    # Each die must tile its footprint without overlap or omitted regions.
+    by_name = {element["name"]: element for element in root["floorplan"]["elements"]}
+    for die in dies:
+        elements = [item for item in by_name.values() if item.get("die") == die["id"]]
+        if not elements:
+            raise ContractError(f"{die['id']} has no floorplan regions")
+        rectangles = []
+        for element in elements:
+            if element["name"].split("/")[0] != die["geometry_root"]:
+                raise ContractError(f"floorplan {element['name']} belongs to the wrong die")
+            rectangle = geometry_rectangle(root["geometry"], element["name"])
+            x, y, width, height = rectangle
+            tolerance = max(footprint) * 1e-9
+            if x < -tolerance or y < -tolerance or x + width > footprint[0] + tolerance or y + height > footprint[1] + tolerance:
+                raise ContractError(f"floorplan {element['name']} is outside its die")
+            for ox, oy, ow, oh in rectangles:
+                if min(x + width, ox + ow) - max(x, ox) > tolerance and min(y + height, oy + oh) - max(y, oy) > tolerance:
+                    raise ContractError(f"overlapping floorplan regions on {die['id']}")
+            rectangles.append(rectangle)
+        if not math.isclose(sum(w * h for _, _, w, h in rectangles), footprint[0] * footprint[1], rel_tol=1e-9):
+            raise ContractError(f"floorplan regions do not cover {die['id']}")
+    if any(element.get("die") not in die_ids for element in by_name.values()):
+        raise ContractError("each version 2 floorplan element requires a known die")
+    for component in root.get("thermal_feedback", {}).get("components", []):
+        if component.get("die") not in die_ids or any(by_name[name]["die"] != component["die"] for name in component["floorplan_elements"]):
+            raise ContractError("thermal-feedback components must map their own die")
+
+
 def validate_contract(document: Any) -> Dict[str, Any]:
     """Validate and return a coupling contract document."""
 
@@ -141,10 +266,10 @@ def validate_contract(document: Any) -> Dict[str, Any]:
     if (
         isinstance(version, bool)
         or not isinstance(version, int)
-        or version != CONTRACT_VERSION
+        or version not in SUPPORTED_CONTRACT_VERSIONS
     ):
         raise ContractError(
-            f"contract.version must be {CONTRACT_VERSION}, got {version!r}"
+            f"contract.version must be one of {SUPPORTED_CONTRACT_VERSIONS}, got {version!r}"
         )
 
     producer = _mapping(root.get("producer"), "producer")
@@ -346,6 +471,8 @@ def validate_contract(document: Any) -> Dict[str, Any]:
                 + ", ".join(sorted(missing_columns))
             )
 
+    if version == 2:
+        _validate_thermal_stack(root)
     return root
 
 
@@ -367,6 +494,21 @@ def load_contract(path) -> Dict[str, Any]:
 
 def floorplan_elements(document: Dict[str, Any]) -> List[Dict[str, Any]]:
     return document["floorplan"]["elements"]
+
+
+def thermal_die_ids(document):
+    """Powered dies in the native solver's bottom-to-top input order."""
+    if document["contract"]["version"] == 1:
+        return ["TOP_DIE"]
+    return [layer["die"] for layer in document["thermal_stack"]["layers"] if layer.get("source")]
+
+
+def power_order_elements(document):
+    """Floorplan input order, including passive residual regions."""
+    elements = floorplan_elements(document)
+    if document["contract"]["version"] == 1:
+        return elements
+    return [element for die_id in thermal_die_ids(document) for element in elements if element["die"] == die_id]
 
 
 def power_columns(document: Dict[str, Any]) -> List[str]:
@@ -394,7 +536,7 @@ def _main() -> int:
 
     document = load_contract(args.contract)
     print(
-        f"Valid {CONTRACT_NAME} v{CONTRACT_VERSION}: "
+        f"Valid {CONTRACT_NAME} v{document['contract']['version']}: "
         f"{len(power_columns(document))} power columns, "
         f"{len(floorplan_elements(document))} floorplan elements"
     )

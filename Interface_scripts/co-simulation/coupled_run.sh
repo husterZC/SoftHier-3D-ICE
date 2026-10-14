@@ -65,6 +65,9 @@ ICE_FLOORPLAN_FILE="${ICE_FLOORPLAN_FILE:-$RUN_3DICE_GEN_DIR/floorplan_nopower.f
 ICE_STK_FILE="${ICE_STK_FILE:-$RUN_3DICE_GEN_DIR/ice.stk}"
 ICE_RUNTIME_FLOORPLAN_FILE="${ICE_RUNTIME_FLOORPLAN_FILE:-$RUN_3DICE_DIR/floorplan_nopower.flp}"
 ICE_RUNTIME_STK_FILE="${ICE_RUNTIME_STK_FILE:-$RUN_3DICE_DIR/ice.stk}"
+ICE_THERMAL_MANIFEST="${ICE_THERMAL_MANIFEST:-$RUN_3DICE_GEN_DIR/thermal_manifest.json}"
+ICE_RUNTIME_THERMAL_MANIFEST="${ICE_RUNTIME_THERMAL_MANIFEST:-$RUN_3DICE_DIR/thermal_manifest.json}"
+THERMAL_MANIFEST_TOOL="$ROOT_DIR/Interface_scripts/thermal_manifest.py"
 RAW_POWER_TRACE="${RAW_POWER_TRACE:-$TRACE_DIR/power_hook_trace.jsonl}"
 DICE_POWER_TRACE="${DICE_POWER_TRACE:-$TRACE_DIR/3dice_power_traces.txt}"
 DONE_FILE="${DONE_FILE:-$STATE_DIR/simulator.done}"
@@ -305,7 +308,11 @@ write_latest_link() {
 }
 
 reset_runtime_files() {
+    if [[ -f "$ICE_RUNTIME_THERMAL_MANIFEST" ]]; then
+        "$PYTHON" "$THERMAL_MANIFEST_TOOL" clean-outputs "$ICE_RUNTIME_THERMAL_MANIFEST"
+    fi
     rm -f \
+        "$ICE_RUNTIME_THERMAL_MANIFEST" \
         "$RAW_POWER_TRACE" \
         "$DICE_POWER_TRACE" \
         "$DONE_FILE" \
@@ -397,11 +404,19 @@ generate_ice_inputs() {
 }
 
 prepare_runtime_3dice_inputs() {
-    require_file "$ICE_FLOORPLAN_FILE"
     require_file "$ICE_STK_FILE"
 
-    cp -f "$ICE_FLOORPLAN_FILE" "$ICE_RUNTIME_FLOORPLAN_FILE"
-    cp -f "$ICE_STK_FILE" "$ICE_RUNTIME_STK_FILE"
+    if [[ -f "$ICE_THERMAL_MANIFEST" ]]; then
+        "$PYTHON" "$THERMAL_MANIFEST_TOOL" copy "$ICE_THERMAL_MANIFEST" \
+            --destination "$ICE_RUNTIME_THERMAL_MANIFEST" \
+            --source-stack "$ICE_STK_FILE" --destination-stack "$ICE_RUNTIME_STK_FILE" \
+            --single-die-floorplan "$ICE_RUNTIME_FLOORPLAN_FILE"
+        THERMAL_FEEDBACK_FILE="$("$PYTHON" "$THERMAL_MANIFEST_TOOL" primary "$ICE_RUNTIME_THERMAL_MANIFEST")"
+    else
+        require_file "$ICE_FLOORPLAN_FILE"
+        cp -f "$ICE_FLOORPLAN_FILE" "$ICE_RUNTIME_FLOORPLAN_FILE"
+        cp -f "$ICE_STK_FILE" "$ICE_RUNTIME_STK_FILE"
+    fi
 
     if [[ -f "$RUN_3DICE_GEN_DIR/conductance_layer.txt" ]]; then
         cp -f "$RUN_3DICE_GEN_DIR/conductance_layer.txt" "$RUN_3DICE_DIR/conductance_layer.txt"
@@ -415,19 +430,22 @@ prepare_runtime_3dice_inputs() {
 prepare_power_hook_config() {
     require_executable "$POWER_HOOK_EXECUTABLE"
     require_file "$SYSTEM_CONFIG_FILE"
-    require_file "$ICE_RUNTIME_FLOORPLAN_FILE"
 
     local args=(
         "$SCRIPT_DIR/generate_power_hook_config.py"
         "--output" "$POWER_HOOK_CONFIG_FILE"
         "--system-config" "$SYSTEM_CONFIG_FILE"
-        "--floorplan" "$ICE_RUNTIME_FLOORPLAN_FILE"
         "--power-trace" "$DICE_POWER_TRACE"
-        "--temperature-output" "$THERMAL_FEEDBACK_FILE"
         "--temperature-history" "$COMPONENT_TEMPERATURE_TRACE"
         "--poll-seconds" "$POWER_HOOK_POLL_SECONDS"
         "--timeout-seconds" "$POWER_HOOK_TIMEOUT_SECONDS"
     )
+    if [[ -f "$ICE_RUNTIME_THERMAL_MANIFEST" ]]; then
+        args+=(--thermal-manifest "$ICE_RUNTIME_THERMAL_MANIFEST")
+    else
+        require_file "$ICE_RUNTIME_FLOORPLAN_FILE"
+        args+=(--floorplan "$ICE_RUNTIME_FLOORPLAN_FILE" --temperature-output "$THERMAL_FEEDBACK_FILE")
+    fi
     if [[ -n "$DEFAULT_POWER_W" ]]; then
         args+=("--default-power-w" "$DEFAULT_POWER_W")
     fi
@@ -476,6 +494,8 @@ write_manifest() {
         kv SYSTEM_CONFIG_FILE "$SYSTEM_CONFIG_FILE"
         kv GEO_FILE "$GEO_FILE"
         kv ICE_FLOORPLAN_FILE "$ICE_FLOORPLAN_FILE"
+        kv ICE_THERMAL_MANIFEST "$ICE_THERMAL_MANIFEST"
+        kv ICE_RUNTIME_THERMAL_MANIFEST "$ICE_RUNTIME_THERMAL_MANIFEST"
         kv ICE_STK_FILE "$ICE_STK_FILE"
         kv ICE_RUNTIME_FLOORPLAN_FILE "$ICE_RUNTIME_FLOORPLAN_FILE"
         kv ICE_RUNTIME_STK_FILE "$ICE_RUNTIME_STK_FILE"
@@ -711,7 +731,11 @@ run_simulator() {
 
 ensure_3dice_termination() {
     local width
-    width="$(awk '/^[[:space:]]*[A-Za-z0-9_.-]+[[:space:]]*:[[:space:]]*$/ { count++ } END { print count + 0 }' "$ICE_RUNTIME_FLOORPLAN_FILE")"
+    if [[ -f "$ICE_RUNTIME_THERMAL_MANIFEST" ]]; then
+        width="$("$PYTHON" "$THERMAL_MANIFEST_TOOL" width "$ICE_RUNTIME_THERMAL_MANIFEST")"
+    else
+        width="$(awk '/^[[:space:]]*[A-Za-z0-9_.-]+[[:space:]]*:[[:space:]]*$/ { count++ } END { print count + 0 }' "$ICE_RUNTIME_FLOORPLAN_FILE")"
+    fi
     ((width > 0)) || die "cannot determine 3D-ICE floorplan width"
 
     if awk -v width="$width" '
@@ -826,6 +850,14 @@ generate_temperature_gif() {
     log "Generating temperature dashboard GIF at $ICE_GIF_FILE"
     mkdir -p "$(dirname "$ICE_GIF_FILE")"
 
+    if [[ -f "$ICE_RUNTIME_THERMAL_MANIFEST" ]]; then
+        "$ICE_GIF_PYTHON" "$THERMAL_MANIFEST_TOOL" render "$ICE_RUNTIME_THERMAL_MANIFEST" \
+            --gif "$ICE_GIF_FILE" --stride "$ICE_GIF_STRIDE" --width "$ICE_GIF_WIDTH" \
+            --fps "$ICE_GIF_FPS" --writer "$ICE_GIF_WRITER" --slot-seconds "$(effective_slot_seconds)" \
+            > "$LOG_DIR/tmap_gif.log" 2>&1
+        return
+    fi
+
     "$ICE_GIF_PYTHON" "$ROOT_DIR/Interface_scripts/plot_runtime_temperature_map/plot_runtime_tmap.py" \
         --coords "$RUN_3DICE_DIR/xyaxis_TOP_DIE.txt" \
         --map "$RUN_3DICE_DIR/output_top_die.txt" \
@@ -875,7 +907,11 @@ write_summary() {
         printf 'component_temperature_csv_rows: %s\n' "$(line_count "$COMPONENT_TEMPERATURE_TRACE")"
         printf '3dice_power_trace_rows: %s\n' "$(line_count "$DICE_POWER_TRACE")"
         printf '3dice_tflp_rows: %s\n' "$(thermal_row_count "$thermal_file")"
-        printf 'max_temperature_k: %s\n' "$(max_temperature "$thermal_file")"
+        if [[ -f "$ICE_RUNTIME_THERMAL_MANIFEST" ]]; then
+            "$PYTHON" "$THERMAL_MANIFEST_TOOL" summary "$ICE_RUNTIME_THERMAL_MANIFEST"
+        else
+            printf 'max_temperature_k: %s\n' "$(max_temperature "$thermal_file")"
+        fi
         printf '\n'
         printf '%s\n' 'Key files'
         printf '%s\n' '---------'
@@ -886,9 +922,17 @@ write_summary() {
         printf 'component temperature history: %s\n' "$COMPONENT_TEMPERATURE_TRACE"
         printf '3D-ICE power trace: %s\n' "$DICE_POWER_TRACE"
         printf '3D-ICE floorplan temperatures: %s\n' "$thermal_file"
-        printf '3D-ICE temperature map: %s\n' "$RUN_3DICE_DIR/output_top_die.txt"
+        if [[ -f "$ICE_RUNTIME_THERMAL_MANIFEST" ]]; then
+            printf '3D-ICE thermal artifacts: %s\n' "$ICE_RUNTIME_THERMAL_MANIFEST"
+        else
+            printf '3D-ICE temperature map: %s\n' "$RUN_3DICE_DIR/output_top_die.txt"
+        fi
         if [[ "$ICE_GENERATE_GIF" == "1" ]]; then
-            printf 'temperature GIF: %s\n' "$ICE_GIF_FILE"
+            if [[ -f "$ICE_RUNTIME_THERMAL_MANIFEST" ]]; then
+                "$PYTHON" "$THERMAL_MANIFEST_TOOL" gif-paths "$ICE_RUNTIME_THERMAL_MANIFEST" --gif "$ICE_GIF_FILE"
+            else
+                printf 'temperature GIF: %s\n' "$ICE_GIF_FILE"
+            fi
             printf 'temperature GIF log: %s\n' "$LOG_DIR/tmap_gif.log"
         fi
         printf 'logs: %s\n' "$LOG_DIR"
@@ -923,10 +967,12 @@ run_all() {
     generate_ice_inputs
     prepare_runtime_3dice_inputs
     prepare_power_hook_config
-    write_manifest
     build_simulator
+    write_manifest
 
-    require_file "$ICE_RUNTIME_FLOORPLAN_FILE"
+    if [[ ! -f "$ICE_RUNTIME_THERMAL_MANIFEST" ]]; then
+        require_file "$ICE_RUNTIME_FLOORPLAN_FILE"
+    fi
     require_file "$ICE_RUNTIME_STK_FILE"
 
     start_server

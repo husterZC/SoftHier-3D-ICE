@@ -36,9 +36,10 @@ def parse_args():
     )
     parser.add_argument("--output", required=True)
     parser.add_argument("--system-config", required=True)
-    parser.add_argument("--floorplan", required=True)
+    parser.add_argument("--floorplan")
+    parser.add_argument("--thermal-manifest")
     parser.add_argument("--power-trace", required=True)
-    parser.add_argument("--temperature-output", required=True)
+    parser.add_argument("--temperature-output")
     parser.add_argument("--temperature-history", required=True)
     parser.add_argument("--poll-seconds", type=positive_float, default=0.02)
     parser.add_argument(
@@ -67,14 +68,10 @@ def main():
     config = {
         "hook": {
             "name": "3dice-gvsoc-power-hook",
-            "version": 1,
+            "version": 2 if args.thermal_manifest else 1,
         },
         "system_config": str(system_config),
-        "floorplan": str(Path(args.floorplan).resolve()),
         "power_trace": str(Path(args.power_trace).resolve()),
-        "temperature_output": str(
-            Path(args.temperature_output).resolve()
-        ),
         "temperature_history": str(
             Path(args.temperature_history).resolve()
         ),
@@ -82,6 +79,18 @@ def main():
         "timeout_seconds": args.timeout_seconds,
         "default_power_w": args.default_power_w,
     }
+    if args.thermal_manifest:
+        from thermal_manifest import load_manifest
+        path = Path(args.thermal_manifest).resolve()
+        load_manifest(path)
+        config["thermal_manifest"] = str(path)
+    else:
+        if not args.floorplan or not args.temperature_output:
+            raise SystemExit("--floorplan and --temperature-output are required without --thermal-manifest")
+        if document["contract"]["version"] != 1:
+            raise SystemExit("multi-die contracts require --thermal-manifest")
+        config.update(floorplan=str(Path(args.floorplan).resolve()),
+                      temperature_output=str(Path(args.temperature_output).resolve()))
 
     output.parent.mkdir(parents=True, exist_ok=True)
     temporary = output.with_name(output.name + ".tmp")

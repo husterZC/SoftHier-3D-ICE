@@ -11,9 +11,16 @@ import numpy as np
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "Interface_scripts"))
-from system_contract import load_contract, thermal_components  # noqa: E402
+from system_contract import load_contract as load_system_contract, thermal_components  # noqa: E402
 
 TEMPERATURE_GRID_C = np.array([25., 40., 55., 70., 85., 100., 115., 125.])
+
+
+def load_contract(path):
+    document = load_system_contract(path)
+    if document["contract"]["version"] != 1:
+        raise ValueError("thermal replay currently supports single-die version 1 recordings only; memory-on-logic requires live co-simulation")
+    return document
 
 
 def digest(path):

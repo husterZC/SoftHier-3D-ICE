@@ -2,6 +2,8 @@
 """Generate 3D-ICE inputs from a simulator-neutral system contract."""
 
 import argparse
+import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -11,7 +13,10 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 INTERFACE_DIR = SCRIPT_DIR.parent
 sys.path.insert(0, str(INTERFACE_DIR))
 
-from system_contract import load_contract  # noqa: E402
+from system_contract import (  # noqa: E402
+    load_contract, thermal_die_ids, power_order_elements, flattened_floorplan_name,
+)
+from multi_die_stack import write_stack  # noqa: E402
 
 
 GEOGEN = SCRIPT_DIR / "geogen.py"
@@ -67,7 +72,7 @@ def parse_args() -> argparse.Namespace:
         "--target-top-die-cells",
         type=positive_int,
         default=256 * 256,
-        help="Approximate non-uniform TOP_DIE cell count.",
+        help="Approximate non-uniform cell count per powered die.",
     )
     return parser.parse_args()
 
@@ -106,6 +111,17 @@ def main() -> int:
     stk.parent.mkdir(parents=True, exist_ok=True)
 
     run([sys.executable, str(GEOGEN), str(system_config), str(geo)])
+    if document["contract"]["version"] == 2:
+        floorplans = {}
+        for index, die_id in enumerate(thermal_die_ids(document)):
+            path = floorplan if index == 0 else floorplan.with_name(f"{floorplan.stem}_{die_id.lower()}{floorplan.suffix}")
+            floorplans[die_id] = path
+            run([sys.executable, str(ROI2ICE_FLOORPLAN), str(system_config), str(geo), str(path),
+                 "--die", die_id, "--target-top-die-cells", str(args.target_top_die_cells)])
+        write_stack(document, floorplans, stk, slot_seconds, step_seconds)
+        write_manifest(document, floorplans, stk)
+        print(f"Generated multi-die geometry and stack: {stk}")
+        return 0
     run(
         [
             sys.executable,
@@ -117,6 +133,8 @@ def main() -> int:
             str(args.target_top_die_cells),
         ]
     )
+
+    write_manifest(document, {"TOP_DIE": floorplan}, stk)
     run(
         [
             sys.executable,
@@ -140,6 +158,26 @@ def main() -> int:
     print(f"3D-ICE initial temperature: {initial_temperature_k:.15g} K")
     print(f"Target TOP_DIE cells: {args.target_top_die_cells}")
     return 0
+
+
+def write_manifest(document, floorplans, stack_path):
+    elements = power_order_elements(document)
+    dies = []
+    for die_id in thermal_die_ids(document):
+        die_elements = [entry for entry in elements if entry.get("die", "TOP_DIE") == die_id]
+        dies.append({
+            "id": die_id,
+            "floorplan": os.path.relpath(floorplans[die_id], stack_path.parent),
+            "temperature_output": f"output_{die_id.lower()}_flp_avg.txt",
+            "map_output": f"output_{die_id.lower()}.txt",
+            "coordinates_output": f"xyaxis_{die_id}.txt",
+            "elements": [flattened_floorplan_name(entry["name"]) for entry in die_elements],
+        })
+    manifest = {"version": 1, "dies": dies,
+                "power_order": [flattened_floorplan_name(entry["name"]) for entry in elements]}
+    path = stack_path.parent / "thermal_manifest.json"
+    path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+    return manifest
 
 
 if __name__ == "__main__":

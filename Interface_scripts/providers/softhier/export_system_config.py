@@ -3,6 +3,7 @@
 
 import argparse
 import copy
+import hashlib
 import importlib.util
 import json
 import math
@@ -21,6 +22,13 @@ from system_contract import (  # noqa: E402
     validate_contract,
 )
 from providers.softhier import floorplans  # noqa: E402
+from providers.softhier.thermal_config import (  # noqa: E402
+    DEFAULT_THERMAL_CONFIG, load_thermal_config, memory_on_logic_stack,
+    validate_thermal_config,
+)
+from providers.softhier.native.power_config import load_power_config, validate_power_config  # noqa: E402
+
+DEFAULT_DRAM_POWER_CONFIG = Path(__file__).resolve().parent / "configs/dram3d_power.json"
 
 
 PNR_UTILIZATION = 0.66
@@ -130,6 +138,8 @@ def build_contract(
     default_power_w: float,
     power_profile: str = "constant",
     floorplan_rule: str = floorplans.DEFAULT_RULE,
+    thermal_config=None,
+    dram_power_config=None,
 ) -> dict:
     cluster_columns = required_int(architecture, "num_cluster_x", minimum=1)
     cluster_rows = required_int(architecture, "num_cluster_y", minimum=1)
@@ -223,6 +233,52 @@ def build_contract(
             "components": thermal_components,
         },
     }
+    if getattr(architecture, "dram3d_enable", 0):
+        if any(getattr(architecture, "hbm_chan_placement", [])):
+            raise ValueError("memory-on-logic thermal mapping requires stacked-only DRAM; edge HBM power is not mapped")
+        if getattr(architecture, "dram3d_type", "hbm2-example.json") != "hbm2-example.json":
+            raise ValueError("memory-on-logic power mapping currently supports hbm2-example.json")
+        resolved_thermal = (load_thermal_config(DEFAULT_THERMAL_CONFIG)
+                            if thermal_config is None else validate_thermal_config(thermal_config))
+        contract["contract"]["version"] = 2
+        contract["thermal_stack"] = memory_on_logic_stack(resolved_thermal)
+        metadata = contract["metadata"]
+        metadata["architecture_variant"] = "memory-on-logic"
+        metadata["thermal_config"] = resolved_thermal
+        metadata["thermal_config_sha256"] = hashlib.sha256(
+            json.dumps(resolved_thermal, sort_keys=True).encode()).hexdigest()
+        metadata["unmodeled"] = ["DRAM controller and PHY/interface power",
+            "local interconnect/register logic (others residual)", "global clock distribution beyond component clock budgets"]
+        metadata["dram_power_model"] = {"source": "DRAMPower", "temperature_dependence": "fixed electrical characterization",
+            "controller_power_included": False, "phy_power_included": False}
+        resolved_power = (load_power_config(DEFAULT_DRAM_POWER_CONFIG) if dram_power_config is None
+                          else validate_power_config(dram_power_config))
+        metadata["dram_power_config"] = copy.deepcopy(resolved_power)
+        metadata["dram_power_config_sha256"] = hashlib.sha256(
+            json.dumps(resolved_power, sort_keys=True).encode()).hexdigest()
+        # Per-component voltage is deliberately restricted to logic sources.
+        # DRAM core rails belong to the independent electrical memory model.
+        for element in floorplan_elements:
+            element["die"] = "LOGIC_DIE"
+        for component in thermal_components:
+            component["die"] = "LOGIC_DIE"
+            component["voltage_v"] = metadata["power_voltage_v"]
+        channels = {}
+        for cid in range(cluster_count):
+            cluster = clusters[f"cluster_{cid}"]
+            channel_name, column = f"channel_{cid}", f"chip/dram3d_chan_{cid}"
+            name, path = f"dram/{channel_name}", f"/{column}"
+            channels[channel_name] = {"type": "comp", "shape": list(cluster["shape"]),
+                                      "offset": list(cluster["offset"]), "subs": {}}
+            power_columns.append(column)
+            floorplan_elements.append({"name": name, "die": "DRAM_DIE", "power": {"column": column}})
+            thermal_components.append({"path": path, "power_column": column, "die": "DRAM_DIE",
+                "floorplan_elements": [name], "aggregation": "area-weighted-average"})
+            resolved_components.append({"name": channel_name, "kind": "dram3d_channel",
+                "simulator_path": path, "power_column": column, "die": "DRAM_DIE",
+                "cluster_id": cid, "area_um2": cluster_shape[0] * cluster_shape[1]})
+        geometry["dram"] = {"type": "die", "shape": list(geometry["chip"]["shape"]),
+                            "offset": [0.0, 0.0], "subs": channels}
     return validate_contract(contract)
 
 
@@ -239,6 +295,10 @@ def main() -> int:
     )
     parser.add_argument("--arch", required=True, help="SoftHier architecture file.")
     parser.add_argument("--output", required=True, help="Output contract JSON file.")
+    parser.add_argument("--thermal-config", default=os.environ.get("SOFTHIER_THERMAL_CONFIG") or None,
+                        help="Memory-on-logic physical inputs; defaults to documented engineering assumptions.")
+    parser.add_argument("--dram-power-config", default=os.environ.get("SOFTHIER_DRAM_POWER_CONFIG") or None,
+                        help="Resolved DRAM electrical model metadata to archive in the contract.")
     parser.add_argument("--floorplan", choices=tuple(floorplans.RULES), default=floorplans.DEFAULT_RULE,
                         help="Cluster placement rule; does not change power coefficients or component areas.")
     parser.add_argument("--core-model", choices=("fast", "accurate"),
@@ -271,6 +331,8 @@ def main() -> int:
         args.default_power_w,
         args.power_profile,
         args.floorplan,
+        thermal_config=load_thermal_config(args.thermal_config) if args.thermal_config else None,
+        dram_power_config=load_power_config(args.dram_power_config) if args.dram_power_config else None,
     )
     output.parent.mkdir(parents=True, exist_ok=True)
     with output.open("w", encoding="utf-8") as stream:

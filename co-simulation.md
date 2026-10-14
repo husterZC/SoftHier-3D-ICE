@@ -92,7 +92,7 @@ contract and protocol boundaries.
 clone the SoftHier SDK when absent, pin it to:
 
 ```text
-16b52e5244be9c6695e9069096bcc871d716b963
+b454aeee4278bb00ecbfcdcc4d1366fe8451d7c8
 ```
 
 It also builds the native dependencies required by the current SoftHier
@@ -426,3 +426,35 @@ non-negative; responses must use protocol version 1 and Celsius.
 Version 1 directly executes the Python adapter once per exchange. Increase
 `POWER_INTERVAL_PS` for smoke tests or short workloads. This changes thermal
 sampling resolution, not GVSoC’s simulated functional behavior.
+
+
+## Memory-on-logic configuration
+
+SoftHier is pinned at `a453fa09fe53ff306c91072066ea3ff559a0853a`; its SDK uses
+`chi/soft_hier_dram3d` at `b454aeee4278bb00ecbfcdcc4d1366fe8451d7c8`.
+The provider detects `dram3d_enable` in the architecture and emits contract v2:
+one logic die and one DRAM die with one channel region aligned to each cluster.
+The default SDK architecture has sixteen channels. The powered layers face each
+other across the bonding layer, with package/substrate below logic and cooling
+above DRAM.
+
+`SOFTHIER_THERMAL_CONFIG` and `SOFTHIER_DRAM_POWER_CONFIG` select JSON inputs.
+Defaults and units are documented in
+[the provider configuration notes](Interface_scripts/providers/softhier/configs/README.md).
+The electrical values are engineering estimates at a fixed reference temperature;
+the temperature-aware profile changes logic leakage only. Controller and PHY
+power are excluded.
+
+Bootstrap builds the provider-owned HBM2 energy extension against the pinned
+DRAMSys/DRAMPower versions. GVSoC engine/core additions are applied to copies in
+`SoftHier/.power_interface/native_sources/`, retaining clean upstream checkouts.
+Recursive source-module identities, SystemC library hashes and ABI checks
+invalidate stale native builds. The requested SystemC release must match both
+its installed headers and library. Run-local contracts
+archive resolved parameters; `thermal_manifest.json` describes both floorplans,
+thermal outputs and the combined bottom-to-top power order.
+
+Use [experiments/llm_dram3d](experiments/llm_dram3d/README.md) to prepare the SDK's
+complete transformer-block workload, run a constant/temperature-aware pair, and
+analyze logic and DRAM separately. The accepted implementation and validation
+checklist is recorded in [DRAM3D_PLAN.md](DRAM3D_PLAN.md).

@@ -114,7 +114,7 @@ top heat sink :
 
 dimensions :
    chip length {format_number(chip_length)}, width {format_number(chip_width)} ;
-   cell length  50, width  50 ;
+   cell length  {format_number(min(50.0, chip_length))}, width  {format_number(min(50.0, chip_width))} ;
    non-uniform true;
 
 layer HEATSINK_LAYER :

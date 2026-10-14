@@ -21,7 +21,7 @@ submodule URL; the SDK and native dependency downloads also require network
 access.
 
 ```bash
-git clone --branch chi/map --recurse-submodules \
+git clone --branch chi/softhier3d --recurse-submodules \
   https://github.com/husterZC/SoftHier-3D-ICE.git
 cd SoftHier-3D-ICE
 
@@ -153,9 +153,11 @@ and the same power/temperature comparison plots used by `component_power`.
 
 ## Untimed preload and reproducibility
 
-The parent repo selects SoftHier commit `0ab0442c07d030d380010c59d3004d5a5b7c7f3f`.
-The provider pins SDK branch `chi/soft_hier_old_llm_map` at
-`16b52e5244be9c6695e9069096bcc871d716b963`.
+The current parent repo selects SoftHier commit `a453fa09fe53ff306c91072066ea3ff559a0853a`.
+The provider pins SDK branch `chi/soft_hier_dram3d` at
+`b454aeee4278bb00ecbfcdcc4d1366fe8451d7c8`. Historical study manifests retain
+the original revisions; reruns use the currently pinned SDK. The separate
+[`llm_dram3d` experiment](../llm_dram3d/README.md) exercises memory-on-logic.
 
 The common weight preload is approximately 6.9 GB. Generate it once per study;
 all batches and profiles share it. The provider uses `--preload-mode=direct`,

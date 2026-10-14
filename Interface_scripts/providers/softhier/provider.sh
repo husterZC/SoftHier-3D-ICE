@@ -5,9 +5,9 @@ SCRIPT_DIR="${SOFTHIER_PROVIDER_SCRIPT_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")
 ROOT_DIR="${ROOT_DIR:-$(cd "$SCRIPT_DIR/../../.." && pwd)}"
 SOFTHIER_DIR="${SOFTHIER_DIR:-$ROOT_DIR/SoftHier}"
 SOFTHIER_SDK_DIR="${SOFTHIER_SDK_DIR:-$SOFTHIER_DIR/soft_hier_sdk}"
-SOFTHIER_SDK_URL="${SOFTHIER_SDK_URL:-git@github.com:pulp-platform/softhier-sdk.git}"
-SOFTHIER_SDK_BRANCH="${SOFTHIER_SDK_BRANCH:-chi/soft_hier_old_llm_map}"
-SOFTHIER_SDK_COMMIT="${SOFTHIER_SDK_COMMIT:-16b52e5244be9c6695e9069096bcc871d716b963}"
+SOFTHIER_SDK_URL="${SOFTHIER_SDK_URL:-https://github.com/pulp-platform/softhier-sdk.git}"
+SOFTHIER_SDK_BRANCH="${SOFTHIER_SDK_BRANCH:-chi/soft_hier_dram3d}"
+SOFTHIER_SDK_COMMIT="${SOFTHIER_SDK_COMMIT:-b454aeee4278bb00ecbfcdcc4d1366fe8451d7c8}"
 SOFTHIER_SDK_TOOLCHAIN_SOURCE="${SOFTHIER_SDK_TOOLCHAIN_SOURCE:-}"
 SOFTHIER_WORKDIR="${SOFTHIER_WORKDIR:-$SOFTHIER_DIR/.power_interface}"
 SOFTHIER_SW_BUILD="${SOFTHIER_SW_BUILD:-$SOFTHIER_WORKDIR/sw_build_staged}"
@@ -26,6 +26,9 @@ SOFTHIER_TARGET="${SOFTHIER_TARGET:-pulp.chips.soft_hier_old.flex_cluster}"
 SOFTHIER_CORE_MODEL="${SOFTHIER_CORE_MODEL:-fast}"
 SOFTHIER_POWER_PROFILE="${SOFTHIER_POWER_PROFILE:-constant}"
 SOFTHIER_FLOORPLAN="${SOFTHIER_FLOORPLAN:-redmule_strip}"
+SOFTHIER_THERMAL_CONFIG="${SOFTHIER_THERMAL_CONFIG:-$SCRIPT_DIR/configs/dram3d_thermal.json}"
+SOFTHIER_DRAM_POWER_CONFIG="${SOFTHIER_DRAM_POWER_CONFIG:-$SCRIPT_DIR/configs/dram3d_power.json}"
+SOFTHIER_NATIVE_APPLICATOR="$SCRIPT_DIR/native/apply_native.py"
 # An explicitly empty value keeps an already activated virtual environment.
 SOFTHIER_CONDA_ENV="${SOFTHIER_CONDA_ENV-py312}"
 SOFTHIER_CCACHE_DIR="${SOFTHIER_CCACHE_DIR:-$SOFTHIER_WORKDIR/ccache}"
@@ -85,7 +88,7 @@ Floorplan rules: redmule_strip, square_bands. Select one with
 SOFTHIER_FLOORPLAN (default: redmule_strip).
 
 The provider pins softhier-sdk commit
-16b52e5244be9c6695e9069096bcc871d716b963 on chi/soft_hier_old_llm_map. Override
+b454aeee4278bb00ecbfcdcc4d1366fe8451d7c8 on chi/soft_hier_dram3d. Override
 SOFTHIER_SDK_URL only to use a mirror of the same repository.
 
 SOFTHIER_BINARY selects a prebuilt application (default: SOFTHIER_SW_BUILD/softhier.elf).
@@ -143,8 +146,10 @@ source_environment() {
     export GVSOC_WORKDIR="$SOFTHIER_WORKDIR"
     export CCACHE_DIR="$SOFTHIER_CCACHE_DIR"
     export SYSTEMC_HOME="$SOFTHIER_SYSTEMC_HOME"
-    export DRAMSYS_PATH="$SOFTHIER_DRAMSYS_PATH"
-    export SOFTHIER_POWER_PROFILE
+    export DRAMSYS_PATH
+    DRAMSYS_PATH="$("$PYTHON" "$SCRIPT_DIR/prepare_dram_config.py" \
+        --arch "$SIMULATOR_CONFIG" --source "$SOFTHIER_DRAMSYS_PATH" --workdir "$SOFTHIER_WORKDIR")"
+    export SOFTHIER_POWER_PROFILE SOFTHIER_DRAM_POWER_CONFIG
     export SOFTHIER_ARCH_FILE="$SIMULATOR_CONFIG"
 
     if [[ -z "${CC:-}" ]] && command -v gcc-14.2.0 >/dev/null 2>&1; then
@@ -260,8 +265,8 @@ prepare_native_cmake() {
 
 
 systemc_present() {
-    [[ -f "$SOFTHIER_SYSTEMC_HOME/include/systemc.h" &&
-       -f "$SOFTHIER_SYSTEMC_HOME/lib64/libsystemc.so" ]]
+    "$PYTHON" "$SCRIPT_DIR/systemc_install.py" \
+        --home "$SOFTHIER_SYSTEMC_HOME" --version "$SOFTHIER_SYSTEMC_VERSION"
 }
 
 
@@ -321,7 +326,10 @@ prepare_systemc() {
 
 dramsys_present() {
     local library="$SOFTHIER_DRAMSYS_HOME/libDRAMSys_Simulator.so"
-    [[ -f "$library" ]] || return 1
+    [[ -f "$library" && -f "$SOFTHIER_DRAMSYS_HOME/native_build.json" ]] || return 1
+    dramsys_cache check >/dev/null 2>&1 || return 1
+    nm -D "$library" | grep ' T dram_get_core_energy_j$' >/dev/null || return 1
+    nm -D "$library" | grep ' T softhier_dram_energy_abi_version$' >/dev/null || return 1
 
     if command -v ldd >/dev/null 2>&1; then
         env LD_LIBRARY_PATH="$SOFTHIER_SYSTEMC_HOME/lib64:$SOFTHIER_DRAMSYS_HOME:${LD_LIBRARY_PATH:-}" \
@@ -330,6 +338,15 @@ dramsys_present() {
     else
         return 0
     fi
+}
+
+
+dramsys_cache() {
+    "$PYTHON" "$SCRIPT_DIR/native_build_cache.py" "$1" \
+        --base-commit "$SOFTHIER_DRAMSYS_COMMIT" \
+        --upstream-patch "$SOFTHIER_DIR/add_dramsyslib_patches/build_dynlib_from_github_dramsys5/patch" \
+        --systemc-home "$SOFTHIER_SYSTEMC_HOME" --systemc-version "$SOFTHIER_SYSTEMC_VERSION" \
+        --home "$SOFTHIER_DRAMSYS_HOME"
 }
 
 
@@ -381,15 +398,18 @@ prepare_dramsys() {
     require_command git
     prepare_native_cmake
 
-    local source_dir="$SOFTHIER_NATIVE_DEPS_DIR/src/dramsys"
-    local build_dir="$SOFTHIER_NATIVE_DEPS_DIR/build/dramsys"
+    local bundle cache_key
+    bundle="$(native_fingerprint)"
+    cache_key="$(dramsys_cache key)"
+    local source_dir="$SOFTHIER_NATIVE_DEPS_DIR/src/dramsys_$cache_key"
+    local build_dir="$SOFTHIER_NATIVE_DEPS_DIR/build/dramsys_$cache_key"
     local cloned=0
     if [[ ! -d "$source_dir/.git" ]]; then
         [[ ! -e "$source_dir" ]] ||
             die "$source_dir exists but is not a Git repository"
         mkdir -p "$(dirname "$source_dir")"
         log "Cloning DRAMSys from $SOFTHIER_DRAMSYS_URL"
-        git clone --no-checkout "$SOFTHIER_DRAMSYS_URL" "$source_dir"
+        GIT_LFS_SKIP_SMUDGE=1 git clone --no-checkout "$SOFTHIER_DRAMSYS_URL" "$source_dir"
         cloned=1
     fi
 
@@ -404,14 +424,17 @@ prepare_dramsys() {
         if ((!cloned)) && [[ -n "$(git -C "$source_dir" status --porcelain 2>/dev/null)" ]]; then
             die "DRAMSys source has local changes at an unexpected commit: $source_dir"
         fi
-        git -C "$source_dir" checkout --detach "$SOFTHIER_DRAMSYS_COMMIT"
+        GIT_LFS_SKIP_SMUDGE=1 git -C "$source_dir" checkout --detach "$SOFTHIER_DRAMSYS_COMMIT"
     fi
-    apply_dramsys_patch "$source_dir"
+    if [[ ! -f "$source_dir/.softhier_native_energy.json" ]]; then
+        apply_dramsys_patch "$source_dir"
+    fi
+    "$PYTHON" "$SOFTHIER_NATIVE_APPLICATOR" --dramsys "$source_dir"
 
     log "Building patched DRAMSys commit $SOFTHIER_DRAMSYS_COMMIT"
     env \
-        CC="$CC" \
-        CXX="$CXX" \
+        CC="${CC:-gcc}" \
+        CXX="${CXX:-g++}" \
         SYSTEMC_HOME="$SOFTHIER_SYSTEMC_HOME" \
         LD_LIBRARY_PATH="$SOFTHIER_SYSTEMC_HOME/lib64:${LD_LIBRARY_PATH:-}" \
         "$PREPARED_NATIVE_CMAKE" \
@@ -434,7 +457,13 @@ prepare_dramsys() {
     local built_library="$build_dir/lib/libDRAMSys_Simulator.so"
     require_file "$built_library"
     mkdir -p "$SOFTHIER_DRAMSYS_HOME"
-    cp "$built_library" "$SOFTHIER_DRAMSYS_HOME/libDRAMSys_Simulator.so"
+    # Replace the inode atomically; an active simulator may still map the old
+    # library, which must never be truncated by an in-place copy.
+    local temporary_library="$SOFTHIER_DRAMSYS_HOME/.libDRAMSys_Simulator.so.tmp.$$"
+    cp "$built_library" "$temporary_library"
+    mv -f "$temporary_library" "$SOFTHIER_DRAMSYS_HOME/libDRAMSys_Simulator.so"
+    dramsys_cache stamp
+    printf '%s\n' "$bundle" > "$SOFTHIER_DRAMSYS_HOME/native_bundle.sha256"
 
     dramsys_present ||
         die "DRAMSys build does not resolve against $SOFTHIER_SYSTEMC_HOME"
@@ -444,6 +473,34 @@ prepare_dramsys() {
 prepare_native_dependencies() {
     prepare_systemc
     prepare_dramsys
+}
+
+
+native_fingerprint() {
+    "$PYTHON" "$SOFTHIER_NATIVE_APPLICATOR" --fingerprint
+}
+
+
+prepare_native_source() {
+    PREPARED_SOFTHIER_SOURCE="$("$PYTHON" "$SCRIPT_DIR/stage_native.py" \
+        --source "$SOFTHIER_DIR" --workdir "$SOFTHIER_WORKDIR")"
+    PREPARED_SOFTHIER_BUILD="$SOFTHIER_WORKDIR/native_build/$(basename "$PREPARED_SOFTHIER_SOURCE")"
+}
+
+
+check_built_native() {
+    "$PYTHON" "$SCRIPT_DIR/stage_native.py" --action check \
+        --source "$SOFTHIER_DIR" --workdir "$SOFTHIER_WORKDIR" --target "$SOFTHIER_TARGET" \
+        --systemc-home "$SOFTHIER_SYSTEMC_HOME" --systemc-version "$SOFTHIER_SYSTEMC_VERSION" >/dev/null ||
+        die "native simulator build is missing or stale; run provider build-hardware"
+}
+
+
+stamp_built_native() {
+    "$PYTHON" "$SCRIPT_DIR/stage_native.py" --action stamp \
+        --source "$SOFTHIER_DIR" --workdir "$SOFTHIER_WORKDIR" \
+        --target "$SOFTHIER_TARGET" --stage "$PREPARED_SOFTHIER_SOURCE" \
+        --systemc-home "$SOFTHIER_SYSTEMC_HOME" --systemc-version "$SOFTHIER_SYSTEMC_VERSION" >/dev/null
 }
 
 
@@ -467,6 +524,7 @@ check_provider() {
     require_file "$SOFTHIER_SDK_DIR/softhier_old.mk"
     require_file "$SOFTHIER_SYSTEMC_HOME/include/systemc.h"
     require_file "$SOFTHIER_SYSTEMC_HOME/lib64/libsystemc.so"
+    systemc_present || die "SystemC installation does not match the requested version; rerun make bootstrap"
     require_file "$SOFTHIER_DRAMSYS_HOME/libDRAMSys_Simulator.so"
     dramsys_present ||
         die "DRAMSys does not resolve against provider-managed SystemC; rerun make bootstrap"
@@ -482,7 +540,7 @@ check_provider() {
 
 bootstrap_provider() {
     log "Initializing SoftHier and nested submodules"
-    if ! git -C "$SOFTHIER_DIR" rev-parse --git-dir >/dev/null 2>&1; then
+    if [[ ! -e "$SOFTHIER_DIR/.git" ]]; then
         git -C "$ROOT_DIR" submodule update --init SoftHier
     fi
     git -C "$SOFTHIER_DIR" submodule update --init --recursive
@@ -507,6 +565,8 @@ export_system() {
         --power-profile "$SOFTHIER_POWER_PROFILE" \
         --floorplan "$SOFTHIER_FLOORPLAN" \
         --core-model "$SOFTHIER_CORE_MODEL" \
+        --thermal-config "$SOFTHIER_THERMAL_CONFIG" \
+        --dram-power-config "$SOFTHIER_DRAM_POWER_CONFIG" \
         --default-power-w "$DEFAULT_POWER_W"
 }
 
@@ -523,7 +583,10 @@ build_simulator() {
         "$PYTHON" "$SCRIPT_DIR/prepare_workload.py" --sdk "$SOFTHIER_SDK_DIR" \
             --workdir "$SOFTHIER_WORKDIR" --arch "$SIMULATOR_CONFIG"
         if [[ "$build_hardware" == 1 ]]; then
-            "$MAKE_CMD" "TARGETS=$SOFTHIER_TARGET" build
+            prepare_native_source
+            "$MAKE_CMD" -C "$PREPARED_SOFTHIER_SOURCE" "TARGETS=$SOFTHIER_TARGET" \
+                "BUILDDIR=$PREPARED_SOFTHIER_BUILD" build
+            stamp_built_native
         fi
         local runtime="$SOFTHIER_WORKDIR/sdk_snapshot/soft_hier_sdk/runtime"
         local app="${SIMULATOR_APP:-$runtime/app_example}"
@@ -546,13 +609,17 @@ build_hardware() {
     (
         cd "$SOFTHIER_DIR"
         source_environment
-        "$MAKE_CMD" "TARGETS=$SOFTHIER_TARGET" build
+        prepare_native_source
+        "$MAKE_CMD" -C "$PREPARED_SOFTHIER_SOURCE" "TARGETS=$SOFTHIER_TARGET" \
+            "BUILDDIR=$PREPARED_SOFTHIER_BUILD" build
+        stamp_built_native
     )
 }
 
 
 run_simulator() {
     check_provider
+    check_built_native
     require_value POWER_HOOK_EXECUTABLE "$POWER_HOOK_EXECUTABLE"
     require_value POWER_HOOK_CONFIG_FILE "$POWER_HOOK_CONFIG_FILE"
     require_value POWER_HOOK_REQUEST_FILE "$POWER_HOOK_REQUEST_FILE"
@@ -582,12 +649,14 @@ run_simulator() {
     )
     if [[ -n "$SIMULATOR_PLATFORM" ]]; then
         require_file "$SIMULATOR_PLATFORM"
-        args+=("--preload" "$SIMULATOR_PLATFORM")
+        args+=("--preload" "$SIMULATOR_PLATFORM" "--trace=loader")
     fi
     if [[ -n "$SOFTHIER_INPUT_PRELOAD" ]]; then
         require_file "$SOFTHIER_INPUT_PRELOAD"
         args+=("--config-opt=**/hbm_preloader/binary=$SOFTHIER_INPUT_PRELOAD")
         args+=(run "--trace=loader" "--trace=ctrl_registers")
+    elif [[ -n "$SIMULATOR_PLATFORM" ]]; then
+        args+=(run)
     else
         args+=(run "--trace=/chip/cluster_0/redmule")
     fi
@@ -605,6 +674,7 @@ run_simulator() {
 
 run_uncoupled() {
     check_provider
+    check_built_native
     require_executable "$SOFTHIER_WORKDIR/install/bin/gvsoc"
     require_file "$SOFTHIER_BINARY"
     local args=("--target=$SOFTHIER_TARGET" "--binary" "$SOFTHIER_BINARY"
@@ -612,7 +682,7 @@ run_uncoupled() {
         "--preload-mode=$SOFTHIER_PRELOAD_MODE")
     if [[ -n "$SIMULATOR_PLATFORM" ]]; then
         require_file "$SIMULATOR_PLATFORM"
-        args+=("--preload" "$SIMULATOR_PLATFORM")
+        args+=("--preload" "$SIMULATOR_PLATFORM" "--trace=loader")
     fi
     if [[ -n "$SOFTHIER_INPUT_PRELOAD" ]]; then
         require_file "$SOFTHIER_INPUT_PRELOAD"
@@ -648,7 +718,22 @@ write_manifest() {
     kv SOFTHIER_SYSTEMC_VERSION "$SOFTHIER_SYSTEMC_VERSION"
     kv SOFTHIER_DRAMSYS_HOME "$SOFTHIER_DRAMSYS_HOME"
     kv SOFTHIER_DRAMSYS_PATH "$SOFTHIER_DRAMSYS_PATH"
+    kv SOFTHIER_EFFECTIVE_DRAMSYS_PATH "$("$PYTHON" "$SCRIPT_DIR/prepare_dram_config.py" \
+        --arch "$SIMULATOR_CONFIG" --source "$SOFTHIER_DRAMSYS_PATH" --workdir "$SOFTHIER_WORKDIR")"
     kv SOFTHIER_DRAMSYS_COMMIT "$SOFTHIER_DRAMSYS_COMMIT"
+    kv SOFTHIER_THERMAL_CONFIG "$SOFTHIER_THERMAL_CONFIG"
+    kv SOFTHIER_DRAM_POWER_CONFIG "$SOFTHIER_DRAM_POWER_CONFIG"
+    kv SOFTHIER_NATIVE_BUNDLE_SHA256 "$(native_fingerprint)"
+    kv SOFTHIER_NATIVE_BUILD_STAMP "$SOFTHIER_WORKDIR/install/native_build.json"
+    if [[ -f "$SOFTHIER_WORKDIR/install/native_build.json" ]]; then
+        kv SOFTHIER_NATIVE_BUILD_JSON "$("$PYTHON" -c 'import json,sys; print(json.dumps(json.load(open(sys.argv[1])), separators=(",", ":")))' "$SOFTHIER_WORKDIR/install/native_build.json")"
+        kv SOFTHIER_NATIVE_STAGE "$("$PYTHON" -c 'import json,sys; print(json.load(open(sys.argv[1]))["staged_source"])' \
+            "$SOFTHIER_WORKDIR/install/native_build.json")"
+    fi
+    kv SOFTHIER_DRAMSYS_BUILD_STAMP "$SOFTHIER_DRAMSYS_HOME/native_build.json"
+    if [[ -f "$SOFTHIER_DRAMSYS_HOME/native_build.json" ]]; then
+        kv SOFTHIER_DRAMSYS_BUILD_JSON "$("$PYTHON" -c 'import json,sys; print(json.dumps(json.load(open(sys.argv[1])), separators=(",", ":")))' "$SOFTHIER_DRAMSYS_HOME/native_build.json")"
+    fi
     kv SOFTHIER_TARGET "$SOFTHIER_TARGET"
     kv SOFTHIER_POWER_PROFILE "$SOFTHIER_POWER_PROFILE"
     kv SOFTHIER_FLOORPLAN "$SOFTHIER_FLOORPLAN"

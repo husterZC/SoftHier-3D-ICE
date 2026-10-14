@@ -1,0 +1,123 @@
+--- a/engine/engine/include/vp/power/block_power.hpp
++++ b/engine/engine/include/vp/power/block_power.hpp
+@@ -22,6 +22,7 @@
+ #pragma once
+ 
+ #include <vector>
++#include <functional>
+ #include <vp/power/power.hpp>
+ 
+ namespace vp
+@@ -181,6 +182,15 @@
+          */
+         void get_total_energy(double *dynamic, double *leakage);
+ 
++        // Cumulative external-model energy in pJ at the exact simulation time.
++        // Repeated timestamps must be idempotent; no reset of external counters.
++        // Included recursively by get_total_energy, separate from trace reports.
++        using ExternalEnergyCallback = std::function<void(int64_t, double *, double *)>;
++        void set_external_energy_callback(ExternalEnergyCallback callback)
++        {
++            this->external_energy_callback = std::move(callback);
++        }
++
+         double get_instant_power(double &dynamic_power, double &static_power);
+ 
+         gv::PowerReport *get_report() { return &this->report; }
+@@ -236,6 +246,9 @@
+ 
+         // Get instant power for this component and the whole hierarchy below him.
+         double get_power_from_self_and_childs();
++
++        void get_external_energy(int64_t time_ps, double *dynamic, double *leakage);
++        ExternalEnergyCallback external_energy_callback;
+ 
+         Block &top;                                // Component containing the power component object
+         vp::PowerTrace *power_trace = NULL;            // Default power trace of this component
+--- a/engine/engine/src/power/block_power.cpp
++++ b/engine/engine/src/power/block_power.cpp
+@@ -263,6 +263,22 @@
+ void vp::BlockPower::get_total_energy(double *dynamic, double *leakage)
+ {
+     this->get_power_trace()->get_total_energy(dynamic, leakage);
++    this->get_external_energy(this->top.time.get_time(), dynamic, leakage);
++}
++
++void vp::BlockPower::get_external_energy(int64_t time_ps, double *dynamic, double *leakage)
++{
++    if (this->external_energy_callback)
++    {
++        double external_dynamic = 0.0, external_leakage = 0.0;
++        this->external_energy_callback(time_ps, &external_dynamic, &external_leakage);
++        *dynamic += external_dynamic;
++        *leakage += external_leakage;
++    }
++    for (auto child : this->top.get_childs())
++    {
++        child->power.get_external_energy(time_ps, dynamic, leakage);
++    }
+ }
+ 
+ std::vector<gv::PowerReport *> vp::CompPowerReport::get_childs()
+--- a/core/models/memory/dramsys.cpp
++++ b/core/models/memory/dramsys.cpp
+@@ -173,6 +173,28 @@
+         this->trace.fatal("DRAMSys returned an invalid memory specification; rebuild "
+             "libDRAMSys_Simulator.so with the repository's matching DRAMSys patch\n");
+     }
++    // Only stacked channel components use this profile. Off-chip memories keep
++    // their independent power settings even though the environment is shared.
++    if (this->get_name().rfind("dram3d_chan_", 0) == 0 && this->power.is_enabled())
++    {
++        using EnergyFunction = int (*)(int, uint64_t, double *, double *);
++        auto sample_energy = reinterpret_cast<EnergyFunction>(
++            dlsym(libraryHandle, "dram_get_core_energy_j"));
++        if (!sample_energy)
++            this->trace.fatal("Stacked DRAM power requires the provider's DRAMSys energy ABI; rebuild the native library\n");
++        if (!std::getenv("SOFTHIER_DRAM_POWER_CONFIG"))
++            this->trace.fatal("Stacked DRAM power requires SOFTHIER_DRAM_POWER_CONFIG\n");
++        this->power.set_external_energy_callback([this, sample_energy](
++            int64_t time_ps, double *dynamic_pj, double *background_pj)
++        {
++            double command_j = 0.0, background_j = 0.0;
++            if (time_ps < 0 || sample_energy(this->dram_id, static_cast<uint64_t>(time_ps),
++                    &command_j, &background_j) != 0)
++                this->trace.fatal("Cannot sample stacked DRAM core energy; require HBM2 PowerAnalysis and a valid profile\n");
++            *dynamic_pj = command_j * 1e12;
++            *background_pj = background_j * 1e12;
++        });
++    }
+     access_size_clog = log2(memspec.access_size);
+     dram_register_async_callback(dram_id, (CallbackInstance_t)this, (AsynCallbackResp_Meth *)&ddr::rspCallback, (AsynCallbackUpdateReq_Meth*)&ddr::reqCallback);
+ 
+--- a/core/models/memory/dramsys_v2.cpp
++++ b/core/models/memory/dramsys_v2.cpp
+@@ -209,6 +209,28 @@
+     std::string simulationJson_path = resources_path + "/" + dram_type;
+ 
+     dram_id = add_dram((char *)resources_path.c_str(), (char *)simulationJson_path.c_str(), &memspec);
++    // Only stacked channel components use this profile. Off-chip memories keep
++    // their independent power settings even though the environment is shared.
++    if (this->get_name().rfind("dram3d_chan_", 0) == 0 && this->power.is_enabled())
++    {
++        using EnergyFunction = int (*)(int, uint64_t, double *, double *);
++        auto sample_energy = reinterpret_cast<EnergyFunction>(
++            dlsym(libraryHandle, "dram_get_core_energy_j"));
++        if (!sample_energy)
++            this->trace.fatal("Stacked DRAM power requires the provider's DRAMSys energy ABI; rebuild the native library\n");
++        if (!std::getenv("SOFTHIER_DRAM_POWER_CONFIG"))
++            this->trace.fatal("Stacked DRAM power requires SOFTHIER_DRAM_POWER_CONFIG\n");
++        this->power.set_external_energy_callback([this, sample_energy](
++            int64_t time_ps, double *dynamic_pj, double *background_pj)
++        {
++            double command_j = 0.0, background_j = 0.0;
++            if (time_ps < 0 || sample_energy(this->dram_id, static_cast<uint64_t>(time_ps),
++                    &command_j, &background_j) != 0)
++                this->trace.fatal("Cannot sample stacked DRAM core energy; require HBM2 PowerAnalysis and a valid profile\n");
++            *dynamic_pj = command_j * 1e12;
++            *background_pj = background_j * 1e12;
++        });
++    }
+     access_size_clog = log2(memspec.access_size);
+     beat_width = memspec.access_size;
+ 

@@ -1,0 +1,19 @@
+{
+  "schema_version": 1,
+  "provenance": "Engineering starting assumptions, not measured package characterization. Logic total thickness and silicon properties retain the existing package model; DRAM uses the same silicon properties. The 5 um face-to-face bond borrows the existing anisotropic BUMP effective material. The 1 um active source thicknesses are numerical heat-source regions included within each 50 um die.",
+  "logic_die": {
+    "thickness_um": 50.0,
+    "source_thickness_um": 1.0
+  },
+  "dram_die": {
+    "thickness_um": 50.0,
+    "source_thickness_um": 1.0,
+    "thermal_conductivity_w_m_k": 130.0,
+    "volumetric_heat_capacity_j_m3_k": 1610000.0
+  },
+  "face_to_face_bond": {
+    "thickness_um": 5.0,
+    "thermal_conductivity_w_m_k": [5.5, 5.5, 113.0],
+    "volumetric_heat_capacity_j_m3_k": 1845000.0
+  }
+}

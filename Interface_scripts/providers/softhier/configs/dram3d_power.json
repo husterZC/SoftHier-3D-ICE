@@ -1,0 +1,28 @@
+{
+  "schema_version": 1,
+  "memory_type": "HBM2",
+  "scope": "per_pseudo_channel",
+  "characterization_temperature_k": 300.0,
+  "provenance": "Uncalibrated engineering estimates for initial memory-on-logic studies; not a measured HBM2 device specification. Currents and incremental command charges apply to one complete pseudo-channel, including its banks/devices. Fixed at the 300 K reference point; controller and PHY excluded. Replace with characterized values before quantitative device conclusions.",
+  "rails": [
+    {
+      "name": "estimated_core",
+      "voltage_v": 1.2,
+      "background_current_a": {
+        "precharged": 0.01,
+        "active": 0.02,
+        "power_down_active": 0.005,
+        "power_down_precharged": 0.003,
+        "self_refresh": 0.004
+      },
+      "command_charge_c": {
+        "ACT": 6e-10,
+        "PRE": 2e-10,
+        "RD": 1.5e-10,
+        "WR": 1.8e-10,
+        "REFAB": 4e-9,
+        "REFPB": 1.25e-10
+      }
+    }
+  ]
+}

@@ -39,6 +39,7 @@ from system_contract import (  # noqa: E402
     power_columns,
     thermal_components,
 )
+from thermal_manifest import artifact_path, load_manifest  # noqa: E402
 
 
 PROTOCOL_NAME = "gvsoc-power-hook"
@@ -203,9 +204,10 @@ def validate_hook_config(document: Dict[str, Any], path: Path) -> Dict[str, Any]
         raise HookError(
             f"hook configuration name must be {HOOK_CONFIG_NAME!r}"
         )
-    if discriminator.get("version") != HOOK_CONFIG_VERSION:
+    version = discriminator.get("version")
+    if isinstance(version, bool) or version not in (1, 2):
         raise HookError(
-            f"hook configuration version must be {HOOK_CONFIG_VERSION}"
+            "hook configuration version must be 1 or 2"
         )
 
     def resolved_path(name: str) -> Path:
@@ -231,16 +233,46 @@ def validate_hook_config(document: Dict[str, Any], path: Path) -> Dict[str, Any]
             default_power_w, "hook configuration.default_power_w"
         )
 
-    return {
+    config = {
         "system_config": resolved_path("system_config"),
-        "floorplan": resolved_path("floorplan"),
         "power_trace": resolved_path("power_trace"),
-        "temperature_output": resolved_path("temperature_output"),
         "temperature_history": resolved_path("temperature_history"),
         "poll_seconds": poll_seconds,
         "timeout_seconds": timeout_seconds,
         "default_power_w": default_power_w,
     }
+    if version == 1:
+        config["floorplan"] = resolved_path("floorplan")
+        config["temperature_output"] = resolved_path("temperature_output")
+    else:
+        config["thermal_manifest"] = resolved_path("thermal_manifest")
+    return config
+
+
+def thermal_outputs(config, document):
+    """Resolve per-die files and validate the transport's complete element order."""
+    if "thermal_manifest" not in config:
+        if document["contract"]["version"] != 1:
+            raise HookError("multi-die contracts require a thermal manifest")
+        return [{"id": "TOP_DIE", "temperature_output": config["temperature_output"],
+                 "elements": parse_floorplan_entries(config["floorplan"])}]
+    manifest = load_manifest(config["thermal_manifest"])
+    outputs = []
+    for die in manifest["dies"]:
+        actual = parse_floorplan_entries(artifact_path(manifest, die, "floorplan"))
+        if actual != die["elements"]:
+            raise HookError(f"floorplan order differs from manifest for {die['id']}")
+        outputs.append({"id": die["id"], "elements": actual,
+                        "temperature_output": artifact_path(manifest, die, "temperature_output")})
+    if document["contract"]["version"] == 2:
+        from system_contract import power_order_elements
+        expected = [flattened_floorplan_name(e["name"]) for e in power_order_elements(document)]
+        if manifest["power_order"] != expected:
+            raise HookError("thermal manifest power order differs from the system contract")
+        assignment = {flattened_floorplan_name(e["name"]): e["die"] for e in floorplan_elements(document)}
+        if any(assignment.get(name) != die["id"] for die in outputs for name in die["elements"]):
+            raise HookError("thermal manifest die assignment differs from the system contract")
+    return outputs
 
 
 def parse_temperature_rows(
@@ -489,17 +521,17 @@ def exchange(
         1,
     )
 
-    existing_rows = parse_temperature_rows(
-        config["temperature_output"], floorplan_entries
-    )
+    outputs = config.get("thermal_outputs") or thermal_outputs(config, document)
+    counts = [len(parse_temperature_rows(die["temperature_output"], die["elements"]))
+              for die in outputs]
+    if len(set(counts)) != 1:
+        raise HookError("die temperature outputs are not at the same completed slot")
     append_power_slot(config["power_trace"], values)
-    temperatures_k = wait_for_temperature_row(
-        config["temperature_output"],
-        floorplan_entries,
-        len(existing_rows),
-        config["poll_seconds"],
-        config["timeout_seconds"],
-    )
+    temperatures_k = []
+    for die in outputs:
+        temperatures_k.extend(wait_for_temperature_row(
+            die["temperature_output"], die["elements"], counts[0],
+            config["poll_seconds"], config["timeout_seconds"]))
     updates = component_temperatures(
         document, floorplan_entries, temperatures_k
     )
@@ -543,16 +575,16 @@ def run(args: argparse.Namespace) -> int:
     )
     document = load_contract(config["system_config"])
 
-    floorplan_entries = parse_floorplan_entries(config["floorplan"])
+    config["thermal_outputs"] = thermal_outputs(config, document)
+    floorplan_entries = [name for die in config["thermal_outputs"] for name in die["elements"]]
     power_sources = build_power_sources(document)
     validate_floorplan_entries(floorplan_entries, power_sources)
 
     if args.phase == "init":
         # Validate an already-created Tflp header when available. The server
         # creates it before advertising readiness.
-        parse_temperature_rows(
-            config["temperature_output"], floorplan_entries
-        )
+        for die in config["thermal_outputs"]:
+            parse_temperature_rows(die["temperature_output"], die["elements"])
         temperature = initial_temperature_c(document)
         updates = [
             {
@@ -564,12 +596,14 @@ def run(args: argparse.Namespace) -> int:
         # Optional additive protocol field. Old providers need not supply it.
         # Apply the stated voltage, rather than silently clamping the engine's
         # default 1.2 V to the last point of a lower-voltage technology table.
-        voltage = document.get("metadata", {}).get("power_voltage_v")
-        if voltage is not None:
-            voltage = _finite(voltage, "metadata.power_voltage_v")
-            if voltage <= 0:
-                raise HookError("metadata.power_voltage_v must be positive")
-            for update in updates:
+        for component, update in zip(thermal_components(document), updates):
+            voltage = component.get("voltage_v")
+            if voltage is None and document["contract"]["version"] == 1:
+                voltage = document.get("metadata", {}).get("power_voltage_v")
+            if voltage is not None:
+                voltage = _finite(voltage, "component voltage_v")
+                if voltage <= 0:
+                    raise HookError("component voltage_v must be positive")
                 update["voltage_v"] = voltage
         write_history(
             config["temperature_history"],
