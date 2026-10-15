@@ -271,6 +271,13 @@ class ReplayIntegrationTests(unittest.TestCase):
         self.recording = self.directory / "recording"
         record(source, self.recording)
 
+    def test_record_prefers_geometry_only_source_floorplan(self):
+        powered = FLOORPLAN.replace("discretization 5, 10;", "discretization 5, 10;\n power values 999;")
+        (self.source / "generated/3dice/floorplan.flp").write_text(powered)
+        output = self.directory / "second_recording"
+        record(self.source, output)
+        self.assertEqual((output / "floorplan.flp").read_text(), FLOORPLAN)
+
     def test_startup_retries_a_self_connected_socket(self):
         echoed = socket.socket()
         self.addCleanup(echoed.close)

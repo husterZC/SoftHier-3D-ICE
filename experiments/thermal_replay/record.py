@@ -14,6 +14,8 @@ import numpy as np
 
 from .activity import (ROOT, TEMPERATURE_GRID_C, Activity, LeakageModel, digest,
                        load_contract, read_trace, roi_from_log, thermal_components, write_json)
+from .layout import Layout, recording_files
+from thermal_manifest import copy_inputs
 
 
 def read_environment(path):
@@ -55,6 +57,7 @@ def record(run, output, start=None, end=None, whole_trace=False, layers_per_cycl
     run, output = Path(run).resolve(), Path(output).resolve()
     stack_source, variant = recording_stack(run / "generated/3dice/ice.stk", heat_transfer_coefficient)
     document = load_contract(run / "generated/system_config.json")
+    layout = Layout(run / "generated/3dice", document)
     components = thermal_components(document)
     paths = [c["path"] for c in components]
     edges, dynamic, leakage, temperatures = read_trace(run / "traces/power_hook_trace.jsonl", paths)
@@ -79,15 +82,19 @@ def record(run, output, start=None, end=None, whole_trace=False, layers_per_cycl
     np.savez_compressed(output / "activity.npz", edges_ps=edges, dynamic_w=dynamic,
                         leakage_w=leakage, input_temperatures_c=temperatures)
     shutil.copyfile(run / "generated/system_config.json", output / "system_config.json")
-    if variant is None:
-        shutil.copyfile(run / "generated/3dice/ice.stk", output / "ice.stk")
+    if layout.multidie:
+        copy_inputs(run / "generated/3dice/thermal_manifest.json", output / "thermal_manifest.json",
+                    run / "generated/3dice/ice.stk", output / "ice.stk")
+        if variant is not None:
+            copied, _ = recording_stack(output / "ice.stk", heat_transfer_coefficient)
+            (output / "ice.stk").write_text(copied)
     else:
         (output / "ice.stk").write_text(stack_source)
-    shutil.copyfile(run / "generated/3dice/floorplan_nopower.flp", output / "floorplan.flp")
+        shutil.copyfile(layout.dies[0]["floorplan"], output / "floorplan.flp")
     for name in ("workload.json", "manifest.json", "model.json"):
         if (run / "artifacts" / name).exists():
             shutil.copyfile(run / "artifacts" / name, output / ("source_" + name))
-    manifest = {"format": "softhier-thermal-replay-v1", "source_run": str(run),
+    manifest = {"format": f"softhier-thermal-replay-v{document['contract']['version']}", "source_run": str(run),
                 "source_trace_sha256": digest(run / "traces/power_hook_trace.jsonl"),
                 "source_profile": profile, "whole_trace": whole_trace,
                 "layers_per_cycle": layers_per_cycle,
@@ -95,8 +102,7 @@ def record(run, output, start=None, end=None, whole_trace=False, layers_per_cycl
                 "period_ps": end - start, "recorded_end_ps": int(edges[-1]),
                 "power_interval_ps": int(edges[1]), "temperature_grid_c": TEMPERATURE_GRID_C.tolist(),
                 "activity_assumption": "piecewise constant power in each recorded window",
-                "sha256": {name: digest(output / name) for name in
-                           ("activity.npz", "system_config.json", "ice.stk", "floorplan.flp")}}
+                "sha256": {name: digest(output / name) for name in sorted(recording_files(output, document))}}
     if variant is not None:
         manifest["thermal_variant"] = variant
     write_json(output / "recording.json", manifest)
@@ -110,6 +116,7 @@ def _capture(source_run, output, provider, start=None, end=None, layers_per_cycl
     # Reject invalid overrides before starting a potentially expensive capture.
     recording_stack(source_run / "generated/3dice/ice.stk", heat_transfer_coefficient)
     document = load_contract(source_run / "generated/system_config.json")
+    Layout(source_run / "generated/3dice", document)
     if document["metadata"]["power_model_profile"] != "constant":
         raise ValueError("capture source must use the constant power profile")
     workload = source_run / "artifacts/workload.json"
@@ -126,19 +133,34 @@ def _capture(source_run, output, provider, start=None, end=None, layers_per_cycl
     if (source_run / "artifacts/arch.py").is_file():
         environment["SIMULATOR_CONFIG"] = str(source_run / "artifacts/arch.py")
     environment["SOFTHIER_POWER_PROFILE"] = "constant"
-    for key, artifact, fallback in (
-        ("SOFTHIER_BINARY", "softhier.elf", "SOFTHIER_BINARY"),
-        ("SIMULATOR_PLATFORM", "preload.elf", "SIMULATOR_PLATFORM"),
-        ("SOFTHIER_INPUT_PRELOAD", "input.elf", "SOFTHIER_INPUT_PRELOAD"),
+    for key, artifacts in (
+        ("SOFTHIER_BINARY", ("softhier.elf", "layer.elf")),
+        ("SIMULATOR_PLATFORM", ("preload.elf",)),
+        ("SOFTHIER_INPUT_PRELOAD", ("input.elf",)),
     ):
-        path = source_run / "artifacts" / artifact
-        environment[key] = str(path if path.exists() else saved[fallback])
+        path = next((source_run / "artifacts" / name for name in artifacts
+                     if (source_run / "artifacts" / name).is_file()), None)
+        environment[key] = str(path) if path is not None else saved.get(key, "")
+        if key == "SOFTHIER_INPUT_PRELOAD" and not environment[key]:
+            continue
         if not Path(environment[key]).is_file():
             raise ValueError(f"missing captured workload artifact: {environment[key]}")
     output.mkdir(parents=True, exist_ok=False)
     for subdir in ("generated/3dice", "traces", "logs", "state", "results/simulator", "artifacts"):
         (output / subdir).mkdir(parents=True, exist_ok=True)
     shutil.copytree(source_run / "generated/3dice", output / "generated/3dice", dirs_exist_ok=True)
+    if document["contract"]["version"] == 2:
+        copy_inputs(source_run / "generated/3dice/thermal_manifest.json",
+                    output / "generated/3dice/thermal_manifest.json",
+                    source_run / "generated/3dice/ice.stk", output / "generated/3dice/ice.stk")
+        for stem in ("thermal", "dram_power"):
+            source = source_run / "artifacts" / f"{stem}_config.json"
+            target = output / "artifacts" / f"{stem}_config.json"
+            if source.is_file():
+                shutil.copyfile(source, target)
+            else:
+                write_json(target, document["metadata"][f"{stem}_config"])
+            environment[f"SOFTHIER_{stem.upper()}_CONFIG"] = str(target)
     for name in ("workload.json", "manifest.json", "model.json"):
         if (source_run / "artifacts" / name).exists():
             shutil.copyfile(source_run / "artifacts" / name, output / "artifacts" / name)
@@ -153,12 +175,19 @@ def _capture(source_run, output, provider, start=None, end=None, layers_per_cycl
         subprocess.run([str(provider), "export-system"], env=environment, check=True,
                        stdout=log, stderr=subprocess.STDOUT)
     current = load_contract(environment["SYSTEM_CONFIG_FILE"])
-    for key in ("metadata", "geometry", "floorplan", "power_trace", "thermal_feedback"):
-        if current[key] != document[key]:
+    for key in ("metadata", "geometry", "floorplan", "power_trace", "thermal_feedback", "thermal_stack"):
+        if current.get(key) != document.get(key):
             raise ValueError(f"current simulator {key} differs from archived capture model")
     shutil.copyfile(source_run / "generated/system_config.json", output / "generated/system_config.json")
-    updates = [{"path": c["path"], "temperature_c": document["thermal_feedback"]["initial_temperature_c"],
-                "voltage_v": document["metadata"]["power_voltage_v"]} for c in thermal_components(document)]
+    updates = []
+    for component in thermal_components(document):
+        update = {"path": component["path"], "temperature_c": document["thermal_feedback"]["initial_temperature_c"]}
+        voltage = component.get("voltage_v")
+        if document["contract"]["version"] == 1:
+            voltage = document["metadata"]["power_voltage_v"]
+        if voltage is not None:
+            update["voltage_v"] = voltage
+        updates.append(update)
     config = output / "generated/record_hook.json"
     write_json(config, {"temperatures": updates})
     # A wrapper pins the interpreter and works even if the checked-out hook has

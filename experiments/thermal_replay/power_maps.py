@@ -2,7 +2,7 @@
 
 import argparse
 import csv
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from decimal import Decimal, InvalidOperation
 import gzip
 import json
@@ -13,10 +13,10 @@ import re
 
 import numpy as np
 
-from .activity import digest, write_json
+from .activity import digest, load_recording_inputs, write_json
 from .plot_stack import NUMBER, output_directory, read_stack, uncomment
 from .replay import Mapping
-from system_contract import load_contract, thermal_components
+from system_contract import thermal_components
 
 
 GEOMETRY = ("name", "x_um", "y_um", "width_um", "height_um")
@@ -91,6 +91,7 @@ class Snapshot:
     dynamic: np.ndarray
     stack: dict
     metadata: dict
+    layout: object
 
 
 def read_snapshot(run, seconds="1"):
@@ -107,23 +108,23 @@ def read_snapshot(run, seconds="1"):
     if not recording.is_absolute():
         recording = run / recording
     recording = recording.resolve()
-    manifest = json.loads((recording / "recording.json").read_text())
-    require(manifest.get("format") == "softhier-thermal-replay-v1", "unsupported recording format")
+    manifest, document = load_recording_inputs(recording)
     checksums = manifest["sha256"]
     require(checksums == summary["recording_sha256"], "recording checksums differ from the replay")
-    require(set(checksums) == {"activity.npz", "system_config.json", "ice.stk", "floorplan.flp"},
-            "recording is missing required checksums")
-    for name, checksum in checksums.items():
-        require(digest(recording / name) == checksum, f"recording checksum mismatch: {name}")
-    require(digest(run / "floorplan.flp") == checksums["floorplan.flp"], "runtime floorplan differs from recording")
-    document = load_contract(recording / "system_config.json")
     components = json.loads((run / "components.json").read_text())
     paths = manifest["component_paths"]
     require(components["paths"] == paths and components["mapping"] == thermal_components(document),
             "replay component mapping differs from recording")
     require(paths == [c["path"] for c in components["mapping"]], "component column order differs from contract")
-    mapping = Mapping(document, run / "floorplan.flp")
-    blocks = floorplan_blocks((run / "floorplan.flp").read_text())
+    mapping = Mapping(document, run)
+    for path in mapping.layout.inputs:
+        require(digest(path) == checksums[path.name], f"runtime thermal input differs from recording: {path.name}")
+    blocks = []
+    for die in mapping.layout.dies:
+        for region, body in floorplan_blocks(die["floorplan"].read_text()):
+            if mapping.layout.multidie:
+                region["die"] = die["id"]
+            blocks.append((region, body))
     require([r["name"] for r, _ in blocks] == mapping.entries, "floorplan region order differs from mapping")
     stack = read_stack(run / "ice.stk")
     require(time_ps(stack["slot_seconds"]) == slot and time_ps(stack["step_seconds"]) == summary["step_ps"],
@@ -150,8 +151,8 @@ def read_snapshot(run, seconds="1"):
     require(np.isclose(regional_total.sum(), sum(sums), rtol=1e-9, atol=1e-10), "regional total power mismatch")
     regions = [{**geometry, **dict(zip(POWERS, map(float, values)))} for (geometry, _), values in
                zip(blocks, zip(regional_dynamic, regional_leakage, mapping.constants, regional_total))]
-    source_names = ("summary.json", "components.json", "ice.stk", "floorplan.flp", "timeseries.csv",
-                    "dynamic_power_w.csv.gz", "leakage_power_w.csv.gz")
+    source_names = ("summary.json", "components.json", "ice.stk", "timeseries.csv",
+                    "dynamic_power_w.csv.gz", "leakage_power_w.csv.gz", *[p.name for p in mapping.layout.inputs])
     batch = re.search(r"_b(\d+)_(?:constant|temperature_aware)$", Path(manifest.get("source_run", "")).name)
     metadata = {"run": str(run), "recording": str(recording), "profile": summary["profile"],
                 "time_ps": target, "time_seconds": target * 1e-12,
@@ -164,7 +165,19 @@ def read_snapshot(run, seconds="1"):
                 "heat_transfer_coefficient_w_per_m2_k": stack["heat_transfer_coefficient_w_per_m2_k"],
                 "recording_sha256": checksums, "source_sha256": {name: digest(run / name) for name in source_names},
                 "power_unit": "W", "geometry_unit": "um", "sample_kind": "mean power over the interval ending at time_ps"}
-    return Snapshot(run, recording, blocks, regions, dynamic, stack, metadata)
+    metadata["die_ids"] = [die["id"] for die in mapping.layout.dies]
+    return Snapshot(run, recording, blocks, regions, dynamic, stack, metadata, mapping.layout)
+
+
+def select_snapshot(snapshot, die):
+    """Select a physical die, retaining package totals as explicit provenance."""
+    indices = [i for i, r in enumerate(snapshot.regions) if r.get("die", "TOP_DIE") == die["id"]]
+    regions = [snapshot.regions[i] for i in indices]
+    totals = {field: sum(r[field] for r in regions) for field in POWERS}
+    metadata = {**snapshot.metadata, **totals, "die": die["id"], "region_count": len(regions),
+                "package_total_w": snapshot.metadata["total_w"],
+                "average_power_density_w_per_mm2": totals["total_w"] / snapshot.metadata["chip_area_mm2"]}
+    return replace(snapshot, regions=regions, blocks=[snapshot.blocks[i] for i in indices], metadata=metadata)
 
 
 def write_flp(path, snapshot):
@@ -182,12 +195,19 @@ def write_csv(path, rows):
         writer.writerows(rows)
 
 
-def export(run, output, seconds="1"):
+def export(run, output, seconds="1", die=None):
     snapshot = read_snapshot(run, seconds)
+    selected = snapshot.layout.select(die)
     output = output_directory(output, [snapshot.run, snapshot.recording])
-    write_flp(output / "power_map.flp", snapshot)
-    write_csv(output / "power_map_regions.csv", snapshot.regions)
-    write_json(output / "metadata.json", snapshot.metadata)
+    for item in selected:
+        current = select_snapshot(snapshot, item) if snapshot.layout.multidie else snapshot
+        directory = output / item["id"].lower() if snapshot.layout.multidie else output
+        directory.mkdir(exist_ok=True)
+        write_flp(directory / "power_map.flp", current)
+        write_csv(directory / "power_map_regions.csv", current.regions)
+        write_json(directory / "metadata.json", current.metadata)
+    if snapshot.layout.multidie:
+        write_json(output / "metadata.json", {**snapshot.metadata, "selected_dies": [d["id"] for d in selected]})
     return snapshot.metadata
 
 
@@ -201,12 +221,33 @@ def validate_pair(constant, aware):
             [[r[k] for k in GEOMETRY] for r in aware.regions], "paired floorplan geometry differs")
     require(np.allclose(constant.dynamic, aware.dynamic, rtol=1e-9, atol=1e-12),
             "paired component dynamic activity differs at the selected time")
+    for before, after in zip(constant.regions, aware.regions):
+        if before.get("die") == "DRAM_DIE":
+            require(np.isclose(before["leakage_w"], after["leakage_w"], rtol=1e-9, atol=1e-12),
+                    "paired DRAM background differs at the selected time")
 
 
-def plot(constant_run, aware_run, output, seconds="1"):
+def plot(constant_run, aware_run, output, seconds="1", die=None):
     constant, aware = (read_snapshot(run, seconds) for run in (constant_run, aware_run))
     validate_pair(constant, aware)
+    selected = aware.layout.select(die)
     output = output_directory(output, [constant.run, constant.recording, aware.run, aware.recording])
+    pairs = [(select_snapshot(constant, d), select_snapshot(aware, d)) for d in selected] if aware.layout.multidie else [(constant, aware)]
+    vmax = max(10., math.ceil(max(r["total_w"] * 1000 for pair in pairs for s in pair for r in s.regions) / 10) * 10)
+    figures = {}
+    for d, (c, a) in zip(selected, pairs):
+        directory = output / d["id"].lower() if aware.layout.multidie else output
+        directory.mkdir(exist_ok=True)
+        figures[d["id"]] = plot_pair(c, a, directory, vmax)
+    if not aware.layout.multidie:
+        return figures[selected[0]["id"]]
+    metadata = {"constant": constant.metadata, "temperature_aware": aware.metadata,
+                "colormap": "turbo", "scale": "linear", "color_limits_mw": [0, vmax], "per_die": figures}
+    write_json(output / "plot_metadata.json", metadata)
+    return metadata
+
+
+def plot_pair(constant, aware, output, vmax):
     os.environ.setdefault("MPLCONFIGDIR", "/tmp/thermal-replay-analysis-mpl")
     import matplotlib
     matplotlib.use("Agg")
@@ -216,13 +257,13 @@ def plot(constant_run, aware_run, output, seconds="1"):
     from matplotlib.patches import Rectangle
     from matplotlib.ticker import MaxNLocator
 
-    vmax = max(10., math.ceil(max(r["total_w"] * 1000 for s in (constant, aware) for r in s.regions) / 10) * 10)
     norm = Normalize(0, vmax)
     m = aware.metadata
     length, width = (v / 1000 for v in m["footprint_um"])
     with plt.rc_context({"font.family": "DejaVu Sans", "pdf.fonttype": 42, "svg.fonttype": "none"}):
         fig = plt.figure(figsize=(13.2, 7.0))
-        fig.text(.075, .951, f'Chip power at t = {m["time_seconds"]:g} s', fontsize=21, weight="bold")
+        title = m.get("die", "Chip").replace("_", " ")
+        fig.text(.075, .951, f'{title} power at t = {m["time_seconds"]:g} s', fontsize=21, weight="bold")
         workload = f'B{m["batch"]} replay' if m["batch"] else "Thermal replay"
         fig.text(.075, .905, f'{workload} · h = {m["heat_transfer_coefficient_w_per_m2_k"]:,.0f} W/(m²·K)',
                  fontsize=11.5, color="#536170")
@@ -235,19 +276,21 @@ def plot(constant_run, aware_run, output, seconds="1"):
             collection.set_array(np.array([r["total_w"] * 1000 for r in snapshot.regions]))
             axis.add_collection(collection)
             axis.set(xlim=(0, length), ylim=(0, width), xlabel="x (mm)", ylabel="y (mm)", aspect="equal")
-            axis.xaxis.set_major_locator(MaxNLocator(nbins=6))
+            axis.xaxis.set_major_locator(MaxNLocator(nbins=3 if length < .75 * width else 6))
             axis.yaxis.set_major_locator(MaxNLocator(nbins=6))
             s = snapshot.metadata
             fig.text(x + .1775, .862, title, fontsize=13, weight="bold", ha="center")
             fig.text(x + .1775, .826, f'Total power: {s["total_w"]:.3f} W | Avg. density: '
                      f'{s["average_power_density_w_per_mm2"]:.3f} W/mm²', fontsize=11.5, ha="center")
-            split = f'Dynamic: {s["dynamic_w"]:.3f} W | Leakage: {s["leakage_w"]:.3f} W'
+            dynamic_label, leakage_label = ("Commands", "Background") if m.get("die") == "DRAM_DIE" else ("Dynamic", "Leakage")
+            split = f'{dynamic_label}: {s["dynamic_w"]:.3f} W | {leakage_label}: {s["leakage_w"]:.3f} W'
             if s["constant_w"]:
                 split += f' | Fixed: {s["constant_w"]:.3f} W'
             fig.text(x + .1775, .790, split, fontsize=11, ha="center")
         fig.colorbar(collection, cax=fig.add_axes([.891, .203, .017, .544]), label="Region power (mW)")
         fixed = " + fixed" if constant.metadata["constant_w"] or m["constant_w"] else ""
-        fig.text(.075, .086, f"Dynamic + leakage{fixed} power in each floorplan region · shared linear turbo scale",
+        categories = "Command + background" if m.get("die") == "DRAM_DIE" else "Dynamic + leakage"
+        fig.text(.075, .086, f"{categories}{fixed} power in each floorplan region · shared linear turbo scale",
                  fontsize=11, color="#536170")
         fig.text(.075, .049, f'Interval: {m["interval_start_ps"] * 1e-12:g}–{m["time_seconds"]:g} s'
                  f' · Footprint: {length:.3f} × {width:.3f} mm²', fontsize=10.5, color="#536170")
@@ -275,14 +318,15 @@ def main(argv=None):
     paired.add_argument("--constant-run", type=Path, required=True)
     paired.add_argument("--aware-run", type=Path, required=True)
     for command in (single, paired):
+        command.add_argument("--die", help="Select a thermal die ID; default: all dies in separate directories")
         command.add_argument("--time-seconds", default="1", help="Exact saved interval end in seconds (default: 1)")
         command.add_argument("--output", type=Path, required=True, help="Output directory outside source runs/recordings")
     args = parser.parse_args(argv)
     try:
         if args.command == "export":
-            export(args.run, args.output, args.time_seconds)
+            export(args.run, args.output, args.time_seconds, args.die)
         else:
-            plot(args.constant_run, args.aware_run, args.output, args.time_seconds)
+            plot(args.constant_run, args.aware_run, args.output, args.time_seconds, args.die)
     except (ValueError, OSError, KeyError, EOFError) as error:
         parser.exit(1, f"Power map failed: {error}\n")
     print(f"Saved {args.command} outputs in {args.output}")

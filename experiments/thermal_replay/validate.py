@@ -6,17 +6,18 @@ from pathlib import Path
 import numpy as np
 
 from .activity import LeakageModel, load_contract, load_recording, read_trace, thermal_components, write_json
+from .replay import Mapping
 
 
 def validate_leakage(constant_run, aware_run):
     constant_run, aware_run = Path(constant_run), Path(aware_run)
     document = load_contract(constant_run / "generated/system_config.json")
     aware_document = load_contract(aware_run / "generated/system_config.json")
-    for field in ("geometry", "floorplan", "thermal_feedback"):
-        if document[field] != aware_document[field]:
+    for field in ("geometry", "floorplan", "thermal_feedback", "thermal_stack"):
+        if document.get(field) != aware_document.get(field):
             raise ValueError(f"paired runs differ in {field}")
-    for field in ("power_model_specs", "technology_node", "power_voltage_v", "power_frequency_hz", "components"):
-        if document["metadata"][field] != aware_document["metadata"][field]:
+    for field in ("power_model_specs", "technology_node", "power_voltage_v", "power_frequency_hz", "components", "dram_power_config"):
+        if document["metadata"].get(field) != aware_document["metadata"].get(field):
             raise ValueError(f"paired runs differ in {field}")
     if (document["metadata"]["power_model_profile"] != "constant" or
             aware_document["metadata"]["power_model_profile"] != "temperature_aware"):
@@ -44,11 +45,11 @@ def compare_replay(replay_output, reference_run, single_pass=False):
     summary = json.loads((replay_output / "summary.json").read_text())
     document = load_contract(reference_run / "generated/system_config.json")
     recording, replay_document, _ = load_recording(summary["recording"])
-    for field in ("geometry", "floorplan", "thermal_feedback"):
-        if replay_document[field] != document[field]:
+    for field in ("geometry", "floorplan", "thermal_feedback", "thermal_stack"):
+        if replay_document.get(field) != document.get(field):
             raise ValueError(f"replay and reference differ in {field}")
-    for field in ("power_model_specs", "technology_node", "power_voltage_v", "power_frequency_hz", "components"):
-        if replay_document["metadata"][field] != document["metadata"][field]:
+    for field in ("power_model_specs", "technology_node", "power_voltage_v", "power_frequency_hz", "components", "dram_power_config"):
+        if replay_document["metadata"].get(field) != document["metadata"].get(field):
             raise ValueError(f"replay and reference differ in {field}")
     profile = recording["source_profile"] if summary["profile"] == "recorded" else summary["profile"]
     if profile != document["metadata"]["power_model_profile"]:
@@ -80,13 +81,16 @@ def compare_replay(replay_output, reference_run, single_pass=False):
     if paths != replay_components["paths"]:
         raise ValueError("reference and replay component order differs")
     edges, dynamic, leakage, _ = read_trace(reference_run / "traces/power_hook_trace.jsonl", paths)
-    reference_energy = float(np.sum((dynamic + leakage) * np.diff(edges)[:, None] * 1e-12))
+    reference_components = {k: np.sum(values * np.diff(edges)[:, None] * 1e-12, axis=0)
+                            for k, values in (("dynamic", dynamic), ("leakage", leakage))}
+    reference_energy = float(sum(values.sum() for values in reference_components.values()))
     replay_energy = summary["dynamic_energy_j"] + summary["leakage_energy_j"]
-    energy_error = abs(replay_energy / reference_energy - 1)
-    reference_temps = np.loadtxt(reference_run / "results/3dice/output_top_die_flp_avg.txt", comments="%", ndmin=2)
-    actual_temps = np.loadtxt(replay_output / "floorplan_temperatures.txt", comments="%", ndmin=2)
-    if actual_temps.shape[1] != reference_temps.shape[1]:
-        raise ValueError("reference and replay floorplan output widths differ")
+    def relative_error(actual, expected):
+        return float(np.max(np.abs(actual - expected) / np.maximum(np.abs(expected), 1e-15)))
+    energy_error = relative_error(replay_energy, reference_energy)
+    mapping = Mapping(replay_document, replay_output)
+    reference_layout = Mapping(document, reference_run / "generated/3dice").layout
+    per_die = {}
     # Check names too: width alone cannot detect a permuted floorplan.
     def header(path):
         with path.open() as stream:
@@ -94,9 +98,33 @@ def compare_replay(replay_output, reference_run, single_pass=False):
                 if line.startswith("%") and "Time(s)" in line:
                     return line.split()[2:]
         raise ValueError(f"missing Tflp header: {path}")
-    if header(reference_run / "results/3dice/output_top_die_flp_avg.txt") != header(replay_output / "floorplan_temperatures.txt"):
-        raise ValueError("reference and replay floorplan order differs")
-    peak_error = float(abs(actual_temps[:, 1:].max() - reference_temps[:, 1:].max()))
+    with np.load(replay_output / "final_state.npz") as final:
+        component_errors = {k: relative_error(final[k + "_energy_j"], values)
+                            for k, values in reference_components.items()}
+        for die, reference_die in zip(mapping.layout.dies, reference_layout.dies):
+            actual_path = replay_output / die["temperature_output"]
+            reference_path = reference_run / "results/3dice" / (
+                reference_die["temperature_output"] if reference_layout.multidie else "output_top_die_flp_avg.txt")
+            actual_temps = np.loadtxt(actual_path, comments="%", ndmin=2)
+            reference_temps = np.loadtxt(reference_path, comments="%", ndmin=2)
+            if (header(reference_path) != header(actual_path) or actual_temps.shape[1] != reference_temps.shape[1]
+                    or not np.isfinite(actual_temps).all() or not np.isfinite(reference_temps).all()):
+                raise ValueError("reference and replay floorplan order or temperatures differ")
+            peak_error = float(abs(actual_temps[:, 1:].max() - reference_temps[:, 1:].max()))
+            group = mapping.component_groups[die["id"]]
+            expected = float(sum(values[group].sum() for values in reference_components.values()))
+            actual = float(sum(final[k + "_energy_j"][group].sum() for k in reference_components))
+            result = {"reference_component_energy_j": expected, "replay_component_energy_j": actual,
+                      "relative_energy_error": relative_error(actual, expected), "peak_temperature_error_c": peak_error}
+            result["passed"] = result["relative_energy_error"] <= .01 and peak_error <= .1
+            if single_pass:
+                same_times = actual_temps.shape == reference_temps.shape and np.allclose(
+                    actual_temps[:, 0], reference_temps[:, 0], rtol=0, atol=1e-10)
+                result["all_temperature_rows_max_error_c"] = (
+                    float(abs(actual_temps[:, 1:] - reference_temps[:, 1:]).max()) if same_times else None)
+                result["passed"] &= same_times and result["all_temperature_rows_max_error_c"] <= .1
+            per_die[die["id"]] = result
+    peak_error = max(d["peak_temperature_error_c"] for d in per_die.values())
     report = {"replay_output": str(replay_output.resolve()), "reference_run": str(reference_run.resolve()),
               "reference_energy_j": reference_energy, "replay_energy_j": replay_energy,
               "relative_energy_error": energy_error, "peak_temperature_error_c": peak_error,
@@ -104,13 +132,12 @@ def compare_replay(replay_output, reference_run, single_pass=False):
               "replay_duration_seconds": summary["simulated_seconds"],
               "replay_host_seconds": summary["host_seconds"], "status": summary["status"],
               "energy_tolerance": .01, "peak_temperature_tolerance_c": .1,
-              "passed": summary["status"] == "complete" and energy_error <= .01 and peak_error <= .1}
+              "per_die": per_die, "component_relative_energy_error": component_errors,
+              "passed": summary["status"] == "complete" and energy_error <= .01
+                        and all(d["passed"] for d in per_die.values()) and max(component_errors.values()) <= .01}
     if single_pass:
-        same_shape = actual_temps.shape == reference_temps.shape
-        same_times = same_shape and np.allclose(actual_temps[:, 0], reference_temps[:, 0], rtol=0, atol=1e-10)
-        report["all_temperature_rows_max_error_c"] = (
-            float(abs(actual_temps[:, 1:] - reference_temps[:, 1:]).max()) if same_times else None)
-        report["passed"] &= same_times and report["all_temperature_rows_max_error_c"] <= .1
+        errors = [d["all_temperature_rows_max_error_c"] for d in per_die.values()]
+        report["all_temperature_rows_max_error_c"] = None if None in errors else max(errors)
     timing = reference_run / "results/simulator/timing.json"
     if timing.exists():
         original_seconds = json.loads(timing.read_text()).get("host_seconds")

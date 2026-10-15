@@ -5,14 +5,86 @@ one persistent 3D-ICE process. Temperature-aware replay recomputes leakage every
 power slot while retaining the complete die and package thermal state. Startup
 runs once and the heating curve begins at the archived initial temperature.
 
-New `llm_decode` source runs use the default 11-layer thermal package and
-**h = 15000 W/(m²·K)**, matching the prepared B1/B8 recordings below.
+`llm_decode` source runs use the 11-layer single-die thermal package.
+[`llm_dram3d`](../llm_dram3d/README.md) source runs use the 15-layer memory-on-logic
+package with **LOGIC_DIE + DRAM_DIE**. Both default to **h = 15000 W/(m²·K)**.
 `capture` and `record` preserve the source run's physical stack and cooling
 coefficient unless `--heat-transfer-coefficient` overrides the latter.
 Replay uses the recording's archived stack; changing repository defaults does
 not alter existing recordings or results.
 
-## Run the prepared B1 and B8 workloads
+## Replay memory-on-logic B1 and B8 workloads
+
+Use the constant-profile source for each batch from an `llm_dram3d` study.
+The old B1/B8 recordings below remain single-die inputs; replay does not add a
+DRAM die to them. Import a complete source trace with the existing CLI:
+
+```bash
+python -m experiments.thermal_replay record \
+  --run path/to/constant_source_run \
+  --output runs/thermal_replay/recording_dram3d_b1 \
+  --layers-per-cycle 1 \
+  --layer-start-ps START_PS --layer-end-ps END_PS
+```
+
+Replace `START_PS` and `END_PS` with exact absolute timer bounds from that
+workload. Omit both options only when the source log contains the two
+`THERMAL_REPLAY_ROI_*_PS` markers. Stage cycle totals are durations and cannot
+identify the absolute start. Set `--layers-per-cycle` to the source's repeat
+count. Repeat the import for B8 with its own source and measured bounds.
+
+If a source lacks a complete hook trace, use `capture --source-run ...` instead
+of `record --run ...`; the archive will be under `OUTPUT/recording`. Capture
+accepts DRAM3D's `layer.elf`, combined `preload.elf`, and empty optional input
+preload. It carries the archived thermal/electrical configurations into the
+provider, initializes only logic components to their logic voltage, and requires
+the current exported model to match the archived contract.
+
+After creating both recordings:
+
+```bash
+(
+  set -e
+  replay_tag=$(date -u +%Y%m%d_%H%M%S)
+  for batch in 1 8; do
+    for replay_profile in temperature_aware constant; do
+      python -m experiments.thermal_replay replay \
+        --recording "runs/thermal_replay/recording_dram3d_b${batch}" \
+        --output "runs/thermal_replay/dram3d_b${batch}_${replay_profile}_${replay_tag}" \
+        --profile "$replay_profile" --thermal-step 2e-05 --max-seconds 1
+    done
+    python -m experiments.thermal_replay.analyze \
+      --constant-run "runs/thermal_replay/dram3d_b${batch}_constant_${replay_tag}" \
+      --aware-run "runs/thermal_replay/dram3d_b${batch}_temperature_aware_${replay_tag}" \
+      --output "experiments/thermal_replay/results/dram3d_b${batch}_${replay_tag}" \
+      --animations
+  done
+)
+```
+
+The version-2 recording includes `thermal_manifest.json`, both floorplans,
+the actual stack with relative floorplan paths, the contract, activity arrays,
+and checksums for every required input. It is portable without its source run.
+The native source order comes from the contract and manifest (logic then DRAM).
+Each temperature inspection point is checked by filename and region names,
+so output ordering cannot silently swap the dies.
+
+Logic uses dynamic power plus constant or temperature-dependent leakage.
+For DRAM, the trace's `dynamic_w` is command power and `leakage_w` is
+state-dependent background power. Both repeat exactly from the trace, including
+changes in background power over time. Neither receives a logic temperature
+multiplier. DRAM remains at its archived **fixed electrical characterization**;
+replay does not add temperature-dependent DRAM refresh, timing, or leakage.
+
+`summary.json` adds `per_die` energy and temperature totals; `die_timeseries.csv`
+adds per-slot die powers and peak component temperatures. Aggregate fields keep
+their original names: dynamic includes DRAM commands and leakage includes DRAM
+background. Native temperature filenames come from the manifest. The analyzer
+adds per-die comparisons, maps, floorplans, and `die_summary.csv`, plus four turbo
+GIFs (two dies × two profiles) when requested. Separate die maps share one
+temperature scale; overlapping footprints are never drawn on top of one another.
+
+## Run the prepared single-die B1 and B8 workloads
 
 Run commands from the repository root. These recordings are local experiment
 data, not files distributed through Git. Copy the portable recording directories
@@ -80,7 +152,7 @@ when the requested blocks need longer. Replay does not judge convergence or stop
 because temperatures become stable.
 
 `summary.json` reports `time_limit`, `complete` (fixed count or single pass),
-`model_limit`, `interrupted`, or `failure`. Feedback temperatures above the
+`model_limit`, `interrupted`, or `failure`. Logic feedback temperatures above the
 archived leakage-table maximum (125 °C here) stop with `model_limit`. Exit codes
 are 0 for normal completion or a time cap, 2 for a model limit or failed
 validation, 1 for an execution error, and 130 for interruption.
@@ -195,11 +267,13 @@ Replay outputs include:
 unnecessary for the floorplan GIFs. Interrupting replay closes the native server
 and retains completed histories plus an explicit status.
 
-The analyzer creates six PNG/PDF figures, metrics and validation CSVs, an HTML
-report, and optional paired GIFs. It checks matching recording, solver settings,
+The single-die analyzer creates six PNG/PDF figures, metrics and validation CSVs,
+an HTML report, and optional paired GIFs. Multi-die runs add the die-specific
+outputs described above. It checks matching recording, solver settings,
 geometry, duration, and per-component dynamic activity, along with integrated
-energy, temperature histories, and map-to-component temperatures. Recordings
-must remain available. Single-pass validation traces are not supported by this
+energy, temperature histories, and map-to-component temperatures. Paired multi-die
+reports also check that every DRAM background sample agrees between profiles.
+Recordings must remain available. Single-pass validation traces are not supported by this
 paired-analysis entry point.
 
 Metrics and the comparison figure use every saved sample. Comparison powers
@@ -291,6 +365,14 @@ chip-average power density in W/mm², and absolute dynamic/leakage powers in W.
 Nonzero fixed power is shown separately. Average density uses the full chip
 footprint from the runtime stack, not the sum of selected component areas.
 
+For multi-die runs, both commands process all dies by default and put their
+outputs in `logic_die/` and `dram_die/` subdirectories. Add `--die LOGIC_DIE`
+or `--die DRAM_DIE` to select one. The selected die's total power and density
+use that die's power over the common footprint; package totals remain in the
+metadata. DRAM panels label their split **Commands / Background**. All selected
+dies and profiles share the same turbo power scale. No multi-die powers are
+collapsed into a single overlapping FLP.
+
 `--time-seconds` defaults to 1 and must match a saved power-slot endpoint exactly.
 For a 20 µs slot, the sample at 1 s is the mean power applied over
 **0.99998–1.00000 s**. No interpolation or temperature-based power reconstruction
@@ -322,8 +404,12 @@ inside the bottom block. Consecutive compatible TIM and PCB layers are merged
 for presentation only. The current stack becomes Heatsink (50 µm), TIM (30 µm),
 Silicon die (50 µm), Bumps (50 µm), and PCB (1000 µm). JSON retains all 11 physical
 layers, material properties, cooling settings, source hash, and schematic groups.
-Generator-style passive layers and single-source dies are supported; unsupported
-stack elements or multi-layer die definitions are rejected instead of omitted.
+Source-plus-bulk die definitions are supported and merged into one schematic
+block per die. The default memory-on-logic package has 15 physical layers,
+1235 µm total: Heatsink (50 µm), TIM (30 µm), DRAM die (50 µm), Face-to-face
+bond (5 µm), Logic die (50 µm), Bumps (50 µm), and PCB (1000 µm). JSON retains
+each physical source/bulk sublayer. Unsupported elements and ambiguous source
+definitions are rejected instead of omitted.
 
 The main analyzer's comparison figure has four panels: peak temperature, total
 power, constant-case dynamic/leakage power, and temperature-aware dynamic/leakage

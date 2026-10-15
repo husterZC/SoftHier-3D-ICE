@@ -199,7 +199,7 @@ chip__logic :
         path = self.recording / "ice.stk"
         original = path.read_text()
         for text in (original.replace("TIM_LAYER ;", "UNKNOWN ;", 1),
-                     original.replace("source  50 SILICON ;", "source 50 SILICON ; layer 50 SILICON ;"),
+                     original.replace("source  50 SILICON ;", "source 50 SILICON ; source 50 SILICON ;"),
                      original.replace("height 7.5", "height -7.5")):
             with self.subTest(text=text):
                 path.write_text(text)

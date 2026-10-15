@@ -11,20 +11,32 @@ import time
 
 import numpy as np
 
+from .activity import load_contract
+from .layout import Layout
+from thermal_manifest import copy_inputs
 EXIT, OUTPUT, COUNT, POWERS, SLOT, STATE = 0, 2, 4, 5, 6, 10
 
 
 def prepare_stack(recording, output, dense_maps=False, factorization_threads=1, thermal_step=None):
     """Prepare replay inputs, defaulting to one thermal step per power slot."""
-    source = (Path(recording) / "ice.stk").read_text()
-    floorplans = re.findall(r'\bfloorplan\s+"[^"]+"', source)
-    if len(floorplans) != 1:
-        raise ValueError("replay currently requires a single powered die/floorplan")
-    match = re.search(r'\bdie\s+(\w+)\s+\w+\s+floorplan\s+"', source)
-    if not match:
-        raise ValueError("cannot identify powered die in archived stack")
-    die = match[1]
-    source = re.sub(r'\bfloorplan\s+"[^"]+"', 'floorplan "floorplan.flp"', source)
+    recording, output = Path(recording), Path(output)
+    # prepare_stack is also used directly by legacy callers with only stack/FLP.
+    contract = recording / "system_config.json"
+    multidie = contract.is_file() and load_contract(contract)["contract"]["version"] == 2
+    if multidie:
+        layout = Layout(recording, load_contract(contract))
+        copy_inputs(recording / "thermal_manifest.json", output / "thermal_manifest.json",
+                    recording / "ice.stk", output / "ice.stk")
+        source = (output / "ice.stk").read_text()
+        dies = layout.dies
+    else:
+        source = (recording / "ice.stk").read_text()
+        matches = re.findall(r'\bdie\s+(\w+)\s+\w+\s+floorplan\s+"', source)
+        if len(matches) != 1:
+            raise ValueError("cannot identify a single powered die without a multi-die manifest")
+        source = re.sub(r'\bfloorplan\s+"[^"]+"', 'floorplan "floorplan.flp"', source)
+        dies = [{"id": matches[0], "temperature_output": "floorplan_temperatures.txt", "map_output": "temperature_map.txt"}]
+        (output / "floorplan.flp").write_bytes((recording / "floorplan.flp").read_bytes())
     # SuperLU_MT's parallel factorization intermittently produced incorrect
     # zero-power solutions on small grids in validation. Use its serial path
     # by default; this changes execution concurrency, not thermal parameters.
@@ -42,15 +54,13 @@ def prepare_stack(recording, output, dense_maps=False, factorization_threads=1, 
     if step_ps <= 0 or slot_ps < step_ps or slot_ps % step_ps:
         raise ValueError("thermal slot must be an integer multiple of the integration step")
     source = source[:solver.start(1)] + f"{step_ps / 1e12:.12g}" + source[solver.end(1):]
-    source, count = re.subn(r"\boutput\s*:.*\Z", "output:\n" +
-                           f' Tflp({die}, "floorplan_temperatures.txt", average, slot);\n' +
-                           (f' Tmap({die}, "temperature_map.txt", slot);\n' if dense_maps else ""),
+    outputs = "".join(f' Tflp({die["id"]}, "{die["temperature_output"]}", average, slot);\n' +
+                      (f' Tmap({die["id"]}, "{die["map_output"]}", slot);\n' if dense_maps else "") for die in dies)
+    source, count = re.subn(r"\boutput\s*:.*\Z", "output:\n" + outputs,
                            source, flags=re.S)
     if count != 1:
         raise ValueError("missing stack output section")
-    output = Path(output)
     (output / "ice.stk").write_text(source)
-    (output / "floorplan.flp").write_bytes((Path(recording) / "floorplan.flp").read_bytes())
     return step_ps, slot_ps
 
 
@@ -133,20 +143,36 @@ class IceClient:
 
     def temperatures(self, expected_entries):
         payload = self.exchange(OUTPUT, struct.pack("=III", 2, 2, 1))  # slot/Tflp/average
-        if len(payload) < 20:
+        if len(payload) < 8:
             raise RuntimeError("missing Tflp inspection point")
-        _, count, filename_len, header_len, width = struct.unpack_from("=fIIII", payload)
-        if count != 1 or width != len(expected_entries):
-            raise RuntimeError("unexpected Tflp output count or width")
-        offset = 20 + ((filename_len + 3) // 4) * 4
-        header = payload[offset:offset + header_len].decode()
-        names = re.findall(r"([^\s]+)\(K\)", header)
-        if names != expected_entries:
-            raise RuntimeError("Tflp order differs from the recording floorplan")
-        offset += ((header_len + 3) // 4) * 4
-        if len(payload) != offset + 4 * width:
+        dies = expected_entries if expected_entries and isinstance(expected_entries[0], dict) else [
+            {"temperature_output": "floorplan_temperatures.txt", "elements": expected_entries}]
+        _, count = struct.unpack_from("=fI", payload)
+        if count != len(dies):
+            raise RuntimeError("unexpected Tflp output count")
+        expected = {d["temperature_output"]: d["elements"] for d in dies}
+        found, offset = {}, 8
+        for _ in range(count):
+            if offset + 12 > len(payload):
+                raise RuntimeError("truncated Tflp inspection point")
+            filename_len, header_len, width = struct.unpack_from("=III", payload, offset)
+            offset += 12
+            name_end = offset + ((filename_len + 3) // 4) * 4
+            header_end = name_end + ((header_len + 3) // 4) * 4
+            end = header_end + width * 4
+            if end > len(payload):
+                raise RuntimeError("truncated Tflp payload")
+            filename = payload[offset:offset + filename_len].decode()
+            header = payload[name_end:name_end + header_len].decode()
+            if filename not in expected or filename in found:
+                raise RuntimeError("unknown or duplicate Tflp output filename")
+            if width != len(expected[filename]) or re.findall(r"([^\s]+)\(K\)", header) != expected[filename]:
+                raise RuntimeError("Tflp order differs from the recording floorplan")
+            found[filename] = np.frombuffer(payload, dtype="=f4", count=width, offset=header_end).astype(float)
+            offset = end
+        if offset != len(payload):
             raise RuntimeError("malformed Tflp payload")
-        values = np.frombuffer(payload, dtype="=f4", offset=offset).astype(float)
+        values = np.concatenate([found[d["temperature_output"]] for d in dies])
         if not np.isfinite(values).all() or (values <= 0).any():
             raise RuntimeError("invalid thermal solution")
         return values - 273.15

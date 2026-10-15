@@ -25,7 +25,7 @@ def positive(value):
 
 
 def read_stack(path):
-    """Read generator-style passive layers and single-source dies, top to bottom.
+    """Read passive layers and dies with one source plus optional bulk sublayers.
 
     Reject unsupported stack elements/die layouts instead of omitting physical
     layers. The returned data contains no filenames, so pairs can be compared.
@@ -56,12 +56,16 @@ def read_stack(path):
                 raise ValueError(f"unsupported conductivity: {key}")
             materials[name] = {"conductivity_w_per_m_k": conductivity,
                                "heat_capacity_j_per_m3_k": positive(match[2]) * 1e18}
-        elif kind in ("layer", "die"):
-            pattern = (rf"height\s+({NUMBER})\s*;\s*material\s+({NAME})\s*;" if kind == "layer"
-                       else rf"source\s+({NUMBER})\s+({NAME})\s*;")
-            match = match_section(key, pattern, full=True)
-            definitions[key] = {"thickness_um": positive(match[1]), "material": match[2],
-                                "powered": kind == "die"}
+        elif kind == "layer":
+            match = match_section(key, rf"height\s+({NUMBER})\s*;\s*material\s+({NAME})\s*;", full=True)
+            definitions[key] = [{"thickness_um": positive(match[1]), "material": match[2], "powered": False}]
+        elif kind == "die":
+            pattern = rf"\s*(source|layer)\s+({NUMBER})\s+({NAME})\s*;"
+            matches = list(re.finditer(pattern, body))
+            if re.sub(pattern, "", body).strip() or sum(m[1] == "source" for m in matches) != 1:
+                raise ValueError(f"unsupported die definition (requires exactly one source): {key}")
+            definitions[key] = [{"thickness_um": positive(m[2]), "material": m[3], "powered": m[1] == "source"}
+                                for m in matches]
 
     dimensions = match_section("dimensions", rf"chip length\s+({NUMBER})\s*,\s*width\s+({NUMBER})\s*;")
     cell = match_section("dimensions", rf"cell length\s+({NUMBER})\s*,\s*width\s+({NUMBER})\s*;")
@@ -80,12 +84,17 @@ def read_stack(path):
         if match is None or (match[1] == "die") != ("floorplan" in statement):
             raise ValueError(f"unsupported stack element: {statement.strip()}")
         definition = definitions.get(f"{match[1]} {match[3]}")
-        if definition is None or definition["material"] not in materials:
+        if definition is None or any(layer["material"] not in materials for layer in definition):
             raise ValueError(f"undefined layer or material: {statement.strip()}")
-        if any(layer["name"] == match[2] for layer in layers):
+        if any(layer.get("die", layer["name"]) == match[2] for layer in layers):
             raise ValueError(f"duplicate stack element: {match[2]}")
-        layers.append({"name": match[2], **definition, "top_depth_um": depth})
-        depth += definition["thickness_um"]
+        for i, layer in enumerate(definition):
+            name = match[2] if len(definition) == 1 else f"{match[2]}_{'SOURCE' if layer['powered'] else 'BULK'}_{i}"
+            physical = {"name": name, **layer, "top_depth_um": depth}
+            if match[1] == "die":
+                physical["die"] = match[2]
+            layers.append(physical)
+            depth += layer["thickness_um"]
     return {"layers_top_to_bottom": layers, "total_thickness_um": depth, "materials": materials,
             "footprint_um": [positive(v) for v in dimensions.groups()],
             "cell_um": [positive(v) for v in cell.groups()],
@@ -98,10 +107,18 @@ def read_stack(path):
 def schematic_blocks(stack):
     blocks = []
     for layer in stack["layers_top_to_bottom"]:
+        die = layer.get("die")
+        if die and blocks and blocks[-1].get("die") == die:
+            blocks[-1]["thickness_um"] += layer["thickness_um"]
+            blocks[-1]["powered"] |= layer["powered"]
+            blocks[-1]["source_layers"].append(layer["name"])
+            continue
         group = re.fullmatch(r"(TIM|PCB)(?:_\d+)?", layer["name"])
         merge = group[1] if group and not layer["powered"] else None
-        label = merge or {"HEATSINK": "Heatsink", "TOP_DIE": "Silicon die", "BUMP": "Bumps"}.get(
-            layer["name"], layer["name"].replace("_", " "))
+        label_key = die or layer["name"]
+        label = merge or {"HEATSINK": "Heatsink", "TOP_DIE": "Silicon die", "BUMP": "Bumps",
+                          "LOGIC_DIE": "Logic die", "DRAM_DIE": "DRAM die", "F2F_BOND": "Face-to-face bond"}.get(
+            label_key, label_key.replace("_", " "))
         if layer["name"] == "TOP_DIE" and layer["material"] != "SILICON":
             label = "Active die"
         if (merge and blocks and blocks[-1]["name"] == merge
@@ -111,6 +128,8 @@ def schematic_blocks(stack):
         else:
             blocks.append({"name": label, "material": layer["material"], "powered": layer["powered"],
                            "thickness_um": layer["thickness_um"], "source_layers": [layer["name"]]})
+            if die:
+                blocks[-1]["die"] = die
     return blocks
 
 
@@ -141,7 +160,7 @@ def plot_stack(stack_path, output):
         axis.set_axis_off()
         for i, block in enumerate(blocks):
             y = len(blocks) - i - 1
-            color = "#EC9A78" if block["powered"] else colors.get(block["material"], "#D4E0EC")
+            color = ("#A8C8E8" if block.get("die") == "DRAM_DIE" else "#EC9A78") if block["powered"] else colors.get(block["material"], "#D4E0EC")
             axis.add_patch(Rectangle((0, y), 1, 1, facecolor=color, edgecolor="white", linewidth=2))
             shift = .08 if y == 0 else 0
             axis.text(.5, y + .65 + shift, block["name"], ha="center", va="center",
@@ -155,7 +174,7 @@ def plot_stack(stack_path, output):
             fig.savefig(output / f"layer_stack.{extension}", dpi=300, facecolor="white")
         plt.close(fig)
     metadata = {"source_stack": str(stack_path), "source_stack_sha256": digest(stack_path),
-                **stack, "presentation": "equal-height schematic; consecutive TIM and PCB layers merged",
+                **stack, "presentation": "equal-height schematic; die sublayers and consecutive TIM/PCB layers merged",
                 "blocks_top_to_bottom": blocks}
     write_json(output / "layer_stack.json", metadata)
     return metadata

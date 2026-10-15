@@ -17,10 +17,7 @@ TEMPERATURE_GRID_C = np.array([25., 40., 55., 70., 85., 100., 115., 125.])
 
 
 def load_contract(path):
-    document = load_system_contract(path)
-    if document["contract"]["version"] != 1:
-        raise ValueError("thermal replay currently supports single-die version 1 recordings only; memory-on-logic requires live co-simulation")
-    return document
+    return load_system_contract(path)
 
 
 def digest(path):
@@ -110,28 +107,37 @@ class LeakageModel:
         kinds = {c["simulator_path"]: c["kind"] for c in metadata["components"]}
         if set(kinds) != set(paths):
             raise ValueError("component model inventory differs from thermal mapping")
-        supported = {"memory", "light_redmule", "core", "spatz", "idma", "floonoc", "transpose"}
+        supported = {"memory", "light_redmule", "core", "spatz", "idma", "floonoc", "transpose", "dram3d_channel"}
         if set(kinds.values()) - supported:
             raise ValueError("unknown component leakage model")
         self.grid = np.asarray(grid, dtype=float)
         if not np.array_equal(self.grid, TEMPERATURE_GRID_C):
             raise ValueError("unsupported archived temperature grid")
+        self.temperature_dependent = np.array([kinds[p] != "dram3d_channel" for p in paths])
+        if not self.temperature_dependent.all():
+            model = metadata.get("dram_power_model", {})
+            if model.get("temperature_dependence") != "fixed electrical characterization":
+                raise ValueError("replay requires fixed-characterization DRAM power")
         doubles = np.array([float(specs["memory" if kinds[p] == "memory" else "light_redmule"]
                                  ["technology_nodes"][node]["leakage_doubling_temperature_c"])
-                            for p in paths])
+                            if dependent else 1. for p, dependent in zip(paths, self.temperature_dependent)])
         if not np.isfinite(doubles).all() or (doubles <= 0).any():
             raise ValueError("invalid leakage doubling temperatures")
-        self.table = 2 ** ((self.grid[:, None] - 25.) / doubles)
+        self.table = np.ones((len(self.grid), len(paths)))
+        self.table[:, self.temperature_dependent] = 2 ** (
+            (self.grid[:, None] - 25.) / doubles[self.temperature_dependent])
 
     def factors(self, temperatures):
         # Match GVSoC's sampled table and linear interpolation, including its
-        # clamp. The runner separately marks temperatures above 125 C invalid.
+        # clamp. The runner separately limits logic temperatures to 125 C.
         temperatures = np.clip(temperatures, self.grid[0], self.grid[-1])
         lower = np.minimum(np.searchsorted(self.grid, temperatures, side="right") - 1,
                            len(self.grid) - 2)
         fraction = (temperatures - self.grid[lower]) / (self.grid[lower + 1] - self.grid[lower])
         columns = np.arange(len(temperatures))
-        return self.table[lower, columns] * (1 - fraction) + self.table[lower + 1, columns] * fraction
+        factors = self.table[lower, columns] * (1 - fraction) + self.table[lower + 1, columns] * fraction
+        factors[~self.temperature_dependent] = 1.
+        return factors
 
 
 @dataclass
@@ -179,22 +185,34 @@ class Activity:
         return np.split(np.maximum(power, 0.), 2)
 
 
-def load_recording(directory):
+def load_recording_inputs(directory):
+    """Validate archived inputs without loading activity arrays (also used by plots)."""
+    from .layout import recording_files
     directory = Path(directory)
     manifest = json.loads((directory / "recording.json").read_text())
-    if manifest.get("format") != "softhier-thermal-replay-v1":
+    if manifest.get("format") not in {"softhier-thermal-replay-v1", "softhier-thermal-replay-v2"}:
         raise ValueError("unsupported recording format")
     if type(manifest.get("layers_per_cycle", 1)) is not int or manifest.get("layers_per_cycle", 1) < 1:
         raise ValueError("invalid recording layer count")
-    if set(manifest["sha256"]) != {"activity.npz", "system_config.json", "ice.stk", "floorplan.flp"}:
-        raise ValueError("recording is missing required checksums")
     for name, checksum in manifest["sha256"].items():
         if Path(name).name != name or digest(directory / name) != checksum:
             raise ValueError(f"recording checksum mismatch: {name}")
     document = load_contract(directory / "system_config.json")
+    expected_format = f"softhier-thermal-replay-v{document['contract']['version']}"
+    if manifest["format"] != expected_format:
+        raise ValueError("recording format differs from its system contract version")
+    if set(manifest["sha256"]) != recording_files(directory, document):
+        raise ValueError("recording is missing required checksums")
     paths = [c["path"] for c in thermal_components(document)]
     if manifest["component_paths"] != paths:
         raise ValueError("recording component order differs from contract")
+    return manifest, document
+
+
+def load_recording(directory):
+    directory = Path(directory)
+    manifest, document = load_recording_inputs(directory)
+    paths = manifest["component_paths"]
     with np.load(directory / "activity.npz", allow_pickle=False) as arrays:
         activity = Activity(arrays["edges_ps"], arrays["dynamic_w"], arrays["leakage_w"],
                             manifest["layer_start_ps"], manifest["layer_end_ps"])

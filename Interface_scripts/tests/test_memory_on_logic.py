@@ -360,7 +360,7 @@ class MultiDieHookTests(unittest.TestCase):
         rows = [[float(value) for value in line.split()] for line in output.read_text().splitlines()]
         self.assertEqual(rows, [list(range(1, 20)) + [0, 20], [-1] * 21])
 
-    def test_thermal_replay_rejects_multidie_before_creating_capture(self):
+    def test_thermal_replay_rejects_missing_manifest_before_creating_capture(self):
         try:
             import numpy  # noqa: F401
         except ImportError:
@@ -373,7 +373,7 @@ class MultiDieHookTests(unittest.TestCase):
         (run_folder / "generated/3dice/ice.stk").write_text((self.folder / "ice.stk").read_text())
         for name in ("record", "capture"):
             output = self.folder / name
-            with self.subTest(operation=name), self.assertRaisesRegex(ValueError, "single-die version 1"):
+            with self.subTest(operation=name), self.assertRaisesRegex((ValueError, FileNotFoundError), "thermal_manifest"):
                 if name == "record":
                     record(run_folder, output)
                 else:

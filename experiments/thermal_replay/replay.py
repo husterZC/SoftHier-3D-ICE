@@ -11,20 +11,27 @@ import numpy as np
 
 from .activity import ROOT, LeakageModel, digest, load_recording, write_json
 from .ice import IceClient, prepare_stack
+from .layout import Layout
 
 sys.path.insert(0, str(ROOT / "Interface_scripts/co-simulation"))
-from ice_trace_adapter import (build_power_sources, parse_floorplan_entries,
-                               validate_floorplan_entries)  # noqa: E402
+from ice_trace_adapter import build_power_sources, validate_floorplan_entries  # noqa: E402
 from system_contract import (flattened_floorplan_name, geometry_entry,
                              initial_temperature_c, thermal_components)  # noqa: E402
 
 
 class Mapping:
     def __init__(self, document, floorplan):
-        self.entries = parse_floorplan_entries(floorplan)
+        path = Path(floorplan)
+        self.layout = Layout(path if path.is_dir() else path.parent, document,
+                             floorplan=None if path.is_dir() else path)
+        self.entries = self.layout.entries
         sources = build_power_sources(document)
         validate_floorplan_entries(self.entries, sources)
         components = thermal_components(document)
+        self.component_groups = {d["id"]: np.array([i for i, c in enumerate(components)
+                                  if c.get("die", "TOP_DIE") == d["id"]], dtype=int) for d in self.layout.dies}
+        self.region_groups = {d["id"]: np.array([self.entries.index(name) for name in d["elements"]], dtype=int)
+                              for d in self.layout.dies}
         columns = {c["power_column"]: i for i, c in enumerate(components)}
         self.power_indices = np.array([columns[sources[e]["column"]] if "column" in sources[e] else -1
                                        for e in self.entries])
@@ -89,8 +96,12 @@ def run(recording, output, server=ROOT / "3D-ICE/bin/3D-ICE-Server", profile="te
             raise ValueError("archived thermal slot differs from the recorded power interval")
         if np.any(np.diff(activity.edges)[:-1] != slot_ps) or np.diff(activity.edges)[-1] > slot_ps:
             raise ValueError("recording has irregular power windows")
-        mapping = Mapping(document, output / "floorplan.flp")
+        mapping = Mapping(document, output)
         summary.update({"step_ps": step_ps, "slot_ps": slot_ps})
+        summary["per_die"] = {die["id"]: {"dynamic_energy_j": 0., "leakage_energy_j": 0.,
+                                         "floorplan_constant_energy_j": 0., "total_energy_j": 0.,
+                                         "peak_component_c": initial_temperature_c(document)}
+                              for die in mapping.layout.dies}
         write_json(output / "components.json", {"paths": paths, "mapping": thermal_components(document)})
         end_ps = round(max_seconds * 1e12)
         requested_end = int(activity.edges[-1]) if single_pass else (
@@ -108,6 +119,10 @@ def run(recording, output, server=ROOT / "3D-ICE/bin/3D-ICE-Server", profile="te
                 histories[name].writerow(["time_ps", *paths])
             totals = csv.writer(stack.enter_context((output / "timeseries.csv").open("w", newline="")))
             totals.writerow(["time_ps", "dynamic_w", "leakage_w", "constant_w", "peak_component_c"])
+            die_totals = None
+            if mapping.layout.multidie:
+                die_totals = csv.writer(stack.enter_context((output / "die_timeseries.csv").open("w", newline="")))
+                die_totals.writerow(["time_ps", "die", "dynamic_w", "leakage_w", "constant_w", "peak_component_c"])
             cycle_file = stack.enter_context((output / "cycles.csv").open("w", newline=""))
             cycle_writer = csv.DictWriter(cycle_file, fieldnames=["cycle", "time_ps", "layers_completed"])
             cycle_writer.writeheader()
@@ -115,7 +130,7 @@ def run(recording, output, server=ROOT / "3D-ICE/bin/3D-ICE-Server", profile="te
             if ice.count != len(mapping.entries):
                 raise ValueError("server floorplan size differs from the recording")
             initial_state = ice.state()  # Also detect an old server before doing any work.
-            temperatures = mapping.temperatures(ice.temperatures(mapping.entries))
+            temperatures = mapping.temperatures(ice.temperatures(mapping.layout.outputs))
             if np.max(np.abs(initial_state - initial_temperature_c(document))) > 1e-3:
                 raise ValueError("stack initial temperature differs from the system contract")
             histories["component_temperatures_c"].writerow([0, *temperatures])
@@ -132,7 +147,7 @@ def run(recording, output, server=ROOT / "3D-ICE/bin/3D-ICE-Server", profile="te
                 leakage = reference_leakage * (leakage_model.factors(temperatures)
                                                if profile == "temperature_aware" else 1.)
                 ice.advance(mapping.powers(dynamic + leakage))
-                new_temperatures = mapping.temperatures(ice.temperatures(mapping.entries))
+                new_temperatures = mapping.temperatures(ice.temperatures(mapping.layout.outputs))
                 energy_dynamic += dynamic * energy_duration
                 energy_leakage += leakage * energy_duration
                 summary.update({"slots": index + 1, "simulated_seconds": t1 * 1e-12,
@@ -146,6 +161,18 @@ def run(recording, output, server=ROOT / "3D-ICE/bin/3D-ICE-Server", profile="te
                     histories[name].writerow([t1, *[f"{v:.12g}" for v in values]])
                 totals.writerow([t1, float(dynamic.sum()), float(leakage.sum()),
                                  float(mapping.constants.sum()), float(new_temperatures.max())])
+                for die_id, indices in mapping.component_groups.items():
+                    fixed = float(mapping.constants[mapping.region_groups[die_id]].sum())
+                    peak = float(new_temperatures[indices].max())
+                    metrics = summary["per_die"][die_id]
+                    metrics.update(dynamic_energy_j=float(energy_dynamic[indices].sum()),
+                                   leakage_energy_j=float(energy_leakage[indices].sum()),
+                                   floorplan_constant_energy_j=metrics["floorplan_constant_energy_j"] + fixed * energy_duration,
+                                   peak_component_c=max(metrics["peak_component_c"], peak), final_peak_component_c=peak)
+                    metrics["total_energy_j"] = sum(metrics[k] for k in
+                        ("dynamic_energy_j", "leakage_energy_j", "floorplan_constant_energy_j"))
+                    if die_totals is not None:
+                        die_totals.writerow([t1, die_id, float(dynamic[indices].sum()), float(leakage[indices].sum()), fixed, peak])
                 if not single_pass:
                     while next_boundary <= t1:
                         cycle = summary["cycles_completed"] + 1
@@ -158,7 +185,7 @@ def run(recording, output, server=ROOT / "3D-ICE/bin/3D-ICE-Server", profile="te
                         next_boundary += activity.period
                 temperatures = new_temperatures
                 # Above the characterization range, GVSoC clamps leakage.
-                if float(temperatures.max()) > leakage_model.grid[-1]:
+                if np.any(temperatures[leakage_model.temperature_dependent] > leakage_model.grid[-1]):
                     summary["status"] = "model_limit"
                     break
                 if time.monotonic() - last_progress >= 10:

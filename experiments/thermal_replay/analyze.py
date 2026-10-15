@@ -25,10 +25,14 @@ from matplotlib.patches import Rectangle
 import numpy as np
 
 from .activity import ROOT, LeakageModel, digest, load_recording, write_json
+from .replay import Mapping
 
 KINDS = ["core", "spatz", "light_redmule", "memory", "idma", "floonoc", "transpose"]
 LABELS = dict(zip(KINDS, ["Scalar cores", "Spatz", "RedMulE", "SRAM", "iDMA", "NoC + NI", "Transpose"]))
 COLORS = dict(zip(KINDS, ["#0072B2", "#009E73", "#D55E00", "#56B4E9", "#CC79A7", "#E69F00", "#777777"]))
+KINDS.append("dram3d_channel")
+LABELS["dram3d_channel"] = "DRAM channels"
+COLORS["dram3d_channel"] = "#332288"
 PROFILE_LABELS = {"constant": "Constant leakage", "temperature_aware": "Temperature-aware"}
 BLUE, ORANGE = "#0072B2", "#D55E00"
 VIEW = runpy.run_path(str(ROOT / "Interface_scripts/plot_runtime_temperature_map/plot_runtime_tmap.py"))
@@ -113,11 +117,21 @@ class ReplayRun:
         self.paths, self.mapping = components["paths"], components["mapping"]
         require(self.paths == self.manifest["component_paths"], "Recording/component order mismatch")
         require([m["path"] for m in self.mapping] == self.paths, "Floorplan/component order mismatch")
+        native = Mapping(self.document, self.path)
+        self.layout, self.die_groups = native.layout, native.component_groups
+        from .activity import thermal_components
+        require(self.mapping == thermal_components(self.document), "Archived component mapping differs")
+        for source in self.layout.inputs:
+            require(digest(source) == self.manifest["sha256"][source.name], f"Runtime input differs: {source.name}")
         self.inventory = {c["simulator_path"]: c for c in self.document["metadata"]["components"]}
+        present = {self.inventory[p]["kind"] for p in self.paths}
+        self.kinds = [kind for kind in KINDS if kind in present]
         self.groups = [np.array([i for i, p in enumerate(self.paths) if self.inventory[p]["kind"] == kind])
-                       for kind in KINDS]
-        require(all(len(g) for g in self.groups) and sum(map(len, self.groups)) == len(self.paths),
-                "Expected all seven supported component kinds")
+                       for kind in self.kinds]
+        require(sum(map(len, self.groups)) == len(self.paths), "Unsupported component kind")
+        self.logic = np.array([self.inventory[p]["kind"] != "dram3d_channel" for p in self.paths])
+        self.die_power = {die: {} for die in self.die_groups}
+        self.die_peak_c = {}
         self.series = np.atleast_1d(np.genfromtxt(path / "timeseries.csv", delimiter=",", names=True))
         self.n, self.slot_ps = len(self.series), s["slot_ps"]
         self.slot_s, self.duration = self.slot_ps * 1e-12, s["simulated_seconds"]
@@ -142,6 +156,22 @@ class ReplayRun:
         self.check("total_energy_j", self.total_w.sum() * self.slot_s, s["total_energy_j"])
         self.check("floorplan_constant_energy_j", self.series["constant_w"].sum() * self.slot_s,
                    s["floorplan_constant_energy_j"])
+        self.die_metrics = {}
+        for die, group in self.die_groups.items():
+            fixed = float(native.constants[native.region_groups[die]].sum())
+            self.die_power[die]["constant"] = np.full(self.n, fixed)
+            dynamic, leakage = (float(self.energy[k][group].sum()) for k in ("dynamic", "leakage"))
+            metrics = {"dynamic_energy_j": dynamic, "leakage_energy_j": leakage,
+                       "floorplan_constant_energy_j": fixed * self.duration,
+                       "total_energy_j": dynamic + leakage + fixed * self.duration,
+                       "peak_component_c": float(self.die_peak_c[die].max()),
+                       "final_peak_component_c": float(self.die_peak_c[die][-1])}
+            if self.layout.multidie or "per_die" in s:
+                for key, value in metrics.items():
+                    self.check(f"{die}_{key}", value, s["per_die"][die][key])
+            self.die_metrics[die] = metrics
+        if self.layout.multidie:
+            self.read_die_series()
         self.cycles = read_cycles(path / "cycles.csv", s)
         self.read_maps()
         stack = (path / "ice.stk").read_text()
@@ -156,9 +186,23 @@ class ReplayRun:
         self.validation.append({"profile": self.profile, "check": name, "maximum_absolute_error": error,
                                 "absolute_tolerance": atol, "relative_tolerance": rtol, "result": "PASS"})
 
+    def read_die_series(self):
+        rows = np.atleast_1d(np.genfromtxt(self.path / "die_timeseries.csv", delimiter=",", names=True,
+                                         dtype=None, encoding="utf-8"))
+        require(rows.dtype.names == ("time_ps", "die", "dynamic_w", "leakage_w", "constant_w", "peak_component_c"),
+                "Per-die timeseries columns differ")
+        require(len(rows) == self.n * len(self.die_groups), "Per-die timeseries row count differs")
+        for die in self.die_groups:
+            selected = rows[rows["die"] == die]
+            require(np.array_equal(selected["time_ps"], self.time_ps), "Per-die time grid mismatch")
+            for field in ("dynamic", "leakage", "constant"):
+                self.check(f"{die}_{field}_power_series_w", selected[field + "_w"], self.die_power[die][field])
+            self.check(f"{die}_peak_series_c", selected["peak_component_c"], self.die_peak_c[die][1:])
+
     def read_temperatures(self):
         self.peak_c = np.empty(self.n + 1)
-        self.kind_peak_c = np.empty((self.n + 1, len(KINDS)))
+        self.kind_peak_c = np.empty((self.n + 1, len(self.kinds)))
+        self.die_peak_c = {die: np.empty(self.n + 1) for die in self.die_groups}
         self.component_peak_c = np.full(len(self.paths), -np.inf)
         self.component_peak_time_s = np.zeros(len(self.paths))
         self.frame_temperatures = {}
@@ -171,6 +215,8 @@ class ReplayRun:
             self.peak_c[start:end] = values.max(axis=1)
             for i, group in enumerate(self.groups):
                 self.kind_peak_c[start:end, i] = values[:, group].max(axis=1)
+            for die, group in self.die_groups.items():
+                self.die_peak_c[die][start:end] = values[:, group].max(axis=1)
             maxima = values.max(axis=0)
             changed = maxima > self.component_peak_c
             self.component_peak_time_s[changed] = (values.argmax(axis=0)[changed] + start) * self.slot_s
@@ -188,7 +234,7 @@ class ReplayRun:
         self.check("final_peak_component_c", self.peak_c[-1], self.summary["final_peak_component_c"])
         self.representatives = np.array([g[self.component_peak_c[g].argmax()] for g in self.groups])
         # A second pass keeps only the chosen fixed instances, not the full matrix.
-        self.representative_c = np.empty((self.n + 1, len(KINDS)))
+        self.representative_c = np.empty((self.n + 1, len(self.kinds)))
         for start, data in wide_chunks(self.path / "component_temperatures_c.csv.gz", self.paths,
                                        usecols=np.r_[0, self.representatives + 1]):
             self.representative_c[start:start + len(data)] = data[:, 1:]
@@ -196,11 +242,14 @@ class ReplayRun:
     def read_power(self, field):
         print(f"  Integrating {field} power", flush=True)
         energy = np.zeros(len(self.paths))
-        grouped = np.empty((self.n, len(KINDS)))
+        grouped = np.empty((self.n, len(self.kinds)))
         checksum = hashlib.sha256()
+        dram_checksum = hashlib.sha256()
+        for die in self.die_groups:
+            self.die_power[die][field] = np.empty(self.n)
         maximum_total_error, maximum_constant_error = 0., 0.
         if field == "leakage":
-            self.representative_leakage_w = np.empty((self.n, len(KINDS)))
+            self.representative_leakage_w = np.empty((self.n, len(self.kinds)))
         count = 0
         for start, data in wide_chunks(self.path / (field + "_power_w.csv.gz"), self.paths):
             end = start + len(data)
@@ -213,12 +262,17 @@ class ReplayRun:
             energy += values.sum(axis=0) * self.slot_s
             for i, group in enumerate(self.groups):
                 grouped[start:end, i] = values[:, group].sum(axis=1)
+            for die, group in self.die_groups.items():
+                self.die_power[die][field][start:end] = values[:, group].sum(axis=1)
             if field == "leakage":
+                dram_checksum.update(np.ascontiguousarray(values[:, ~self.logic], dtype="<f8").tobytes())
                 self.representative_leakage_w[start:end] = values[:, self.representatives]
                 if self.profile == "constant":
                     if start == 0:
-                        reference = values[0].copy()
-                    maximum_constant_error = max(maximum_constant_error, close(values, reference, "Constant leakage changed"))
+                        reference = values[0, self.logic].copy()
+                    if self.logic.any():
+                        maximum_constant_error = max(maximum_constant_error,
+                            close(values[:, self.logic], reference, "Constant logic leakage changed"))
             count = end
         require(count == self.n, f"Truncated {field} history")
         self.check(field + "_power_total_w", maximum_total_error, 0.)
@@ -228,37 +282,47 @@ class ReplayRun:
             self.dynamic_sha256 = checksum.hexdigest()
         elif self.profile == "constant":
             self.check("constant_leakage_w", maximum_constant_error, 0.)
+        if field == "leakage":
+            self.dram_background_sha256 = dram_checksum.hexdigest()
         self.energy[field], self.kind_power[field] = energy, grouped
 
     def read_maps(self):
         print("  Reading floorplan temperatures", flush=True)
-        names, stored = None, {}
+        names, frames = [], []
+        self.regions, self.region_groups = [], {}
         self.map_min_c, self.map_max_c = math.inf, -math.inf
         wanted = set(self.frame_indices)
-        count = 0
-        with (self.path / "floorplan_temperatures.txt").open() as stream:
-            for line in stream:
-                if not line.strip():
-                    continue
-                if line.lstrip().startswith("%"):
-                    names = VIEW["parse_tflp_header"](line) or names
-                    continue
-                require(names is not None, "Missing native floorplan header")
-                row = np.fromstring(line, sep=" ")
-                require(row.size == len(names) + 1 and np.isfinite(row).all(), "Invalid native map row")
-                # Native timestamps are printed to milliseconds; index is authoritative.
-                close(row[0], (count + 1) * self.slot_s, "Native map timestamp mismatch", atol=.000501, rtol=0.)
-                values = row[1:] - 273.15
-                self.map_min_c = min(self.map_min_c, float(values.min()))
-                self.map_max_c = max(self.map_max_c, float(values.max()))
-                if count in wanted:
-                    stored[count] = values.copy()
-                count += 1
-        require(count == self.n and len(stored) == len(wanted), "Native map row count mismatch")
-        self.regions = VIEW["align_regions_to_tflp"](self.path / "floorplan.flp",
-                         VIEW["load_floorplan_regions"](self.path / "floorplan.flp"), names)
+        for die in self.layout.dies:
+            die_names, stored, count = None, {}, 0
+            with (self.path / die["temperature_output"]).open() as stream:
+                for line in stream:
+                    if not line.strip():
+                        continue
+                    if line.lstrip().startswith("%"):
+                        die_names = VIEW["parse_tflp_header"](line) or die_names
+                        continue
+                    require(die_names == die["elements"], f"Wrong native floorplan header for {die['id']}")
+                    row = np.fromstring(line, sep=" ")
+                    require(row.size == len(die_names) + 1 and np.isfinite(row).all(), "Invalid native map row")
+                    # Native timestamps are printed to milliseconds; index is authoritative.
+                    close(row[0], (count + 1) * self.slot_s, "Native map timestamp mismatch", atol=.000501, rtol=0.)
+                    values = row[1:] - 273.15
+                    self.map_min_c = min(self.map_min_c, float(values.min()))
+                    self.map_max_c = max(self.map_max_c, float(values.max()))
+                    if count in wanted:
+                        stored[count] = values.copy()
+                    count += 1
+            require(count == self.n and len(stored) == len(wanted), "Native map row count mismatch")
+            regions = VIEW["align_regions_to_tflp"](die["floorplan"],
+                          VIEW["load_floorplan_regions"](die["floorplan"]), die_names)
+            if self.layout.multidie:
+                regions = [dict(region, die=die["id"]) for region in regions]
+            self.region_groups[die["id"]] = np.arange(len(names), len(names) + len(die_names))
+            self.regions.extend(regions)
+            names.extend(die_names)
+            frames.append(np.array([stored[int(i)] for i in self.frame_indices]))
         require(len(set(names)) == len(names), "Duplicate native map columns")
-        self.map_frames = np.array([stored[int(i)] for i in self.frame_indices])
+        self.map_frames = np.concatenate(frames, axis=1)
         by_name = {name: i for i, name in enumerate(names)}
         mapped = np.empty((len(self.frame_indices), len(self.paths)))
         for i, entry in enumerate(self.mapping):
@@ -305,10 +369,11 @@ def validate_pair(constant, aware):
     for key in ("recording_sha256", "server_sha256", "step_ps", "slot_ps", "period_ps", "layer_start_ps",
                 "simulated_seconds", "slots", "factorization_threads", "layers_per_cycle"):
         require(constant.summary[key] == aware.summary[key], f"A/B {key} mismatch")
-    for filename in ("ice.stk", "floorplan.flp"):
+    for filename in ("ice.stk", *(p.name for p in constant.layout.inputs)):
         require((constant.path / filename).read_bytes() == (aware.path / filename).read_bytes(), f"A/B {filename} mismatch")
     require(constant.regions == aware.regions, "A/B floorplan ordering mismatch")
     require(constant.dynamic_sha256 == aware.dynamic_sha256, "A/B component dynamic traces differ")
+    require(constant.dram_background_sha256 == aware.dram_background_sha256, "A/B DRAM background traces differ")
     require(np.array_equal(constant.frame_indices, aware.frame_indices), "A/B animation timestamps differ")
     close(constant.initial_c, aware.initial_c, "A/B initial temperatures differ")
 
@@ -384,32 +449,39 @@ class Figures:
 
     def leakage_temperature(self):
         run = self.aware
-        fig, axes = plt.subplots(2, 3, figsize=(15, 8.3), layout="constrained")
-        for i, (kind, ax) in enumerate(zip(KINDS[:6], axes.flat)):
+        kinds = [k for k in run.kinds if k != "transpose"]
+        rows = math.ceil(len(kinds) / 3)
+        fig, axes = plt.subplots(rows, 3, squeeze=False, figsize=(15, 4.15 * rows), layout="constrained")
+        for kind, ax in zip(kinds, axes.flat):
+            i = run.kinds.index(kind)
             right = ax.twinx()
             envelope(ax, run, run.representative_leakage_w[:, i], BLUE, scale=1000)
             envelope(right, run, run.representative_c[1:, i], ORANGE)
-            ax.set(xlabel="Simulation time (s)", ylabel="Leakage (mW)", title=LABELS[kind], xlim=(0, run.duration))
+            ax.set(xlabel="Simulation time (s)", ylabel="Background (mW)" if kind == "dram3d_channel" else "Leakage (mW)",
+                   title=LABELS[kind], xlim=(0, run.duration))
             right.set_ylabel("Temperature (°C)", color=ORANGE)
             ax.tick_params(axis="y", labelcolor=BLUE)
             right.tick_params(axis="y", labelcolor=ORANGE)
             right.grid(False)
             ax.text(.025, .965, run.paths[run.representatives[i]].replace("/chip/", ""), transform=ax.transAxes, va="top", fontsize=8)
+        for ax in list(axes.flat)[len(kinds):]:
+            ax.set_visible(False)
         fig.suptitle(self.title + "\nTemperature-aware: hottest fixed instance of each kind · 1 ms means and min/max envelopes")
-        self.save(fig, self.prefix + "_leakage_temperature_time", "Blue: interval leakage, left axis. Orange: endpoint temperature, right axis. Each panel follows one fixed component; replay evaluates leakage from the preceding slot's temperature.")
+        self.save(fig, self.prefix + "_leakage_temperature_time", "Blue: interval logic leakage or DRAM background power, left axis. Orange: endpoint temperature, right axis. Each panel follows one fixed component. Logic leakage uses the preceding slot's temperature; DRAM background retains its recorded state dependence and fixed electrical characterization.")
 
     def workload_summary(self):
         c, a = self.constant, self.aware
         fig, axes = plt.subplots(1, 2, figsize=(11.5, 4.8), layout="constrained")
         bottom = 0.
-        for kind, group in zip(KINDS, a.groups):
+        for kind, group in zip(a.kinds, a.groups):
             value = float(a.energy["dynamic"][group].sum() / a.duration)
             axes[0].bar(0, value, bottom=bottom, width=.55, label=LABELS[kind], color=COLORS[kind])
             bottom += value
         axes[0].set(xticks=[0], xticklabels=[self.workload], ylabel="Mean dynamic power (W)",
                     title="Activity + residual clocks by component", xlim=(-.9, .9), ylim=(0, bottom * 1.38))
         axes[0].legend(ncol=2, fontsize=8, loc="upper left")
-        axes[0].text(0, bottom + .04, f"{bottom:.3f} W", ha="center", fontsize=9)
+        axes[0].annotate(f"{bottom:.3f} W", (0, bottom), xytext=(0, 5), textcoords="offset points",
+                         ha="center", fontsize=9)
         values = [100 * (a.metrics[k] / c.metrics[k] - 1) for k in ("leakage_energy_j", "total_energy_j")]
         axes[1].bar([-.18, .18], values, .32, color=[ORANGE, BLUE])
         axes[1].set(xticks=[-.18, .18], xticklabels=["Leakage energy", "Total energy"],
@@ -417,38 +489,50 @@ class Figures:
         for x, value in zip([-.18, .18], values):
             axes[1].text(x, value + max(values) * .018, f"+{value:.1f}%", ha="center")
         fig.suptitle(self.title + f"\nEnergy integrated over all {a.n:,} intervals ({a.duration:g} s)")
-        self.save(fig, "workload_summary", "All seven component kinds contribute to the dynamic-power stack. Percentage changes use full-resolution integrated energy.")
+        self.save(fig, "workload_summary", "All recorded component kinds contribute to the dynamic-power stack, including DRAM commands when present. Percentage changes use full-resolution integrated energy.")
 
-    def map_panel(self, ax, values, cmap="inferno", limits=None):
+    def map_panel(self, ax, values, cmap="inferno", limits=None, die=None):
+        if self.aware.layout.multidie and die is None:
+            raise ValueError("select a die before plotting overlapping footprints")
+        indices = self.aware.region_groups[die] if die else np.arange(len(self.aware.regions))
+        regions = [self.aware.regions[i] for i in indices]
         patches = [Rectangle((r["x"] / 1000, r["y"] / 1000), r["width"] / 1000, r["height"] / 1000)
-                   for r in self.aware.regions]
+                   for r in regions]
         coll = PatchCollection(patches, cmap=cmap, edgecolors="none")
-        coll.set_array(values)
+        coll.set_array(values[indices])
         coll.set_clim(*(limits or (self.vmin, self.vmax)))
         ax.add_collection(coll)
-        bounds = VIEW["floorplan_bounds"](self.aware.regions)
+        bounds = VIEW["floorplan_bounds"](regions)
         ax.set(xlim=(bounds["minX"] / 1000, bounds["maxX"] / 1000), ylim=(bounds["minY"] / 1000, bounds["maxY"] / 1000),
                aspect="equal", xlabel="x (mm)", ylabel="y (mm)")
         ax.grid(False)
         return coll
 
     def thermal_maps(self):
+        for die in self.aware.layout.dies:
+            self.thermal_map(die["id"] if self.aware.layout.multidie else None)
+
+    def thermal_map(self, die):
         fig, axes = plt.subplots(1, 3, figsize=(13.2, 4.7), layout="constrained")
+        indices = self.aware.region_groups[die] if die else np.arange(len(self.aware.regions))
         for ax, run in zip(axes, (self.constant, self.aware)):
-            coll = self.map_panel(ax, run.map_frames[-1])
-            ax.set_title(PROFILE_LABELS[run.profile] + f"\nPeak region: {run.map_frames[-1].max():.2f} °C")
+            coll = self.map_panel(ax, run.map_frames[-1], die=die)
+            ax.set_title(PROFILE_LABELS[run.profile] + f"\nPeak region: {run.map_frames[-1, indices].max():.2f} °C")
         fig.colorbar(coll, ax=list(axes[:2]), label="Floorplan-average temperature (°C)", shrink=.78, pad=.025)
         delta = self.aware.map_frames[-1] - self.constant.map_frames[-1]
-        maximum = max(1e-6, float(np.abs(delta).max()))
-        coll = self.map_panel(axes[2], delta, cmap="coolwarm" if delta.min() < 0 else "magma",
-                              limits=(-maximum, maximum) if delta.min() < 0 else (0, maximum))
+        maximum = max(1e-6, float(np.abs(delta[indices]).max()))
+        negative = delta[indices].min() < 0
+        coll = self.map_panel(axes[2], delta, cmap="coolwarm" if negative else "magma", die=die,
+                              limits=(-maximum, maximum) if negative else (0, maximum))
         axes[2].set_title("Temperature-aware − constant")
         fig.colorbar(coll, ax=axes[2], label="Temperature difference (°C)", shrink=.78, pad=.025)
-        fig.suptitle(self.title + f"\nFinal floorplan averages at {self.aware.duration:g} s; absolute maps share the GIF scale")
-        self.save(fig, self.prefix + "_thermal_maps", "Final saved floorplan-region averages and their difference; these maps do not resolve within-region thermal-cell gradients.")
+        fig.suptitle(self.title + (f" · {die}" if die else "") + f"\nFinal floorplan averages at {self.aware.duration:g} s; absolute maps share the GIF scale")
+        self.save(fig, self.prefix + (f"_{die.lower()}" if die else "") + "_thermal_maps", "Final saved floorplan-region averages and their difference; these maps do not resolve within-region thermal-cell gradients.")
 
     def floorplan(self):
         run = self.aware
+        if run.layout.multidie:
+            return self.die_floorplans()
         cluster = run.document["geometry"]["chip"]["subs"]["cluster_0"]
         kind_by_name = {name.rsplit("/", 1)[-1]: run.inventory[entry["path"]]["kind"]
                         for entry in run.mapping for name in entry["floorplan_elements"] if name.startswith("chip/cluster_0/")}
@@ -477,7 +561,7 @@ class Figures:
         for i, name in enumerate(callouts):
             legend.text(0, .9 - i * .045, f"{i+1}. {name.replace('_', ' ')}", va="top", transform=legend.transAxes, fontsize=9)
         top = min(.58, .85 - len(callouts) * .045)
-        for i, kind in enumerate(KINDS):
+        for i, kind in enumerate(run.kinds):
             y = top - i * .05
             legend.add_patch(Rectangle((0, y), .07, .025, transform=legend.transAxes, color=COLORS[kind]))
             legend.text(.1, y + .012, LABELS[kind], va="center", transform=legend.transAxes)
@@ -486,13 +570,56 @@ class Figures:
         fig.suptitle("Expanded cluster floorplan — " + run.document["metadata"]["floorplan_rule"])
         self.save(fig, "cluster_floorplan", "Cluster 0 from the archived geometry, colored by component kind; other regions appear gray.")
 
+    def die_floorplans(self):
+        run = self.aware
+        kinds = {name.strip("/").replace("/", "__"): run.inventory[entry["path"]]["kind"]
+                 for entry in run.mapping for name in entry["floorplan_elements"]}
+        for die, indices in run.region_groups.items():
+            fig, ax = plt.subplots(figsize=(8, 7), layout="constrained")
+            regions = [run.regions[i] for i in indices]
+            patches = [Rectangle((r["x"] / 1000, r["y"] / 1000), r["width"] / 1000, r["height"] / 1000)
+                       for r in regions]
+            colors = [COLORS.get(kinds.get(r["name"]), "#eeeeee") for r in regions]
+            ax.add_collection(PatchCollection(patches, facecolors=colors, edgecolors="white", linewidths=.3))
+            bounds = VIEW["floorplan_bounds"](regions)
+            ax.set(xlim=(bounds["minX"] / 1000, bounds["maxX"] / 1000),
+                   ylim=(bounds["minY"] / 1000, bounds["maxY"] / 1000),
+                   aspect="equal", xlabel="x (mm)", ylabel="y (mm)", title=die)
+            ax.grid(False)
+            present = {kinds.get(r["name"]) for r in regions}
+            ax.legend(handles=[Rectangle((0, 0), 1, 1, color=COLORS[k], label=LABELS[k])
+                               for k in run.kinds if k in present], loc="upper center", bbox_to_anchor=(.5, -.12), ncol=3)
+            self.save(fig, die.lower() + "_floorplan", "Archived die geometry colored by component kind; fixed-power filler is gray. Each die is plotted separately.")
+
+    def die_comparisons(self):
+        if not self.aware.layout.multidie:
+            return
+        for die in self.aware.die_groups:
+            fig, axes = plt.subplots(1, 3, figsize=(15, 4.2), layout="constrained")
+            for run, color in ((self.constant, BLUE), (self.aware, ORANGE)):
+                edges = np.r_[0., run.time_s]
+                powers = run.die_power[die]
+                axes[0].plot(edges, run.die_peak_c[die], color=color, label=PROFILE_LABELS[run.profile])
+                for ax, field in zip(axes[1:], ("dynamic", "leakage")):
+                    ax.step(edges, np.r_[powers[field][0], powers[field]], where="pre", color=color)
+            axes[0].legend(fontsize=8)
+            dram = die == "DRAM_DIE"
+            for ax, label in zip(axes, ("Peak component (°C)", "Commands (W)" if dram else "Dynamic power (W)",
+                                       "Background (W)" if dram else "Leakage (W)")):
+                ax.set(xlabel="Simulation time (s)", ylabel=label, xlim=(0, self.aware.duration))
+            fig.suptitle(self.title + " · " + die)
+            self.save(fig, die.lower() + "_comparison", "Per-die power and temperature histories. DRAM command and state-dependent background traces are identical between profiles; only logic leakage depends on temperature.")
+
     def assumptions(self):
         run = self.aware
         metadata = run.document["metadata"]
         model = LeakageModel(run.document, run.paths, run.manifest["temperature_grid_c"])
         fig, (ax, table_ax) = plt.subplots(1, 2, figsize=(11.5, 4.8), layout="constrained")
-        for kind, label in (("light_redmule", "Logic / RedMulE"), ("memory", "SRAM")):
-            index = int(run.groups[KINDS.index(kind)][0])
+        for kind, label in (("light_redmule", "Logic / RedMulE"), ("memory", "SRAM"),
+                            ("dram3d_channel", "DRAM: fixed electrical model")):
+            if kind not in run.kinds:
+                continue
+            index = int(run.groups[run.kinds.index(kind)][0])
             ax.plot(model.grid, model.table[:, index], "o-", ms=4, color=COLORS[kind], label=label)
         ax.axvspan(run.initial_c.max(), run.peak_c.max(), color=ORANGE, alpha=.08, label="Aware run: initial to peak")
         ax.set(xlabel="Temperature (°C)", ylabel="Leakage / leakage at 25 °C", title="Archived sampled leakage model")
@@ -515,26 +642,28 @@ class Figures:
         fig.suptitle(self.title + "\nModel assumptions and actual replay settings")
         self.save(fig, "model_assumptions", "Leakage factors come from the recording's archived tables at the selected technology. No model parameters are copied from the older reference experiment.")
 
-    def animation(self, run):
-        name = self.prefix + "_" + run.profile + ".gif"
+    def animation(self, run, die=None):
+        name = self.prefix + "_" + run.profile + ("_" + die.lower() if die else "") + ".gif"
         fig = plt.figure(figsize=(10, 8), dpi=100)
         ax = fig.add_axes([.10, .27, .72, .60])
         color_ax = fig.add_axes([.84, .30, .022, .54])
-        coll = self.map_panel(ax, run.map_frames[0], cmap="turbo")
+        coll = self.map_panel(ax, run.map_frames[0], cmap="turbo", die=die)
         fig.colorbar(coll, cax=color_ax, label="Floorplan-average temperature (°C)")
         fig.text(.5, .96, self.title, ha="center", fontsize=12)
-        fig.text(.5, .921, PROFILE_LABELS[run.profile], ha="center", fontsize=11)
+        fig.text(.5, .921, PROFILE_LABELS[run.profile] + (" · " + die if die else ""), ha="center", fontsize=11)
         time_label = fig.text(.5, .885, "", ha="center", fontsize=10)
+        indices = run.region_groups[die] if die else np.arange(len(run.regions))
+        peak = run.die_peak_c[die] if die else run.peak_c
         curve = fig.add_axes([.12, .105, .74, .10])
-        envelope(curve, run, run.peak_c[1:], BLUE if run.profile == "constant" else ORANGE)
+        envelope(curve, run, peak[1:], BLUE if run.profile == "constant" else ORANGE)
         cursor = curve.axvline(run.time_s[0], color="#333333", lw=1.4)
         curve.set(xlim=(0, run.duration), ylim=(self.vmin, self.vmax), xlabel="Simulation time (s)", ylabel="Peak (°C)")
         fig.text(.5, .018, "Shared temperature scale · saved floorplan averages · frames every 10 ms, plus endpoints", ha="center", fontsize=9)
 
         def animate(frame):
             index = int(run.frame_indices[frame])
-            coll.set_array(run.map_frames[frame])
-            time_label.set_text(f"Time: {run.time_s[index]:.5f} s     Hottest component: {run.peak_c[index + 1]:.2f} °C")
+            coll.set_array(run.map_frames[frame, indices])
+            time_label.set_text(f"Time: {run.time_s[index]:.5f} s     Hottest component: {peak[index + 1]:.2f} °C")
             cursor.set_xdata([run.time_s[index]] * 2)
             return coll, time_label, cursor
 
@@ -555,7 +684,7 @@ def write_data(output, runs):
                                    "dynamic_energy_j": dynamic, "leakage_energy_j": leakage, "total_energy_j": dynamic + leakage,
                                    "peak_temperature_c": float(run.component_peak_c[i]),
                                    "peak_time_s": float(run.component_peak_time_s[i]), "final_temperature_c": float(run.final_c[i])})
-        for i, (kind, group) in enumerate(zip(KINDS, run.groups)):
+        for i, (kind, group) in enumerate(zip(run.kinds, run.groups)):
             dynamic, leakage = (float(run.energy[k][group].sum()) for k in ("dynamic", "leakage"))
             kind_rows.append({"profile": run.profile, "kind": kind, "instances": len(group),
                               "dynamic_energy_j": dynamic, "leakage_energy_j": leakage, "total_energy_j": dynamic + leakage,
@@ -564,7 +693,7 @@ def write_data(output, runs):
                               "representative_path": run.paths[run.representatives[i]]})
         quantities = {"dynamic_w": run.series["dynamic_w"], "leakage_w": run.series["leakage_w"],
                       "total_w": run.total_w, "peak_component_c": run.peak_c[1:]}
-        for i, kind in enumerate(KINDS):
+        for i, kind in enumerate(run.kinds):
             quantities.update({kind + "_dynamic_w": run.kind_power["dynamic"][:, i],
                                kind + "_leakage_w": run.kind_power["leakage"][:, i],
                                kind + "_representative_leakage_w": run.representative_leakage_w[:, i],
@@ -582,6 +711,8 @@ def write_data(output, runs):
                        ("validation", [row for r in runs for row in r.validation])):
         csv_file(output / (name + ".csv"), rows,
                  fieldnames=["profile", "cycle", "time_ps", "layers_completed"] if name == "cycles" else None)
+    csv_file(output / "die_summary.csv", [{"profile": run.profile, "die": die, **values}
+                                          for run in runs for die, values in run.die_metrics.items()])
 
 
 def write_report(figures, gifs, command):
@@ -591,14 +722,19 @@ def write_report(figures, gifs, command):
     summary = {"title": figures.title, "runs": {r.profile: r.metrics for r in (c, a)},
                "comparison": {"peak_temperature_increase_c": peak_increase, "total_energy_increase_percent": energy_increase},
                "pair_validation": {"identical_recording": True, "identical_effective_stack_and_floorplan": True,
-                                   "identical_dynamic_power_at_every_component_and_interval": True},
+                                   "identical_dynamic_power_at_every_component_and_interval": True,
+                                   "identical_dram_background_at_every_component_and_interval": True},
+               "per_die": {r.profile: r.die_metrics for r in (c, a)},
+               "power_semantics": {"logic": "dynamic + temperature-dependent leakage",
+                                   "dram": "commands + state-dependent background; fixed electrical characterization"},
                "figures": figures.items, "gifs": gifs, "gif_fps": 10, "gif_colormap": "turbo",
                "gif_frame_times_s": [float(t) for t in a.time_s[a.frame_indices]] if gifs else [],
                "map_scale_c": [figures.vmin, figures.vmax], "map_kind": "floorplan-region averages",
                "map_validation_tolerance_c": max(c.map_tolerance_c, a.map_tolerance_c),
                "display_bin_seconds": a.bin_size * a.slot_s, "command": command,
                "source_sha256": {r.profile: {name: digest(r.path / name) for name in
-                                  ("summary.json", "components.json", "ice.stk", "floorplan.flp", "final_state.npz")} for r in (c, a)}}
+                                  ("summary.json", "components.json", "ice.stk", "final_state.npz",
+                                   *(p.name for p in r.layout.inputs))} for r in (c, a)}}
     write_json(figures.output / "analysis_summary.json", summary)
     rows = [("Duration (s)", "simulated_seconds", ".3f"), ("Peak component (°C)", "peak_component_c", ".3f"),
             ("Temperature rise (°C)", "peak_rise_c", ".3f"), ("Hottest component at end (°C)", "final_peak_component_c", ".3f"),
@@ -610,13 +746,18 @@ def write_report(figures, gifs, command):
                        f'<p>{html.escape(item["caption"])}</p><p><a href="{item["name"]}.png">PNG</a> · '
                        f'<a href="{item["name"]}.pdf">PDF</a></p><img loading="lazy" src="{item["name"]}.png" '
                        f'alt="{html.escape(item["caption"])}"></section>' for item in figures.items)
-    animations = "\n".join(f'<section><h2>{PROFILE_LABELS[profile]} animation</h2><p><a href="{name}">Open GIF</a>'
+    animations = "\n".join(f'<section><h2>{html.escape(PROFILE_LABELS.get(profile, profile.replace("/", " · ")))} animation</h2><p><a href="{name}">Open GIF</a>'
                             f' · {len(a.frame_indices)} frames · 10 frames/s · {figures.vmin:g}–{figures.vmax:g} °C</p>'
-                            f'<img loading="lazy" src="{name}" alt="{PROFILE_LABELS[profile]} floorplan animation"></section>'
+                            f'<img loading="lazy" src="{name}" alt="{html.escape(profile)} floorplan animation"></section>'
                             for profile, name in gifs.items())
     links = " · ".join(f'<a href="{name}.csv">{label}</a>' for name, label in
                        (("metrics", "Metrics"), ("component_energy", "Component energy"), ("component_kind_summary", "Kind summaries"),
-                        ("timeseries_1ms", "Plot data"), ("cycles", "Replay boundaries"), ("validation", "Validation")))
+                        ("die_summary", "Per-die energy and temperature"), ("timeseries_1ms", "Plot data"),
+                        ("cycles", "Replay boundaries"), ("validation", "Validation")))
+    die_note = ("Logic leakage depends on temperature. DRAM command and state-dependent background power are replayed "
+                "at their archived electrical characterization, with no temperature multiplier. In aggregate metrics, "
+                "dynamic includes DRAM commands and leakage includes DRAM background. The per-die CSV and figures "
+                "separate them. All die maps and GIFs share one temperature scale." if a.layout.multidie else "")
     states = "; ".join(f'{PROFILE_LABELS[r.profile]}: <code>{r.summary["status"]}</code>' for r in (c, a))
     report = f'''<!doctype html>
 <html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
@@ -631,7 +772,7 @@ The same recorded {a.summary['layers_per_cycle']}-layer block repeats with conti
 <section><h2>Results</h2><table><tr><th>Metric</th><th>Constant leakage</th><th>Temperature-aware</th></tr>{table}</table>
 <p class="note">Temperature-aware leakage raises the sampled component peak by {peak_increase:.2f} °C and total energy by {energy_increase:.1f}%.
 Every saved component dynamic-power sample is identical between profiles, so the energy difference comes from leakage.</p>
-<p>{states}. Temperatures and energies cover the saved simulation interval.</p></section>
+<p>{states}. Temperatures and energies cover the saved simulation interval.</p><p>{die_note}</p></section>
 {cards}{animations}
 <section><h2>Data and validation</h2><p>{links} · <a href="analysis_summary.json">Analysis JSON</a></p>
 <p>Metrics and integration use every saved {a.slot_ps * 1e-6:g} µs interval. The comparison figure plots every saved sample without display averaging or shaded bands.
@@ -669,10 +810,17 @@ def main(argv=None):
     output.mkdir(parents=True, exist_ok=True)
     configure_style()
     figures = Figures(output, constant, aware)
-    for plot in (figures.comparison, figures.leakage_temperature, figures.workload_summary,
+    for plot in (figures.comparison, figures.die_comparisons, figures.leakage_temperature, figures.workload_summary,
                  figures.thermal_maps, figures.floorplan, figures.assumptions):
         plot()
-    gifs = {run.profile: figures.animation(run) for run in (constant, aware)} if args.animations else {}
+    gifs = {}
+    if args.animations:
+        for run in (constant, aware):
+            if run.layout.multidie:
+                for die in run.layout.dies:
+                    gifs[run.profile + "/" + die["id"]] = figures.animation(run, die["id"])
+            else:
+                gifs[run.profile] = figures.animation(run)
     write_data(output, (constant, aware))
     import shlex
     import sys
