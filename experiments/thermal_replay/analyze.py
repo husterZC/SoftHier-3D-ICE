@@ -345,23 +345,42 @@ class Figures:
         print("Saved", name, flush=True)
 
     def comparison(self):
-        fig, axes = plt.subplots(1, 3, figsize=(15, 4.1), layout="constrained")
+        fig, axes = plt.subplots(1, 4, figsize=(20, 4.1), layout="constrained")
         for run, color in ((self.constant, BLUE), (self.aware, ORANGE)):
             label = PROFILE_LABELS[run.profile]
             edges = np.r_[0., run.time_s]
             temperature_line, = axes[0].plot(edges, run.peak_c, color=color, lw=.8,
                                              label=f"{label}: {run.peak_c.max():.2f} °C peak")
             temperature_line.get_path().should_simplify = False
-            for axis, power in zip(axes[1:], (run.total_w, run.series["leakage_w"])):
-                # Each value applies to the interval ending at time_s[i].
-                line, = axis.step(edges, np.r_[power[0], power], where="pre", color=color, lw=.55)
+            # Each value applies to the interval ending at time_s[i].
+            line, = axes[1].step(edges, np.r_[run.total_w[0], run.total_w],
+                                 where="pre", color=color, lw=.55)
+            line.get_path().should_simplify = False
+        power_max = max(float(run.series[field].max()) for run in (self.constant, self.aware)
+                        for field in ("dynamic_w", "leakage_w"))
+        for axis, run in zip(axes[2:], (self.constant, self.aware)):
+            edges = np.r_[0., run.time_s]
+            for field, label, color, width in (("dynamic_w", "Dynamic", "#009E73", .55),
+                                                ("leakage_w", "Leakage", "#7B3294", .9)):
+                power = run.series[field]
+                line, = axis.step(edges, np.r_[power[0], power], where="pre",
+                                   color=color, lw=width, label=label)
                 line.get_path().should_simplify = False
-        for ax, ylabel in zip(axes, ["Hottest component average (°C)", "Total modeled power (W)", "Total leakage power (W)"]):
+            axis.set_ylim(0, 1.15 * power_max if power_max > 0 else 1.)
+            axis.legend(fontsize=8, loc="upper right")
+        axes[2].set_title("Constant-leakage run")
+        axes[3].set_title("Temperature-aware run")
+        for ax, ylabel in zip(axes, ["Hottest component average (°C)", "Total modeled power (W)",
+                                    "Power (W)", "Power (W)"]):
             ax.set(xlabel="Simulation time (s)", ylabel=ylabel, xlim=(0, self.aware.duration))
         axes[0].legend(fontsize=8, loc="lower right")
         slot_us = self.aware.slot_ps * 1e-6
         fig.suptitle(self.title + f"\nIdentical dynamic activity · all saved {slot_us:g} µs samples")
-        self.save(fig, self.prefix + "_comparison", f"Constant and temperature-aware profiles over the complete replay. Power uses a step curve for every saved {slot_us:g} µs interval; temperature uses every saved endpoint. No display averaging or shaded bands.")
+        self.save(fig, self.prefix + "_comparison", f"Constant and temperature-aware profiles over the complete replay. "
+                  "The third and fourth panels show dynamic (green) and leakage (purple) power for the "
+                  "constant-leakage and temperature-aware runs, respectively, with a shared power scale. "
+                  f"Power uses a step curve for every saved {slot_us:g} µs interval; temperature uses every saved endpoint. "
+                  "No display averaging or shaded bands.")
 
     def leakage_temperature(self):
         run = self.aware
