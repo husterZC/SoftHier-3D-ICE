@@ -252,3 +252,79 @@ PYTHONDONTWRITEBYTECODE=1 OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 \
 Tests cover energy integration, fractional boundaries, explicit stopping limits
 under stable temperatures, initial/final state exports, cooling overrides,
 legacy analysis compatibility, native/file-mode parity, and interruption cleanup.
+
+## Export and plot power at a saved time
+
+These commands read completed replay outputs; they do not run GVSoC or the
+thermal solver. Keep the recording referenced by each run's `summary.json`
+available. Use the same Python environment as the analyzer.
+
+To export one chip power map in native 3D-ICE FLP format:
+
+```bash
+python -m experiments.thermal_replay.power_maps export \
+  --run runs/thermal_replay/b8_h15000_constant_step20us_1s \
+  --time-seconds 1 \
+  --output runs/thermal_replay/power_maps_t1s/constant
+```
+
+The output contains `power_map.flp`, `power_map_regions.csv`, and `metadata.json`.
+The FLP preserves region order, positions, dimensions, and discretization, and
+assigns one total-power value in **watts** to every region. Fixed regional powers
+are included once, separately from component dynamic and leakage power in the CSV.
+
+To compare constant leakage and temperature-aware leakage:
+
+```bash
+python -m experiments.thermal_replay.power_maps plot \
+  --constant-run runs/thermal_replay/b8_h15000_constant_step20us_1s \
+  --aware-run runs/thermal_replay/b8_h15000_temperature_aware_step20us_1s_retry \
+  --time-seconds 1 \
+  --output experiments/thermal_replay/results/power_maps_t1s
+```
+
+This writes `power_maps.png`, `.pdf`, and `.svg`, both profile FLPs
+(`constant_power_map.flp` and `temperature_aware_power_map.flp`),
+`power_map_regions.csv`, and `plot_metadata.json`. Both panels share one linear
+**turbo** scale for **power per region in mW**. Headers show total power in W,
+chip-average power density in W/mm², and absolute dynamic/leakage powers in W.
+Nonzero fixed power is shown separately. Average density uses the full chip
+footprint from the runtime stack, not the sum of selected component areas.
+
+`--time-seconds` defaults to 1 and must match a saved power-slot endpoint exactly.
+For a 20 µs slot, the sample at 1 s is the mean power applied over
+**0.99998–1.00000 s**. No interpolation or temperature-based power reconstruction
+is performed. Gzip histories are streamed to the selected row. The commands check
+archive hashes, component mapping, geometry, solver timing, and regional totals
+against `timeseries.csv`; paired plots also check equal dynamic activity at the
+selected time and identical thermal stacks. Metadata records the interval,
+units, totals, density, and source-file hashes. These commands require repeated
+replays; single-pass traces may contain partial power windows and are rejected.
+
+For B1, substitute the paths of your completed B1 replay pair. All dimensions,
+powers, and cooling settings are read from the inputs. Output directories must
+be outside the source runs and recording; matching generated files are
+overwritten when rerunning a command. Generated figures and experiment data
+remain ignored by Git.
+
+## Plot the thermal layer stack
+
+```bash
+python -m experiments.thermal_replay.plot_stack \
+  --stack runs/thermal_replay/b8_h15000_temperature_aware_step20us_1s_retry/ice.stk \
+  --output experiments/thermal_replay/results/layer_stack_h15000
+```
+
+The command reads the actual saved stack and writes `layer_stack.png`, `.pdf`,
+`.svg`, and `.json`. The figure uses equal-height schematic blocks, with the
+layer name and physical thickness inside each block and the chip footprint
+inside the bottom block. Consecutive compatible TIM and PCB layers are merged
+for presentation only. The current stack becomes Heatsink (50 µm), TIM (30 µm),
+Silicon die (50 µm), Bumps (50 µm), and PCB (1000 µm). JSON retains all 11 physical
+layers, material properties, cooling settings, source hash, and schematic groups.
+Generator-style passive layers and single-source dies are supported; unsupported
+stack elements or multi-layer die definitions are rejected instead of omitted.
+
+The main analyzer's comparison figure has four panels: peak temperature, total
+power, constant-case dynamic/leakage power, and temperature-aware dynamic/leakage
+power. The two power-decomposition panels share a y-axis scale.
