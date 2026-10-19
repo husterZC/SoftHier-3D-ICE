@@ -25,9 +25,13 @@
         "core/models/memory/dramsys_v2.cpp": {
           "before": "63b7b87fbb47f5ef16fb1b62becbf731cd546fdba45de40f39467c15a46c23e0",
           "after": "d58f562b56a82728137faec03f369b9913b89d88e9b745b81f1ab64d0ee323ff"
+        },
+        "core/models/cpu/iss/src/ara/ara_vcompute.cpp": {
+          "before": "9ab976763753ef6e9da1ca23486ec548aecf7a5cbb919918c7513e9d078c44f6",
+          "after": "29e1509f3b484c9c059a3051069f362ce12cd255a8568973a72f415e8671231d"
         }
       },
-      "patch_sha256": "a8c992dd0ac2f3a72d6e51098e547ed618a56bafa51bfa64bb20eca43738fc52"
+      "patch_sha256": "3cf6a4e0eafa79b915a5fbc8c296476fe73780f8259c3524f0c29ef157894b89"
     },
     "dramsys": {
       "files": {

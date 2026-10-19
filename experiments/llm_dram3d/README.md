@@ -99,6 +99,35 @@ and SDK toolchain setup are shared. Omit `--build-hardware` after a compatible
 simulator is built. This option builds native models; the runner always compiles
 the staged SDK application. `make bootstrap` supplies the thermal solver.
 
+### Rebuild after the Spatz completion fix
+
+The provider's staged native patch corrects a vector-immediate operand lookup
+in the Spatz completion check. Without it, the first RMSNorm can stall at
+`vmv.v.i` while thermal updates continue. The correction is applied to the
+build copy; the SoftHier and SDK checkouts and their revisions stay unchanged.
+
+With the environment above activated, refresh dependencies before rebuilding:
+the shared native-patch fingerprint also invalidates the DRAMSys build cache.
+
+```bash
+export SIMULATOR_CONFIG="$PWD/SoftHier/soft_hier_sdk/apps_dram3d/config/arch.py"
+bash Interface_scripts/providers/softhier/provider.sh bootstrap
+bash Interface_scripts/providers/softhier/provider.sh build-hardware
+python Interface_scripts/providers/softhier/native/tests/run_spatz_chaining_test.py \
+  --output "tmp/spatz_chaining_$(date -u +%Y%m%dT%H%M%SZ)"
+```
+
+The focused test uses SDK-generated inputs and checks 32 FP16-to-FP32 results
+in both the installed debug and profile/SystemC simulators, with a 60-second
+timeout per command. Each must print `SPATZ_CHAINING_PASS` with zero errors.
+After validation, use a new study prefix for the paired thermal run; omit
+`--build-hardware` when using this rebuilt installation.
+
+With this patch, `decode_b8_kv1024` (layer 1, seed 19, one repeat) passed all
+290,368 numerical checks and all 11 stages using profile/SystemC with thermal
+coupling disabled. The layer took 25,591,547 cycles (25.592 ms at 1 GHz); the
+validation took about 64 minutes on the validation host.
+
 To inspect capacity and addresses before generating large preloads:
 
 ```bash

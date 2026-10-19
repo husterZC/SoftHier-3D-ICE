@@ -121,3 +121,17 @@
      access_size_clog = log2(memspec.access_size);
      beat_width = memspec.access_size;
  
+--- a/core/models/cpu/iss/src/ara/ara_vcompute.cpp
++++ b/core/models/cpu/iss/src/ara/ara_vcompute.cpp
+@@ -74,7 +74,10 @@
+             {
+                 if ((insn->decoder_item->u.insn.args[insn->nb_out_reg + i].u.reg.flags & ISS_DECODER_ARG_FLAG_VREG) != 0)
+                 {
+-                    if (_this->ara.scoreboard_committed[insn->in_regs[i]] != 0)
++                    // Operand IDs can leave a gap for an immediate (OPIVI).
++                    // Resolve the vector register through its declared operand ID.
++                    int in_reg = insn->in_regs[insn->decoder_item->u.insn.args[insn->nb_out_reg + i].u.reg.id];
++                    if (_this->ara.scoreboard_committed[in_reg] != 0)
+                     {
+                         done = false;
+                         break;
