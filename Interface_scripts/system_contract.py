@@ -186,6 +186,9 @@ def _validate_thermal_stack(root):
         _positive_number(die.get("total_thickness_um"), f"{die_id}.total_thickness_um")
         if die.get("active_face") not in {"top", "bottom"}:
             raise ContractError(f"{die_id}.active_face must be 'top' or 'bottom'")
+        depth = _finite_number(die.get("source_depth_um", 0), f"{die_id}.source_depth_um")
+        if depth < 0:
+            raise ContractError(f"{die_id}.source_depth_um must be non-negative")
     if geometry_roots != set(root["geometry"]):
         raise ContractError("every geometry root must belong to a thermal die")
     layers = _list(stack.get("layers"), "thermal_stack.layers")
@@ -215,9 +218,13 @@ def _validate_thermal_stack(root):
         sources = [i for i in indices if layers[i].get("source")]
         if len(sources) != 1:
             raise ContractError(f"{die['id']} requires exactly one source layer")
-        face_index = indices[-1] if die["active_face"] == "top" else indices[0]
-        if sources[0] != face_index:
-            raise ContractError(f"{die['id']} source layer does not match its active_face")
+        # BEOL can cover the active silicon. Depth is measured from the active
+        # face to the nearest source boundary, excluding the source thickness.
+        covering = ([i for i in indices if i > sources[0]] if die["active_face"] == "top"
+                    else [i for i in indices if i < sources[0]])
+        if not math.isclose(sum(layers[i]["thickness_um"] for i in covering),
+                            die.get("source_depth_um", 0), rel_tol=1e-10, abs_tol=1e-12):
+            raise ContractError(f"{die['id']} source layer does not match its active_face/source_depth_um")
         if not math.isclose(sum(layers[i]["thickness_um"] for i in indices), die["total_thickness_um"], rel_tol=1e-10):
             raise ContractError(f"{die['id']} layers do not preserve total thickness")
     cooling = _mapping(stack.get("cooling"), "thermal_stack.cooling")

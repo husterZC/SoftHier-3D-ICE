@@ -296,7 +296,7 @@ def main() -> int:
     parser.add_argument("--arch", required=True, help="SoftHier architecture file.")
     parser.add_argument("--output", required=True, help="Output contract JSON file.")
     parser.add_argument("--thermal-config", default=os.environ.get("SOFTHIER_THERMAL_CONFIG") or None,
-                        help="Memory-on-logic physical inputs; defaults to documented engineering assumptions.")
+                        help="Stacked logic/DRAM physical inputs, including stack_order; defaults to documented engineering assumptions.")
     parser.add_argument("--dram-power-config", default=os.environ.get("SOFTHIER_DRAM_POWER_CONFIG") or None,
                         help="Resolved DRAM electrical model metadata to archive in the contract.")
     parser.add_argument("--floorplan", choices=tuple(floorplans.RULES), default=floorplans.DEFAULT_RULE,

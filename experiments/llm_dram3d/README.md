@@ -152,7 +152,7 @@ simulating. Thermal placement is selected by `run_study.py --floorplan`.
 | `--layer` | `1` | SDK layer index, 0–35. Layer 1 uses full attention; layer 0 uses sliding-window attention. |
 | `--seed` | `19` | Nonnegative seed for deterministic synthetic inputs and weights. |
 | `--all-experts` | Off | Also preload inactive experts, increasing file size without changing the reserved memory mapping. |
-| `--thermal-config` | Provider `configs/dram3d_thermal.json` | Repo-local physical package parameters and provenance. |
+| `--thermal-config` | Provider `configs/dram3d_thermal.json` | Repo-local physical package parameters, `stack_order`, and provenance. |
 | `--dram-power-config` | Provider `configs/dram3d_power.json` | Repo-local HBM2 electrical parameters and provenance. |
 | `--sdk` | `SoftHier/soft_hier_sdk` | Repo-local SDK checkout at the pinned revision. |
 | `--prefix` | `dram3d` | New study identifier for logs, workloads, and raw runs. |
@@ -165,14 +165,27 @@ autoregressive generation. Numerical validation runs once after the final
 repeat. With one repeat, the staged application source is unchanged from the SDK.
 Changing repeats requires a software rebuild, which the runner performs.
 
+The thermal JSON's top-level `stack_order` selects `logic_on_dram` (logic on
+top) or `dram_on_logic` (DRAM on top, the default when omitted). Edit the
+default JSON or pass a complete repo-local copy with `--thermal-config`.
+Both choices keep face-to-face bonding, BEOL next to the bond, and cooling
+above the top die. Materials and floorplan/channel alignment follow each die.
+
 The thermal integration step is one tenth of the coupling interval. The default
-15-layer package runs bottom to top through substrate, bumps, logic bulk/source,
-face-to-face bond, DRAM source/bulk, TIM, copper, and top cooling. Logic and DRAM
-dies are each 50 µm thick, including a 1 µm source layer; the bond is 5 µm thick.
+17-layer package runs bottom to top through substrate, bumps, logic bulk/source,
+logic BEOL, hybrid bond, DRAM BEOL, DRAM source/bulk, TIM, copper, and top cooling.
+Each die retains 49 µm bulk and a 1 µm source, with 5 µm BEOL added for a 55 µm
+total die thickness. The hybrid-bond region is 2 µm; the complete package totals
+1,242 µm. DRAM BEOL uses a logic-derived placeholder pending DRAM-specific data.
+The `logic_on_dram` option reverses the two-die region around the bond while
+retaining the same layer count and total thickness.
+BEOL heat capacity and hybrid-bond material properties also remain provisional.
 The initial and cooling temperatures are **300 K**, with top heat-sink coefficient
 **h = 15000 W/(m²·K)** (`1.5e-8 W/(µm²·K)` in 3D-ICE).
 See the [model input specification](../../Interface_scripts/providers/softhier/configs/README.md)
 for materials, units, and the stack arrangement.
+These defaults apply to new exports; completed runs and portable recordings
+continue to use their archived stacks.
 
 The tracked [thermal input](../../Interface_scripts/providers/softhier/configs/dram3d_thermal.json)
 and [electrical input](../../Interface_scripts/providers/softhier/configs/dram3d_power.json)

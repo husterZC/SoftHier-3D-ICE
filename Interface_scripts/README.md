@@ -177,7 +177,7 @@ The exact-path and one-column rules prevent hierarchical or floorplan double
 counting. A future contract version can add explicit power-distribution
 fractions if one component must be split across multiple powered blocks.
 
-### Memory-on-logic contract and package
+### Stacked logic/DRAM contract and package
 
 For a stacked-only SoftHier architecture with `dram3d_enable=1`, the exporter
 produces version 2. The SDK's 4×4 architecture has 304 logic power domains plus
@@ -192,14 +192,25 @@ die thicknesses and active-face orientations, and the top cooling boundary.
 The validator checks complete per-die coverage, disjoint rectangles, matching
 footprints, contiguous die layers, and one correctly positioned source layer
 per die. Logic and DRAM components receive their own source-layer temperatures.
+The optional per-die `source_depth_um` measures passive material from the active
+face to the nearest source boundary (zero for legacy contracts), allowing BEOL
+between the source and the bond without moving the heat source into BEOL.
+
+The thermal configuration's `stack_order` selects `dram_on_logic` (the
+default, also used when omitted) or `logic_on_dram`. The bottom die faces
+upward and the top die faces downward, keeping their BEOL regions next to the
+bond. Cooling stays above the top die. Each die retains its geometry and
+material properties; solver power order follows the bottom-to-top sources.
 
 The default bottom-to-top package is substrate → package bumps → logic bulk →
-logic source → face-to-face bond → DRAM source → DRAM bulk → TIM → copper
-heatsink → top cooling boundary. Each die is 50 µm thick, including a 1 µm
-source layer; the bond is 5 µm. DRAM uses silicon thermal properties, and the
-bond initially borrows the existing anisotropic bump material. These are
-engineering assumptions, with provenance recorded in the contract. The
-existing package and cooling settings are preserved. See the complete
+logic source → logic BEOL → hybrid bond → DRAM BEOL → DRAM source → DRAM bulk →
+TIM → copper heatsink → top cooling boundary. Each die is 55 µm thick: 49 µm
+bulk, 1 µm source, and 5 µm BEOL; the bond is 2 µm. The 17-layer package totals
+1,242 µm. DRAM BEOL copies the logic placeholder pending characterization.
+BEOL conductivity is derived from a published two-layer model; BEOL heat
+capacity and bond material properties remain provisional. These engineering
+assumptions have provenance recorded in the contract. Existing recordings
+retain their archived stacks. See the complete
 [input configuration documentation](providers/softhier/configs/README.md).
 
 Override the checked-in inputs with `SOFTHIER_THERMAL_CONFIG` and

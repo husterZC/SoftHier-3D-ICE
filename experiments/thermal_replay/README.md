@@ -6,14 +6,16 @@ power slot while retaining the complete die and package thermal state. Startup
 runs once and the heating curve begins at the archived initial temperature.
 
 `llm_decode` source runs use the 11-layer single-die thermal package.
-[`llm_dram3d`](../llm_dram3d/README.md) source runs use the 15-layer memory-on-logic
-package with **LOGIC_DIE + DRAM_DIE**. Both default to **h = 15000 W/(m²·K)**.
+[`llm_dram3d`](../llm_dram3d/README.md) source runs use a 17-layer package with
+**LOGIC_DIE + DRAM_DIE**. Its thermal configuration selects `dram_on_logic`
+(default) or `logic_on_dram` through `stack_order`. Both the single-die and
+two-die packages default to **h = 15000 W/(m²·K)**.
 `capture` and `record` preserve the source run's physical stack and cooling
 coefficient unless `--heat-transfer-coefficient` overrides the latter.
 Replay uses the recording's archived stack; changing repository defaults does
 not alter existing recordings or results.
 
-## Replay memory-on-logic B1 and B8 workloads
+## Replay stacked logic/DRAM B1 and B8 workloads
 
 Use the constant-profile source for each batch from an `llm_dram3d` study.
 The old B1/B8 recordings below remain single-die inputs; replay does not add a
@@ -65,7 +67,10 @@ After creating both recordings:
 The version-2 recording includes `thermal_manifest.json`, both floorplans,
 the actual stack with relative floorplan paths, the contract, activity arrays,
 and checksums for every required input. It is portable without its source run.
-The native source order comes from the contract and manifest (logic then DRAM).
+The native source order comes from the contract and manifest: logic then DRAM
+for `dram_on_logic`, or DRAM then logic for `logic_on_dram`. Replay inherits
+the recorded order; selecting a different order requires a source run exported
+with that thermal configuration and a recording from that run.
 Each temperature inspection point is checked by filename and region names,
 so output ordering cannot silently swap the dies.
 
@@ -405,11 +410,19 @@ for presentation only. The current stack becomes Heatsink (50 µm), TIM (30 µm)
 Silicon die (50 µm), Bumps (50 µm), and PCB (1000 µm). JSON retains all 11 physical
 layers, material properties, cooling settings, source hash, and schematic groups.
 Source-plus-bulk die definitions are supported and merged into one schematic
-block per die. The default memory-on-logic package has 15 physical layers,
-1235 µm total: Heatsink (50 µm), TIM (30 µm), DRAM die (50 µm), Face-to-face
-bond (5 µm), Logic die (50 µm), Bumps (50 µm), and PCB (1000 µm). JSON retains
-each physical source/bulk sublayer. Unsupported elements and ambiguous source
-definitions are rejected instead of omitted.
+block per die; BEOL is shown separately. The default memory-on-logic package
+has 17 physical layers, 1242 µm total: Heatsink (50 µm), TIM (30 µm), DRAM
+silicon (50 µm), DRAM BEOL (5 µm), Hybrid bond (2 µm), Logic BEOL (5 µm), Logic
+silicon (50 µm), Bumps (50 µm), and PCB (1000 µm). Each die totals 55 µm including
+its BEOL. For `logic_on_dram`, logic silicon/BEOL appear above the bond and
+DRAM BEOL/silicon below it; layer count and total thickness stay the same.
+JSON retains each physical source/bulk/BEOL sublayer. Unsupported
+elements and ambiguous source definitions are rejected instead of omitted.
+
+Existing recordings keep their archived physical stack, including the previous
+15-layer, 1235 µm memory-on-logic package. Neither `replay` nor `record` imports
+the current provider defaults into an older run or recording. The plot always
+shows the supplied stack file's actual layers.
 
 The main analyzer's comparison figure has four panels: peak temperature, total
 power, constant-case dynamic/leakage power, and temperature-aware dynamic/leakage

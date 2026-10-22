@@ -25,7 +25,7 @@ def positive(value):
 
 
 def read_stack(path):
-    """Read passive layers and dies with one source plus optional bulk sublayers.
+    """Read passive layers and dies with one source plus bulk/BEOL sublayers.
 
     Reject unsupported stack elements/die layouts instead of omitting physical
     layers. The returned data contains no filenames, so pairs can be compared.
@@ -89,7 +89,8 @@ def read_stack(path):
         if any(layer.get("die", layer["name"]) == match[2] for layer in layers):
             raise ValueError(f"duplicate stack element: {match[2]}")
         for i, layer in enumerate(definition):
-            name = match[2] if len(definition) == 1 else f"{match[2]}_{'SOURCE' if layer['powered'] else 'BULK'}_{i}"
+            kind = "SOURCE" if layer["powered"] else "BEOL" if layer["material"].endswith("_BEOL") else "BULK"
+            name = match[2] if len(definition) == 1 else f"{match[2]}_{kind}_{i}"
             physical = {"name": name, **layer, "top_depth_um": depth}
             if match[1] == "die":
                 physical["die"] = match[2]
@@ -106,19 +107,26 @@ def read_stack(path):
 
 def schematic_blocks(stack):
     blocks = []
+    beol_dies = {layer.get("die") for layer in stack["layers_top_to_bottom"]
+                 if layer["material"].endswith("_BEOL")}
     for layer in stack["layers_top_to_bottom"]:
         die = layer.get("die")
-        if die and blocks and blocks[-1].get("die") == die:
+        beol = layer["material"].endswith("_BEOL")
+        if (die and not beol and blocks and blocks[-1].get("die") == die
+                and not blocks[-1]["material"].endswith("_BEOL")):
             blocks[-1]["thickness_um"] += layer["thickness_um"]
             blocks[-1]["powered"] |= layer["powered"]
             blocks[-1]["source_layers"].append(layer["name"])
             continue
         group = re.fullmatch(r"(TIM|PCB)(?:_\d+)?", layer["name"])
         merge = group[1] if group and not layer["powered"] else None
-        label_key = die or layer["name"]
+        label_key = layer["material"] if beol else die or layer["name"]
         label = merge or {"HEATSINK": "Heatsink", "TOP_DIE": "Silicon die", "BUMP": "Bumps",
-                          "LOGIC_DIE": "Logic die", "DRAM_DIE": "DRAM die", "F2F_BOND": "Face-to-face bond"}.get(
+                          "LOGIC_DIE": "Logic die", "DRAM_DIE": "DRAM die", "F2F_BOND": "Face-to-face bond",
+                          "LOGIC_BEOL": "Logic BEOL", "DRAM_BEOL": "DRAM BEOL", "HYBRID_BOND": "Hybrid bond"}.get(
             label_key, label_key.replace("_", " "))
+        if die and die in beol_dies and not beol:
+            label = label.replace(" die", " silicon")
         if layer["name"] == "TOP_DIE" and layer["material"] != "SILICON":
             label = "Active die"
         if (merge and blocks and blocks[-1]["name"] == merge
@@ -152,7 +160,8 @@ def plot_stack(stack_path, output):
     import matplotlib.pyplot as plt
     from matplotlib.patches import Rectangle
 
-    colors = {"CU": "#DCA66C", "TIM": "#8ED0D2", "BUMP": "#BDA9D7"}
+    colors = {"CU": "#DCA66C", "TIM": "#8ED0D2", "BUMP": "#BDA9D7", "HYBRID_BOND": "#BDA9D7",
+              "LOGIC_BEOL": "#E4C18A", "DRAM_BEOL": "#E4C18A"}
     with plt.rc_context({"font.family": "DejaVu Sans", "pdf.fonttype": 42, "svg.fonttype": "none"}):
         fig = plt.figure(figsize=(7.2, max(4.5, len(blocks) * 1.36)))
         axis = fig.add_axes([.06, .06, .88, .88])
@@ -174,7 +183,7 @@ def plot_stack(stack_path, output):
             fig.savefig(output / f"layer_stack.{extension}", dpi=300, facecolor="white")
         plt.close(fig)
     metadata = {"source_stack": str(stack_path), "source_stack_sha256": digest(stack_path),
-                **stack, "presentation": "equal-height schematic; die sublayers and consecutive TIM/PCB layers merged",
+                **stack, "presentation": "equal-height schematic; source/bulk and consecutive TIM/PCB layers merged; BEOL separate",
                 "blocks_top_to_bottom": blocks}
     write_json(output / "layer_stack.json", metadata)
     return metadata

@@ -1,19 +1,31 @@
 {
   "schema_version": 1,
-  "provenance": "Engineering starting assumptions, not measured package characterization. Logic total thickness and silicon properties retain the existing package model; DRAM uses the same silicon properties. The 5 um face-to-face bond borrows the existing anisotropic BUMP effective material. The 1 um active source thicknesses are numerical heat-source regions included within each 50 um die.",
+  "stack_order": "dram_on_logic",
+  "provenance": "Engineering baseline using published phase data and assumed geometry/mixing, not measured package characterization. Each die retains 49 um bulk silicon and a 1 um numerical active source, plus 5 um BEOL, for 55 um total. BEOL conductivity is homogenized from the 1.5 um / 1.5 W/(m K) and 3.5 um / 2.5 W/(m K) layers in Naeim et al., ISVLSI 2024, https://doi.org/10.1109/ISVLSI61997.2024.00018 (Cadence white paper Table 2): parallel x/y average 2.2 and series z average 2.0833333333333335 W/(m K). Both BEOL volumetric heat capacities retain the assumed silicon value 1.61e6 J/(m3 K); DRAM BEOL thickness and conductivity reuse the logic estimate pending DRAM-specific data. The 2 um hybrid bond assumes uniformly distributed cylindrical Cu pads spanning its thickness with area/volume fraction f=0.20, effective pad conductivity km=80 W/(m K), and dielectric conductivity kd=1.25 W/(m K), the midpoints of Naeim et al.'s 60-100 and 1-1.5 ranges. Through-plane parallel averaging gives kz=f*km+(1-f)*kd=17 W/(m K). In-plane cylindrical-inclusion Maxwell approximation (https://doi.org/10.1007/s00707-020-02788-3), beta=(km-kd)/(km+kd), gives kx=ky=kd*(1+f*beta)/(1-f*beta)=1.851145038167939 W/(m K). Bond heat capacity uses the existing model's Cu 3.45e6 J/(m3 K) and a bulk fused-silica proxy 2200 kg/m3 * 770 J/(kg K)=1.694e6 J/(m3 K) from Corning HPFS Product Brochure (2015, https://www.corning.com/content/dam/corning/media/worldwide/csm/documents/HPFS_Product_Brochure_All_Grades_2015_07_21.pdf); volume averaging gives 2.0452e6 J/(m3 K). These are effective room-temperature constants with ideal thermal contact and no additional interface resistance. Substrate, package bumps, TIM, heatsink, and cooling settings are retained.",
   "logic_die": {
-    "thickness_um": 50.0,
-    "source_thickness_um": 1.0
+    "thickness_um": 55.0,
+    "source_thickness_um": 1.0,
+    "beol": {
+      "thickness_um": 5.0,
+      "thermal_conductivity_w_m_k": [2.2, 2.2, 2.0833333333333335],
+      "volumetric_heat_capacity_j_m3_k": 1610000.0
+    }
   },
   "dram_die": {
-    "thickness_um": 50.0,
+    "thickness_um": 55.0,
     "source_thickness_um": 1.0,
     "thermal_conductivity_w_m_k": 130.0,
-    "volumetric_heat_capacity_j_m3_k": 1610000.0
+    "volumetric_heat_capacity_j_m3_k": 1610000.0,
+    "beol": {
+      "thickness_um": 5.0,
+      "thermal_conductivity_w_m_k": [2.2, 2.2, 2.0833333333333335],
+      "volumetric_heat_capacity_j_m3_k": 1610000.0
+    }
   },
   "face_to_face_bond": {
-    "thickness_um": 5.0,
-    "thermal_conductivity_w_m_k": [5.5, 5.5, 113.0],
-    "volumetric_heat_capacity_j_m3_k": 1845000.0
+    "technology": "hybrid",
+    "thickness_um": 2.0,
+    "thermal_conductivity_w_m_k": [1.851145038167939, 1.851145038167939, 17.0],
+    "volumetric_heat_capacity_j_m3_k": 2045200.0
   }
 }

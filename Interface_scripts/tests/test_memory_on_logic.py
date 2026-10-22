@@ -19,7 +19,7 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "Interface_scripts"))
 from providers.softhier import export_system_config as exporter
 from providers.softhier.thermal_config import DEFAULT_THERMAL_CONFIG, load_thermal_config, validate_thermal_config
-from system_contract import ContractError, geometry_rectangle, power_order_elements, validate_contract
+from system_contract import ContractError, geometry_rectangle, power_order_elements, thermal_die_ids, validate_contract
 from thermal_manifest import copy_inputs, load_manifest
 
 HOOK_SPEC = importlib.util.spec_from_file_location("multi_die_hook", ROOT / "Interface_scripts/co-simulation/3dice_power_hook.py")
@@ -29,6 +29,13 @@ HOOK_SPEC.loader.exec_module(HOOK)
 GENERATOR = ROOT / "Interface_scripts/geometry_generator/generate_3dice_inputs.py"
 SERVER = ROOT / "3D-ICE/bin/3D-ICE-Server"
 ACTUAL_DRAM3D_ARCH = ROOT / "SoftHier/soft_hier_sdk/apps_dram3d/config/arch.py"
+STACK_ORDERS = ("dram_on_logic", "logic_on_dram")
+
+
+def thermal_inputs(stack_order):
+    inputs = load_thermal_config(DEFAULT_THERMAL_CONFIG)
+    inputs["stack_order"] = stack_order
+    return inputs
 
 
 def architecture(columns=4, rows=4):
@@ -88,12 +95,24 @@ class MemoryOnLogicTests(unittest.TestCase):
     def test_defaults_are_explicit_and_overrides_preserve_die_thickness(self):
         inputs = load_thermal_config(DEFAULT_THERMAL_CONFIG)
         self.assertIn("not measured", inputs["provenance"])
+        defaults = contract(1, 1)["thermal_stack"]
+        self.assertEqual(len(defaults["layers"]), 17)
+        self.assertEqual(sum(layer["thickness_um"] for layer in defaults["layers"]), 1242)
+        self.assertEqual([die["total_thickness_um"] for die in defaults["dies"]], [55, 55])
+        self.assertEqual([die["source_depth_um"] for die in defaults["dies"]], [5, 5])
+        self.assertEqual([layer["id"] for layer in defaults["layers"][5:12]],
+                         ["LOGIC_BULK", "LOGIC_SOURCE", "LOGIC_BEOL", "HYBRID_BOND",
+                          "DRAM_BEOL", "DRAM_SOURCE", "DRAM_BULK"])
+        self.assertEqual([layer["thickness_um"] for layer in defaults["layers"][5:12]],
+                         [49, 1, 5, 2, 5, 1, 49])
         inputs["dram_die"]["thickness_um"] = 75
         inputs["dram_die"]["source_thickness_um"] = 2
+        inputs["dram_die"]["beol"]["thickness_um"] = 3
         document = contract(1, 1, thermal_config=inputs)
         layers = document["thermal_stack"]["layers"]
         self.assertEqual(sum(layer["thickness_um"] for layer in layers if layer.get("die") == "DRAM_DIE"), 75)
-        self.assertEqual(next(layer["thickness_um"] for layer in layers if layer["id"] == "DRAM_BULK"), 73)
+        self.assertEqual(next(layer["thickness_um"] for layer in layers if layer["id"] == "DRAM_BULK"), 70)
+        self.assertEqual(document["thermal_stack"]["dies"][1]["source_depth_um"], 3)
         for key, value in (("thickness_um", 0), ("source_thickness_um", 75), ("thermal_conductivity_w_m_k", float("nan"))):
             bad = copy.deepcopy(inputs)
             bad["dram_die"][key] = value
@@ -102,6 +121,112 @@ class MemoryOnLogicTests(unittest.TestCase):
         del inputs["face_to_face_bond"]["thickness_um"]
         with self.assertRaisesRegex(ValueError, "face_to_face_bond.thickness_um"):
             validate_thermal_config(inputs)
+
+    def test_beol_inputs_require_materials_and_leave_positive_bulk(self):
+        for die in ("logic_die", "dram_die"):
+            for key, value in (("thickness_um", 0), ("thickness_um", 54),
+                               ("thermal_conductivity_w_m_k", [1, 2]),
+                               ("thermal_conductivity_w_m_k", [1, float("nan"), 2]),
+                               ("volumetric_heat_capacity_j_m3_k", None)):
+                bad = load_thermal_config(DEFAULT_THERMAL_CONFIG)
+                bad[die]["beol"][key] = value
+                with self.subTest(die=die, key=key, value=value), self.assertRaises(ValueError):
+                    validate_thermal_config(bad)
+            bad = load_thermal_config(DEFAULT_THERMAL_CONFIG)
+            bad[die]["beol"] = None
+            with self.assertRaisesRegex(ValueError, "beol must be an object"):
+                validate_thermal_config(bad)
+        bad = load_thermal_config(DEFAULT_THERMAL_CONFIG)
+        bad["face_to_face_bond"]["technology"] = "unknown"
+        with self.assertRaisesRegex(ValueError, "technology"):
+            validate_thermal_config(bad)
+
+    def test_stack_order_validation_and_archiving(self):
+        baseline = contract(2, 1)
+        omitted = load_thermal_config(DEFAULT_THERMAL_CONFIG)
+        self.assertEqual(omitted.pop("stack_order"), "dram_on_logic")
+        self.assertEqual(contract(2, 1, thermal_config=omitted), baseline)
+        self.assertNotIn("stack_order", omitted, "validation must not mutate caller inputs")
+        for value in (None, True, 0, "", "logic", "LOGIC_ON_DRAM", [], {}):
+            with self.subTest(invalid=value), self.assertRaisesRegex(ValueError, "stack_order"):
+                validate_thermal_config(thermal_inputs(value))
+        for order, expected in (("dram_on_logic", ["LOGIC_DIE", "DRAM_DIE"]),
+                                ("logic_on_dram", ["DRAM_DIE", "LOGIC_DIE"])):
+            with self.subTest(order=order):
+                document = contract(2, 1, thermal_config=thermal_inputs(order))
+                for key in ("geometry", "floorplan", "power_trace", "thermal_feedback"):
+                    self.assertEqual(document[key], baseline[key], key)
+                self.assertEqual(document["metadata"]["thermal_config"]["stack_order"], order)
+                self.assertEqual(document["metadata"]["architecture_variant"], "memory-on-logic")
+                stack = document["thermal_stack"]
+                self.assertEqual(thermal_die_ids(document), expected)
+                self.assertEqual([die["id"] for die in stack["dies"]], expected)
+                self.assertEqual([die["active_face"] for die in stack["dies"]], ["top", "bottom"])
+                self.assertEqual(len(stack["layers"]), 17)
+                self.assertEqual(sum(layer["thickness_um"] for layer in stack["layers"]), 1242)
+                self.assertEqual(stack["materials"], baseline["thermal_stack"]["materials"])
+                self.assertEqual(stack["cooling"], baseline["thermal_stack"]["cooling"])
+                self.assertEqual(stack["layers"][:5], baseline["thermal_stack"]["layers"][:5])
+                self.assertEqual(stack["layers"][-5:], baseline["thermal_stack"]["layers"][-5:])
+                if order == "logic_on_dram":
+                    self.assertNotEqual(document["metadata"]["thermal_config_sha256"],
+                                        baseline["metadata"]["thermal_config_sha256"])
+
+    def test_asymmetric_die_layers_follow_identity_and_active_face(self):
+        for order in STACK_ORDERS:
+            for logic_beol, dram_beol in ((True, True), (False, True), (True, False), (False, False)):
+                with self.subTest(order=order, logic_beol=logic_beol, dram_beol=dram_beol):
+                    inputs = thermal_inputs(order)
+                    inputs["logic_die"].update(thickness_um=61, source_thickness_um=2)
+                    inputs["dram_die"].update(thickness_um=73, source_thickness_um=4,
+                                             thermal_conductivity_w_m_k=[110, 120, 130])
+                    for name, enabled, depth in (("logic_die", logic_beol, 3), ("dram_die", dram_beol, 7)):
+                        if enabled:
+                            inputs[name]["beol"]["thickness_um"] = depth
+                        else:
+                            del inputs[name]["beol"]
+                    document = contract(1, 1, thermal_config=inputs)
+                    stack = document["thermal_stack"]
+                    self.assertEqual(sum(layer["thickness_um"] for layer in stack["layers"]), 1266)
+                    for die in stack["dies"]:
+                        logic = die["id"] == "LOGIC_DIE"
+                        name, material = ("LOGIC", "SILICON") if logic else ("DRAM", "DRAM")
+                        total, source, depth = (61, 2, 3 if logic_beol else 0) if logic else (73, 4, 7 if dram_beol else 0)
+                        expected = [(f"{name}_BULK", material, total - source - depth),
+                                    (f"{name}_SOURCE", material, source)]
+                        if depth:
+                            expected.append((f"{name}_BEOL", f"{name}_BEOL", depth))
+                        if die["active_face"] == "bottom":
+                            expected.reverse()
+                        layers = [layer for layer in stack["layers"] if layer.get("die") == die["id"]]
+                        self.assertEqual([(layer["id"], layer["material"], layer["thickness_um"]) for layer in layers], expected)
+                        self.assertEqual(die["total_thickness_um"], total)
+                        self.assertEqual(die.get("source_depth_um", 0), depth)
+                        self.assertEqual(sum(bool(layer.get("source")) for layer in layers), 1)
+                    self.assertEqual(stack["materials"]["DRAM"]["thermal_conductivity_w_m_k"], [110, 120, 130])
+
+    def test_legacy_config_without_beol_retains_original_stack(self):
+        inputs = load_thermal_config(DEFAULT_THERMAL_CONFIG)
+        del inputs["stack_order"]
+        for die in ("logic_die", "dram_die"):
+            del inputs[die]["beol"]
+            inputs[die]["thickness_um"] = 50
+        del inputs["face_to_face_bond"]["technology"]
+        inputs["face_to_face_bond"]["thickness_um"] = 5
+        inputs["face_to_face_bond"]["thermal_conductivity_w_m_k"] = [5.5, 5.5, 113.0]
+        inputs["face_to_face_bond"]["volumetric_heat_capacity_j_m3_k"] = 1845000.0
+        document = contract(1, 1, thermal_config=inputs)
+        stack = document["thermal_stack"]
+        self.assertEqual(len(stack["layers"]), 15)
+        self.assertEqual(sum(layer["thickness_um"] for layer in stack["layers"]), 1235)
+        self.assertTrue(all("source_depth_um" not in die for die in stack["dies"]))
+        text = (self.generate(document) / "ice.stk").read_text()
+        self.assertRegex(text, r"die LOGIC_DIE_IC\s*:\s*source 1 SILICON\s*;\s*layer 49 SILICON")
+        self.assertRegex(text, r"die DRAM_DIE_IC\s*:\s*layer 49 DRAM\s*;\s*source 1 DRAM")
+        self.assertIn("layer F2F_BOND F2F_BOND_LAYER", text)
+        self.assertRegex(text, r"material F2F\s*:\s*thermal conductivity 5\.5e-06, 5\.5e-06, 0\.000113\s*;\s*volumetric heat capacity 1\.845e-12")
+        self.assertNotIn("HYBRID_BOND", text)
+        self.assertNotIn("BEOL", text)
 
     def test_validator_rejects_cross_die_mapping_overlap_and_wrong_source(self):
         document = contract(2, 1)
@@ -122,22 +247,68 @@ class MemoryOnLogicTests(unittest.TestCase):
         with self.assertRaisesRegex(ContractError, "total thickness"):
             validate_contract(bad)
 
-    def test_power_order_follows_sources_even_when_floorplan_order_changes(self):
+    def test_source_depth_must_match_covering_layers_on_active_face(self):
         document = contract(1, 1)
-        document["floorplan"]["elements"].reverse()
-        validate_contract(document)
-        ordered = power_order_elements(document)
-        self.assertEqual(ordered[-1]["die"], "DRAM_DIE")
-        self.assertTrue(all(item["die"] == "LOGIC_DIE" for item in ordered[:-1]))
+        for die_index in (0, 1):
+            for depth in (-1, float("nan"), True, 0, 4, 6):
+                bad = copy.deepcopy(document)
+                bad["thermal_stack"]["dies"][die_index]["source_depth_um"] = depth
+                with self.subTest(die=die_index, depth=depth), self.assertRaisesRegex(ContractError, "source_depth_um"):
+                    validate_contract(bad)
+            bad = copy.deepcopy(document)
+            del bad["thermal_stack"]["dies"][die_index]["source_depth_um"]
+            with self.assertRaisesRegex(ContractError, "source_depth_um"):
+                validate_contract(bad)
+
+    def test_power_order_follows_sources_even_when_floorplan_order_changes(self):
+        for order in STACK_ORDERS:
+            with self.subTest(order=order):
+                document = contract(1, 1, thermal_config=thermal_inputs(order))
+                document["floorplan"]["elements"].reverse()
+                validate_contract(document)
+                ordered = power_order_elements(document)
+                dram_index = -1 if order == "dram_on_logic" else 0
+                self.assertEqual(ordered.pop(dram_index)["die"], "DRAM_DIE")
+                self.assertTrue(all(item["die"] == "LOGIC_DIE" for item in ordered))
 
     def test_generated_sources_face_the_bond_and_manifest_matches_files(self):
-        folder = self.generate()
+        for order in STACK_ORDERS:
+            with self.subTest(order=order):
+                self.check_generated_stack(order)
+
+    def check_generated_stack(self, order):
+        folder = self.generate(contract(1, 1, thermal_config=thermal_inputs(order)))
         text = (folder / "ice.stk").read_text()
-        self.assertRegex(text, r"die LOGIC_DIE_IC\s*:\s*source 1 SILICON\s*;\s*layer 49 SILICON")
-        self.assertRegex(text, r"die DRAM_DIE_IC\s*:\s*layer 49 DRAM\s*;\s*source 1 DRAM")
+        if order == "dram_on_logic":
+            expected_order = ["LOGIC_DIE", "DRAM_DIE"]
+            self.assertRegex(text, r"die LOGIC_DIE_IC\s*:\s*layer 5 LOGIC_BEOL\s*;\s*source 1 SILICON\s*;\s*layer 49 SILICON")
+            self.assertRegex(text, r"die DRAM_DIE_IC\s*:\s*layer 49 DRAM\s*;\s*source 1 DRAM\s*;\s*layer 5 DRAM_BEOL")
+        else:
+            expected_order = ["DRAM_DIE", "LOGIC_DIE"]
+            self.assertRegex(text, r"die LOGIC_DIE_IC\s*:\s*layer 49 SILICON\s*;\s*source 1 SILICON\s*;\s*layer 5 LOGIC_BEOL")
+            self.assertRegex(text, r"die DRAM_DIE_IC\s*:\s*layer 5 DRAM_BEOL\s*;\s*source 1 DRAM\s*;\s*layer 49 DRAM")
         stack = text.split("stack:", 1)[1].split("solver:", 1)[0]
-        self.assertLess(stack.index("DRAM_DIE"), stack.index("F2F_BOND"))
-        self.assertLess(stack.index("F2F_BOND"), stack.index("LOGIC_DIE"))
+        self.assertLess(stack.index(expected_order[1]), stack.index("HYBRID_BOND"))
+        self.assertLess(stack.index("HYBRID_BOND"), stack.index(expected_order[0]))
+        self.assertNotIn("F2F_BOND", text)
+        self.assertRegex(text, r"layer HYBRID_BOND_LAYER\s*:\s*height 2\s*;")
+        # Check both anisotropy and SI-to-micrometre conversion through the exporter.
+        for name, conductivity, capacity in (
+            ("LOGIC_BEOL", (2.2e-6, 2.2e-6, 5e-6 / 2.4), 1.61e-12),
+            ("DRAM_BEOL", (2.2e-6, 2.2e-6, 5e-6 / 2.4), 1.61e-12),
+            ("HYBRID_BOND", (1.851145038167939e-6, 1.851145038167939e-6, 17e-6), 2.0452e-12),
+            ("BUMP", (5.5e-6, 5.5e-6, 113e-6), 1.845e-12),
+        ):
+            with self.subTest(material=name):
+                material = re.search(rf"material {name}\s*:\s*thermal conductivity ([^;]+);\s*"
+                                     r"volumetric heat capacity ([^;]+);", text)
+                self.assertIsNotNone(material)
+                values = [float(value) for value in material[1].split(",")]
+                self.assertEqual(len(values), 3)
+                for value, expected in zip(values, conductivity):
+                    self.assertTrue(math.isclose(value, expected, rel_tol=1e-12), (value, expected))
+                self.assertTrue(math.isclose(float(material[2]), capacity, rel_tol=1e-12),
+                                (float(material[2]), capacity))
         self.assertRegex(text, r"material DRAM\s*:\s*thermal conductivity 0.00013\s*;\s*volumetric heat capacity 1.61e-12")
         self.assertIn("numofcores 1 ;", text)
         dimensions = re.search(r"chip length ([^,]+), width ([^;]+)", text)
@@ -145,7 +316,7 @@ class MemoryOnLogicTests(unittest.TestCase):
         self.assertTrue(all(float(pitch) <= float(size) for pitch, size in zip(cells.groups(), dimensions.groups())),
                         "small dies must retain nonzero passive-layer discretization")
         manifest = json.loads((folder / "thermal_manifest.json").read_text())
-        self.assertEqual([die["id"] for die in manifest["dies"]], ["LOGIC_DIE", "DRAM_DIE"])
+        self.assertEqual([die["id"] for die in manifest["dies"]], expected_order)
         names = []
         for die in manifest["dies"]:
             floorplan = (folder / die["floorplan"]).read_text()
@@ -154,7 +325,7 @@ class MemoryOnLogicTests(unittest.TestCase):
             self.assertIn(die["temperature_output"], text)
             self.assertIn(die["map_output"], text)
         self.assertEqual(names, manifest["power_order"])
-        self.assertEqual(names[-1], "dram__channel_0")
+        self.assertEqual(names[-1 if order == "dram_on_logic" else 0], "dram__channel_0")
 
     def test_single_die_contract_remains_version_one(self):
         arch = architecture(1, 1)
@@ -173,38 +344,51 @@ class MemoryOnLogicTests(unittest.TestCase):
 
     @unittest.skipUnless(SERVER.is_file(), "requires the built 3D-ICE server")
     def test_native_solver_power_order_and_two_source_feedback(self):
-        folder = self.generate()
+        for order in STACK_ORDERS:
+            with self.subTest(order=order):
+                self.check_native_source_feedback(order)
+
+    def check_native_source_feedback(self, order):
+        document = contract(1, 1, thermal_config=thermal_inputs(order))
+        folder = self.generate(document)
         manifest = json.loads((folder / "thermal_manifest.json").read_text())
         count = len(manifest["power_order"])
         zeros = [0] * count
-        document = json.loads((folder / "system.json").read_text())
-        logic_elements = power_order_elements(document)[:-1]
-        rectangles = [geometry_rectangle(document["geometry"], item["name"]) for item in logic_elements]
+        ordered = power_order_elements(document)
+        rectangles = [geometry_rectangle(document["geometry"], item["name"]) for item in ordered]
         areas = [width * height for _, _, width, height in rectangles]
-        logic_heat = [.02 * area / sum(areas) for area in areas] + [0]
-        for heated_die, powers in ((0, logic_heat), (1, [0] * (count - 1) + [.02])):
+        for heated_die, other_die in (("LOGIC_DIE", "DRAM_DIE"), ("DRAM_DIE", "LOGIC_DIE")):
             with self.subTest(heated_die=heated_die):
+                heated_area = sum(area for entry, area in zip(ordered, areas) if entry["die"] == heated_die)
+                powers = [.02 * area / heated_area if entry["die"] == heated_die else 0
+                          for entry, area in zip(ordered, areas)]
                 (folder / "power.txt").write_text("\n".join(" ".join(map(str, row)) for row in (zeros, powers, [-1] * count)) + "\n")
                 result = subprocess.run([str(SERVER), "ice.stk", "--power-trace", "power.txt", "--until-minus-one"],
                                         cwd=folder, capture_output=True, text=True, timeout=30)
                 self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-                temperatures = []
+                temperatures = {}
                 for die in manifest["dies"]:
                     rows = [[float(value) for value in line.split()] for line in (folder / die["temperature_output"]).read_text().splitlines()
                             if line.strip() and not line.startswith("%")]
                     self.assertEqual([len(row) for row in rows], [1 + len(die["elements"])] * 2)
                     self.assertTrue(all(abs(value - 300) < .001 for value in rows[0][1:]))
                     self.assertTrue(all(math.isfinite(value) and value >= 300 for value in rows[1][1:]))
-                    temperatures.append(sum(rows[1][1:]) / len(die["elements"]))
-                self.assertGreater(temperatures[heated_die], temperatures[1 - heated_die])
-                self.assertGreater(temperatures[1 - heated_die], 300)
+                    temperatures[die["id"]] = sum(rows[1][1:]) / len(die["elements"])
+                self.assertGreater(temperatures[heated_die], temperatures[other_die])
+                self.assertGreater(temperatures[other_die], 300)
 
     @unittest.skipUnless(SERVER.is_file() and ACTUAL_DRAM3D_ARCH.is_file(), "requires native solver and pinned DRAM3D SDK")
     def test_actual_four_by_four_package_preserves_equilibrium_and_heating_bound(self):
+        for order in STACK_ORDERS:
+            with self.subTest(order=order):
+                self.check_actual_package_heating(order)
+
+    def check_actual_package_heating(self, order):
         # Small meshes did not reveal a parallel-factorization failure seen on
         # the real 4x4 package. Keep its actual layout and passive-layer grid.
         architecture = exporter.import_architecture(ACTUAL_DRAM3D_ARCH)
-        document = exporter.build_contract(architecture, ACTUAL_DRAM3D_ARCH, 0)
+        document = exporter.build_contract(architecture, ACTUAL_DRAM3D_ARCH, 0,
+                                           thermal_config=thermal_inputs(order))
         folder = self.generate(document, target_cells=1024, interval_ps=20_000_000)
         ordered = power_order_elements(document)
         totals, areas = {}, []
@@ -236,14 +420,16 @@ class MemoryOnLogicTests(unittest.TestCase):
 
 
 class MultiDieHookTests(unittest.TestCase):
+    stack_order = "dram_on_logic"
     temporary = MemoryOnLogicTests.temporary
     generate = MemoryOnLogicTests.generate
 
     def setUp(self):
-        self.document = contract(1, 1)
+        self.document = contract(1, 1, thermal_config=thermal_inputs(self.stack_order))
         self.folder = self.generate(self.document)
         self.manifest_path = self.folder / "thermal_manifest.json"
         self.manifest = json.loads(self.manifest_path.read_text())
+        self.dies = {die["id"]: die for die in self.manifest["dies"]}
         self.config_path = self.folder / "hook.json"
         result = subprocess.run([sys.executable, str(ROOT / "Interface_scripts/co-simulation/generate_power_hook_config.py"),
             "--output", str(self.config_path), "--system-config", str(self.folder / "system.json"),
@@ -269,8 +455,8 @@ class MultiDieHookTests(unittest.TestCase):
         return SimpleNamespace(phase=phase, request=str(path), response=str(self.folder / f"response_{phase}.json"),
                                config=str(self.config_path))
 
-    def append_temperatures(self, die_index, value, *, complete=True):
-        die = self.manifest["dies"][die_index]
+    def append_temperatures(self, die_id, value, *, complete=True):
+        die = self.dies[die_id]
         with (self.folder / die["temperature_output"]).open("a") as stream:
             # Native microsecond timestamps may be identical after rounding.
             stream.write("0.000 " + " ".join([str(value)] * len(die["elements"])) + ("\n" if complete else ""))
@@ -294,11 +480,11 @@ class MultiDieHookTests(unittest.TestCase):
             update = self.request("update", 0, 10_000_000)
             future = pool.submit(HOOK.run, update)
             self.wait_power_rows(1)
-            self.append_temperatures(0, 310)
-            self.append_temperatures(1, 330, complete=False)
+            self.append_temperatures("LOGIC_DIE", 310)
+            self.append_temperatures("DRAM_DIE", 330, complete=False)
             time.sleep(.03)
             self.assertFalse(future.done(), "hook returned before the DRAM row was complete")
-            with (self.folder / self.manifest["dies"][1]["temperature_output"]).open("a") as stream:
+            with (self.folder / self.dies["DRAM_DIE"]["temperature_output"]).open("a") as stream:
                 stream.write("\n")
             self.assertEqual(future.result(timeout=3), 0)
             values = json.loads(Path(update.response).read_text())["temperatures"]
@@ -307,21 +493,22 @@ class MultiDieHookTests(unittest.TestCase):
             final = self.request("final", 10_000_000, 15_000_000)
             future = pool.submit(HOOK.run, final)
             self.wait_power_rows(2)
-            self.append_temperatures(1, 340)
+            self.append_temperatures("DRAM_DIE", 340)
             time.sleep(.03)
             self.assertFalse(future.done(), "hook returned before the logic die advanced")
-            self.append_temperatures(0, 320)
+            self.append_temperatures("LOGIC_DIE", 320)
             self.assertEqual(future.result(timeout=3), 0)
         values = json.loads(Path(final.response).read_text())["temperatures"]
         self.assertAlmostEqual(values[0]["temperature_c"], 46.85)
         self.assertAlmostEqual(values[-1]["temperature_c"], 66.85)
         rows = [[float(value) for value in line.split()] for line in (self.folder / "power.txt").read_text().splitlines()]
         self.assertEqual(rows[0], rows[1])
-        self.assertEqual(rows[0], [(index + 1) / 100 for index in range(19)] + [0, .2])
+        logic = [(index + 1) / 100 for index in range(19)] + [0]
+        self.assertEqual(rows[0], logic + [.2] if self.stack_order == "dram_on_logic" else [.2] + logic)
         self.assertEqual(rows[2], [-1] * 21)
 
     def test_mismatched_completed_slots_fail_before_appending_power(self):
-        self.append_temperatures(0, 310)
+        self.append_temperatures("LOGIC_DIE", 310)
         with self.assertRaisesRegex(HOOK.HookError, "same completed slot"):
             HOOK.run(self.request("update", 0, 10))
         self.assertFalse((self.folder / "power.txt").exists())
@@ -358,7 +545,9 @@ class MultiDieHookTests(unittest.TestCase):
             capture_output=True, text=True, timeout=10)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         rows = [[float(value) for value in line.split()] for line in output.read_text().splitlines()]
-        self.assertEqual(rows, [list(range(1, 20)) + [0, 20], [-1] * 21])
+        logic = list(range(1, 20)) + [0]
+        expected = logic + [20] if self.stack_order == "dram_on_logic" else [20] + logic
+        self.assertEqual(rows, [expected, [-1] * 21])
 
     def test_thermal_replay_rejects_missing_manifest_before_creating_capture(self):
         try:
@@ -429,8 +618,8 @@ class MultiDieHookTests(unittest.TestCase):
         self.assertIn('floorplan "custom floorplans/renamed.flp"', (destination.parent / "ice.stk").read_text())
         self.assertEqual(target.read_bytes(), (folder / "floorplan.flp").read_bytes())
 
-        self.append_temperatures(0, 310)
-        self.append_temperatures(1, 340)
+        self.append_temperatures("LOGIC_DIE", 310)
+        self.append_temperatures("DRAM_DIE", 340)
         tool = ROOT / "Interface_scripts/thermal_manifest.py"
         summary = subprocess.run([sys.executable, str(tool), "summary", str(self.manifest_path)],
                                  check=True, capture_output=True, text=True)
@@ -441,6 +630,11 @@ class MultiDieHookTests(unittest.TestCase):
                                "--gif", str(self.folder / "map.gif")], check=True, capture_output=True, text=True)
         self.assertIn("map_logic_die.gif", gifs.stdout)
         self.assertIn("map_dram_die.gif", gifs.stdout)
+
+
+class LogicOnDramHookTests(MultiDieHookTests):
+    """Run the same coupled transport checks with DRAM first in native order."""
+    stack_order = "logic_on_dram"
 
 
 if __name__ == "__main__":

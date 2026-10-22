@@ -1,5 +1,6 @@
 """Create portable recordings from new captures or existing hook traces."""
 
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -175,8 +176,21 @@ def _capture(source_run, output, provider, start=None, end=None, layers_per_cycl
         subprocess.run([str(provider), "export-system"], env=environment, check=True,
                        stdout=log, stderr=subprocess.STDOUT)
     current = load_contract(environment["SYSTEM_CONFIG_FILE"])
+    current_metadata = current["metadata"]
+    if document["contract"]["version"] == 2:
+        archived_thermal = document["metadata"].get("thermal_config", {})
+        current_thermal = current_metadata.get("thermal_config", {})
+        if "stack_order" not in archived_thermal and current_thermal.get("stack_order") == "dram_on_logic":
+            # An omitted selector historically meant DRAM above logic. Compare
+            # the new default in that old representation, including its hash;
+            # all other metadata and the physical stack must still match.
+            legacy_thermal = {key: value for key, value in current_thermal.items() if key != "stack_order"}
+            current_metadata = {**current_metadata, "thermal_config": legacy_thermal,
+                                "thermal_config_sha256": hashlib.sha256(
+                                    json.dumps(legacy_thermal, sort_keys=True).encode()).hexdigest()}
     for key in ("metadata", "geometry", "floorplan", "power_trace", "thermal_feedback", "thermal_stack"):
-        if current.get(key) != document.get(key):
+        value = current_metadata if key == "metadata" else current.get(key)
+        if value != document.get(key):
             raise ValueError(f"current simulator {key} differs from archived capture model")
     shutil.copyfile(source_run / "generated/system_config.json", output / "generated/system_config.json")
     updates = []

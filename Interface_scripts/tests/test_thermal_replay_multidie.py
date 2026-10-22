@@ -1,6 +1,7 @@
 """Portable two-die recordings, native transport, and separate die analysis."""
 
 import copy
+import hashlib
 import json
 from pathlib import Path
 import re
@@ -12,7 +13,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from Interface_scripts.tests.test_memory_on_logic import contract as multidie_contract, GENERATOR, ROOT, SERVER
+from Interface_scripts.tests.test_memory_on_logic import contract as multidie_contract, thermal_inputs, GENERATOR, ROOT, SERVER
 from Interface_scripts.tests.test_thermal_replay import contract as legacy_contract
 import numpy as np
 
@@ -24,14 +25,14 @@ from experiments.thermal_replay.replay import Mapping, run
 from experiments.thermal_replay.validate import compare_replay
 
 
-def source_fixture(folder):
+def source_fixture(folder, stack_order="dram_on_logic"):
     """Three windows, a partial final window, and changing DRAM background."""
     folder = Path(folder)
     generated = folder / "generated/3dice"
     generated.mkdir(parents=True)
     (folder / "traces").mkdir()
     (folder / "logs").mkdir()
-    document = multidie_contract(1, 1)
+    document = multidie_contract(1, 1, thermal_config=thermal_inputs(stack_order))
     document["metadata"]["power_model_specs"] = legacy_contract()["metadata"]["power_model_specs"]
     for element in document["floorplan"]["elements"]:
         if "constant_w" in element["power"]:
@@ -61,12 +62,14 @@ def source_fixture(folder):
 
 
 class MultiDieReplayTests(unittest.TestCase):
+    stack_order = "dram_on_logic"
+
     def setUp(self):
         temporary = tempfile.TemporaryDirectory(prefix="multidie-replay-")
         self.addCleanup(temporary.cleanup)
         self.folder = Path(temporary.name)
         self.source = self.folder / "source"
-        self.document = source_fixture(self.source)
+        self.document = source_fixture(self.source, self.stack_order)
         self.recording = self.folder / "recording"
         record(self.source, self.recording)
 
@@ -78,15 +81,23 @@ class MultiDieReplayTests(unittest.TestCase):
         self.assertEqual(manifest["format"], "softhier-thermal-replay-v2")
         self.assertEqual(activity.period, 40_000_000)
         layout = Layout(moved, document)
-        self.assertEqual([d["id"] for d in layout.dies], ["LOGIC_DIE", "DRAM_DIE"])
+        expected_order = (["LOGIC_DIE", "DRAM_DIE"] if self.stack_order == "dram_on_logic"
+                          else ["DRAM_DIE", "LOGIC_DIE"])
+        self.assertEqual([d["id"] for d in layout.dies], expected_order)
+        self.assertEqual(document["metadata"]["thermal_config"]["stack_order"], self.stack_order)
         for die in layout.dies:
             self.assertEqual(die["floorplan"].parent, moved)
             self.assertIn(die["floorplan"].name, manifest["sha256"])
         mapping = Mapping(document, moved)
         values = np.arange(len(manifest["component_paths"]), dtype=float)
         powers = mapping.powers(values)
-        self.assertEqual(powers[-1], values[-1])
+        self.assertEqual(powers[-1 if self.stack_order == "dram_on_logic" else 0], values[-1])
         self.assertAlmostEqual(powers.sum(), values.sum() + .001)
+        region_temperatures = np.full(len(layout.entries), 40.)
+        region_temperatures[mapping.region_groups["DRAM_DIE"]] = 80.
+        component_temperatures = mapping.temperatures(region_temperatures)
+        np.testing.assert_array_equal(component_temperatures[:-1], np.full(len(values) - 1, 40.))
+        self.assertEqual(component_temperatures[-1], 80.)
         if SERVER.is_file():
             self.assertEqual(run(moved, self.folder / "relocated_run", profile="constant", cycles=1)["status"], "complete")
         layout.dies[1]["floorplan"].write_text(layout.dies[1]["floorplan"].read_text() + "\n")
@@ -118,6 +129,8 @@ class MultiDieReplayTests(unittest.TestCase):
 
     def test_hot_dram_does_not_trigger_the_logic_model_limit(self):
         layout = Layout(self.recording, self.document)
+        dram_regions = [layout.entries.index(name) for die in layout.dies if die["id"] == "DRAM_DIE"
+                        for name in die["elements"]]
         class HotDramClient:
             count = len(layout.entries)
             state_calls = 0
@@ -133,7 +146,7 @@ class MultiDieReplayTests(unittest.TestCase):
             def temperatures(self, expected):
                 values = np.full(self.count, 26.85)
                 if self.slots:
-                    values[-1] = 180.
+                    values[dram_regions] = 180.
                 return values
             def advance(self, powers):
                 self.slots += 1
@@ -152,7 +165,7 @@ class MultiDieReplayTests(unittest.TestCase):
         provider = self.folder / "provider.py"
         # A provider stub validates capture inputs and emits the known trace;
         # no GVSoC, workload build, or submodule edits are involved.
-        provider.write_text(f'#!{sys.executable}\n' + '''import json, os, pathlib, shutil, sys
+        provider.write_text(f'#!{sys.executable}\n' + '''import hashlib, json, os, pathlib, shutil, sys
 env = os.environ
 source = pathlib.Path(env["SIMULATOR_CONFIG"]).parent.parent
 assert pathlib.Path(env["SOFTHIER_BINARY"]).name == "layer.elf"
@@ -161,7 +174,15 @@ assert env["SOFTHIER_INPUT_PRELOAD"] == ""
 for stem in ("THERMAL", "DRAM_POWER"):
     assert json.loads(pathlib.Path(env[f"SOFTHIER_{stem}_CONFIG"]).read_text())
 if sys.argv[1] == "export-system":
-    shutil.copyfile(source / "generated/system_config.json", env["SYSTEM_CONFIG_FILE"])
+    document = json.loads((source / "generated/system_config.json").read_text())
+    thermal = document["metadata"]["thermal_config"]
+    thermal.setdefault("stack_order", "dram_on_logic")
+    override = pathlib.Path(__file__).with_name("export_override.json")
+    if override.is_file():
+        thermal.update(json.loads(override.read_text()))
+    document["metadata"]["thermal_config_sha256"] = hashlib.sha256(
+        json.dumps(thermal, sort_keys=True).encode()).hexdigest()
+    pathlib.Path(env["SYSTEM_CONFIG_FILE"]).write_text(json.dumps(document))
 else:
     updates = json.loads(pathlib.Path(env["POWER_HOOK_CONFIG_FILE"]).read_text())["temperatures"]
     assert all(update["voltage_v"] == .7 for update in updates[:-1])
@@ -174,6 +195,23 @@ else:
         result = capture(self.source, output, provider)
         self.assertEqual(result["format"], "softhier-thermal-replay-v2")
         load_recording(output / "recording")
+        if self.stack_order == "dram_on_logic":
+            legacy = copy.deepcopy(self.document)
+            del legacy["metadata"]["thermal_config"]["stack_order"]
+            legacy["metadata"]["thermal_config_sha256"] = hashlib.sha256(
+                json.dumps(legacy["metadata"]["thermal_config"], sort_keys=True).encode()).hexdigest()
+            write_json(self.source / "generated/system_config.json", legacy)
+            legacy_output = self.folder / "captured_legacy"
+            capture(self.source, legacy_output, provider)
+            _, archived, _ = load_recording(legacy_output / "recording")
+            self.assertEqual(archived, legacy, "capture must preserve the archived model")
+        changed_bond = dict(self.document["metadata"]["thermal_config"]["face_to_face_bond"], thickness_um=3)
+        other_order = "logic_on_dram" if self.stack_order == "dram_on_logic" else "dram_on_logic"
+        for key, value in (("stack_order", other_order), ("face_to_face_bond", changed_bond)):
+            with self.subTest(changed_input=key):
+                write_json(self.folder / "export_override.json", {key: value})
+                with self.assertRaisesRegex(ValueError, "metadata differs"):
+                    capture(self.source, self.folder / f"reject_{key}", provider)
 
     @unittest.skipUnless(SERVER.is_file(), "requires built 3D-ICE server")
     def test_native_pair_analysis_exports_and_gifs(self):
@@ -211,9 +249,20 @@ else:
         self.assertEqual(len(collection.get_paths()), 1)
         plt.close(fig)
         stack = plot_stack.read_stack(self.recording / "ice.stk")
-        self.assertEqual(len(stack["layers_top_to_bottom"]), 15)
-        self.assertEqual(stack["total_thickness_um"], 1235)
-        self.assertEqual([b["thickness_um"] for b in plot_stack.schematic_blocks(stack)], [50, 30, 50, 5, 50, 50, 1000])
+        self.assertEqual(len(stack["layers_top_to_bottom"]), 17)
+        self.assertEqual(stack["total_thickness_um"], 1242)
+        blocks = plot_stack.schematic_blocks(stack)
+        self.assertEqual([b["thickness_um"] for b in blocks], [50, 30, 50, 5, 2, 5, 50, 50, 1000])
+        expected = ["DRAM silicon", "DRAM BEOL", "Hybrid bond", "Logic BEOL", "Logic silicon"]
+        if self.stack_order == "logic_on_dram":
+            expected.reverse()
+        self.assertEqual([b["name"] for b in blocks[2:7]], expected)
+        self.assertTrue(all(not b["powered"] for b in blocks[3:6]))
+        self.assertEqual(sum(layer["powered"] for layer in stack["layers_top_to_bottom"]), 2)
+        plot_stack.plot_stack(self.recording / "ice.stk", self.folder / "stack_plot")
+        saved = json.loads((self.folder / "stack_plot/layer_stack.json").read_text())
+        self.assertEqual([b["name"] for b in saved["blocks_top_to_bottom"][2:7]], expected)
+        self.assertTrue((self.folder / "stack_plot/layer_stack.png").is_file())
 
     @unittest.skipUnless(SERVER.is_file(), "requires built 3D-ICE server")
     def test_single_pass_matches_file_mode_on_both_dies(self):
@@ -236,6 +285,11 @@ else:
         report = compare_replay(output, self.source, single_pass=True)
         self.assertTrue(report["passed"], report)
         self.assertEqual(set(report["per_die"]), {"LOGIC_DIE", "DRAM_DIE"})
+
+
+class LogicOnDramReplayTests(MultiDieReplayTests):
+    """Exercise recording, native replay, and analysis with logic nearest cooling."""
+    stack_order = "logic_on_dram"
 
 
 class MultiDieTransportTests(unittest.TestCase):
