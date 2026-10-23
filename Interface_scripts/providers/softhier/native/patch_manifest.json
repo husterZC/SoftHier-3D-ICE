@@ -29,9 +29,17 @@
         "core/models/cpu/iss/src/ara/ara_vcompute.cpp": {
           "before": "9ab976763753ef6e9da1ca23486ec548aecf7a5cbb919918c7513e9d078c44f6",
           "after": "29e1509f3b484c9c059a3051069f362ce12cd255a8568973a72f415e8671231d"
+        },
+        "engine/engine/src/power/power_hook.cpp": {
+          "before": "f181a7ae9ffed65e586773287477de622f52f769be5036dcab3f98538c8452e6",
+          "after": "eca81df949372586dd50270fb648f4efac5cc64caebe376c914f2b546352c533"
+        },
+        "pulp/pulp/chips/soft_hier_old/ctrl_registers.cpp": {
+          "before": "69ce3271d24dc74b3153b0f8de6f4a9bcdc3cea5281050c7215dc7e6feb77371",
+          "after": "a9af47f475ca879b4801c647e34babc42c04c6ccef42ca009bba8300b8310e4f"
         }
       },
-      "patch_sha256": "3cf6a4e0eafa79b915a5fbc8c296476fe73780f8259c3524f0c29ef157894b89"
+      "patch_sha256": "fc6ac1d473fee35352fe5aef01fe1a929a454faccb12caef538335fee545bb29"
     },
     "dramsys": {
       "files": {

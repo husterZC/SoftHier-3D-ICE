@@ -80,7 +80,7 @@ def read_stack(path):
     if not body.endswith(";"):
         raise ValueError("missing or incomplete stack elements")
     for statement in body[:-1].split(";"):
-        match = re.fullmatch(rf"\s*(layer|die)\s+({NAME})\s+({NAME})(?:\s+floorplan\s+\"[^\"]+\")?\s*", statement)
+        match = re.fullmatch(rf"\s*(layer|die)\s+({NAME})\s+({NAME})(?:\s+floorplan\s+\"[^\"]+\")?(?:\s+discretization\s+(\d+)\s+(\d+))?\s*", statement)
         if match is None or (match[1] == "die") != ("floorplan" in statement):
             raise ValueError(f"unsupported stack element: {statement.strip()}")
         definition = definitions.get(f"{match[1]} {match[3]}")
@@ -92,6 +92,10 @@ def read_stack(path):
             kind = "SOURCE" if layer["powered"] else "BEOL" if layer["material"].endswith("_BEOL") else "BULK"
             name = match[2] if len(definition) == 1 else f"{match[2]}_{kind}_{i}"
             physical = {"name": name, **layer, "top_depth_um": depth}
+            if match[4] is not None:
+                if match[1] != "layer" or min(int(match[4]), int(match[5])) <= 0:
+                    raise ValueError("invalid passive-layer discretization")
+                physical["discretization"] = [int(match[4]), int(match[5])]
             if match[1] == "die":
                 physical["die"] = match[2]
             layers.append(physical)

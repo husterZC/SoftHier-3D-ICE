@@ -66,7 +66,8 @@ def source_identity(source):
     # identities independent while the provider checks both installed builds.
     patch_identity = {"specification": specification["groups"]["softhier"],
                       "patch_sha256": file_digest(HERE / "native/softhier.patch"),
-                      "applicator_sha256": file_digest(HERE / "native/apply_native.py")}
+                      "applicator_sha256": file_digest(HERE / "native/apply_native.py"),
+                      "timing_header_sha256": file_digest(HERE / "native/closed_loop_timing.h")}
     return {"bases": bases, "softhier_patch": patch_identity,
             "stager_sha256": file_digest(Path(__file__))}
 
@@ -95,7 +96,7 @@ def stage(source, workdir):
     if destination.exists():
         raise ValueError("incomplete native stage; remove this provider-generated directory before retrying: {}".format(destination))
     copy_tracked(source, destination)
-    for module in ("core", "engine"):
+    for module in ("core", "engine", "pulp"):
         (destination / module).unlink()
         copy_tracked(source / module, destination / module)
     for name in ("soft_hier_sdk", "third_party"):

@@ -1,17 +1,23 @@
 """Generate a 3D-ICE stack from the version 2 physical-layer contract."""
 
 from pathlib import Path
+import math
 
 from roi2ice_stk import format_number, get_floorplan_path_for_stk
 
 
-def write_stack(document, floorplans, output, slot_seconds, step_seconds):
+def write_stack(document, floorplans, output, slot_seconds, step_seconds, grid_pitch_um=None,
+                map_output="slot"):
     """Write physical layers top-to-bottom as required by 3D-ICE grammar.
 
     The contract and power inputs use bottom-to-top order. Die layer definitions
     also use top-to-bottom order, with exactly one explicitly positioned source.
     """
     stack = document["thermal_stack"]
+    if grid_pitch_um is not None and (not math.isfinite(grid_pitch_um) or grid_pitch_um <= 0):
+        raise ValueError("grid pitch must be finite and positive")
+    if map_output not in ("slot", "final"):
+        raise ValueError("map output must be slot or final")
     parts = []
     for name, material in stack["materials"].items():
         conductivity = material["thermal_conductivity_w_m_k"]
@@ -29,6 +35,11 @@ def write_stack(document, floorplans, output, slot_seconds, step_seconds):
     # The native parser truncates chip/pitch to an integer for passive layers.
     # A pitch larger than a small test die would silently omit those layers.
     cell_length, cell_width = min(50.0, length), min(50.0, width)
+    discretization = ""
+    if grid_pitch_um is not None:
+        nx, ny = math.ceil(length / grid_pitch_um), math.ceil(width / grid_pitch_um)
+        cell_length, cell_width = length / nx, width / ny
+        discretization = f" discretization {nx} {ny}"
     parts.append(f"dimensions :\n   chip length {format_number(length)}, width {format_number(width)} ;\n   cell length {format_number(cell_length)}, width {format_number(cell_width)} ;\n   non-uniform true;\n")
     for layer in stack["layers"]:
         if "die" not in layer:
@@ -49,7 +60,7 @@ def write_stack(document, floorplans, output, slot_seconds, step_seconds):
                 elements.append(f'   die {die} {die}_IC floorplan "{path}" ;')
                 emitted_dies.add(die)
         else:
-            elements.append(f"   layer {layer['id']} {layer['id']}_LAYER ;")
+            elements.append(f"   layer {layer['id']} {layer['id']}_LAYER{discretization} ;")
     parts.append("\n".join(elements) + "\n")
     initial = document.get("thermal_feedback", {}).get("initial_temperature_c", 26.85) + 273.15
     # SuperLU_MT's parallel factorization produced sub-ambient temperatures for
@@ -61,7 +72,7 @@ def write_stack(document, floorplans, output, slot_seconds, step_seconds):
         name = die["id"].lower()
         outputs.extend([
             f'   Tflp( {die["id"]}, "output_{name}_flp_avg.txt", average, slot ) ;',
-            f'   Tmap( {die["id"]}, "output_{name}.txt", slot ) ;',
+            f'   Tmap( {die["id"]}, "output_{name}.txt", {map_output} ) ;',
         ])
     parts.append("\n".join(outputs) + "\n")
     Path(output).write_text("\n".join(parts), encoding="utf-8")

@@ -36,6 +36,11 @@ class DramConfigStagingTests(unittest.TestCase):
                 self.assertEqual(json.loads((copied / "simconfig/example.json").read_text()), original)
                 selected = json.loads((copied / "hbm2-example.json").read_text())["simulation"]["simconfig"]
                 self.assertTrue(json.loads((copied / selected).read_text())["simconfig"]["PowerAnalysis"])
+                disabled = staging.prepare(folder / "arch.py", result, work, power_analysis=False)
+                disabled_configs = disabled / "dramsys_configs"
+                disabled_name = json.loads((disabled_configs / "hbm2-example.json").read_text())["simulation"]["simconfig"]
+                self.assertFalse(json.loads((disabled_configs / disabled_name).read_text())["simconfig"]["PowerAnalysis"])
+                self.assertEqual(disabled, staging.prepare(folder / "arch.py", disabled, work, power_analysis=False))
                 settings.write_text(json.dumps({"simconfig": {"PowerAnalysis": False, "StoreMode": "NoStorage"}}))
                 self.assertNotEqual(result, staging.prepare(folder / "arch.py", source, work))
             with patch.object(staging, "import_architecture", return_value=SimpleNamespace(dram3d_enable=0)):

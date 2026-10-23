@@ -1,5 +1,6 @@
 runs/
 /experiments/thermal_replay/results/
+/experiments/closed_loop_overhead/results/
 plan.md
 /tmp/
 

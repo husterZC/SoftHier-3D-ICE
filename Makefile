@@ -48,7 +48,9 @@ PWR_INTERVAL_PS ?= 100000000
 POWER_INTERVAL_PS ?= $(PWR_INTERVAL_PS)
 ICE_SLOT_SECONDS ?=
 ICE_STEP_SECONDS ?=
-ICE_TARGET_TOP_DIE_CELLS ?= 65536
+ICE_GRID_PITCH_UM ?=
+ICE_MAP_OUTPUT ?= slot
+ICE_TARGET_TOP_DIE_CELLS ?= $(if $(ICE_GRID_PITCH_UM),,65536)
 OTHERS_POWER ?=
 DEFAULT_POWER_W ?= $(OTHERS_POWER)
 BUILD_SOFTHIER ?= 1
@@ -125,6 +127,8 @@ help:
 		'  ICE_SLOT_SECONDS=$(ICE_SLOT_SECONDS)' \
 		'  ICE_STEP_SECONDS=$(ICE_STEP_SECONDS)' \
 		'  ICE_TARGET_TOP_DIE_CELLS=$(ICE_TARGET_TOP_DIE_CELLS)' \
+		'  ICE_GRID_PITCH_UM=$(ICE_GRID_PITCH_UM)' \
+		'  ICE_MAP_OUTPUT=$(ICE_MAP_OUTPUT)' \
 		'  DEFAULT_POWER_W=$(DEFAULT_POWER_W)' \
 		'  ICE_GENERATE_GIF=$(ICE_GENERATE_GIF)' \
 		'  ICE_GIF_FILE=$(ICE_GIF_FILE)' \
@@ -194,8 +198,10 @@ ice-inputs: dirs
 		--floorplan "$(ICE_FLOORPLAN_FILE)" \
 		--stk "$(ICE_STK_FILE)" \
 		--power-interval-ps "$(POWER_INTERVAL_PS)" \
-		--target-top-die-cells "$(ICE_TARGET_TOP_DIE_CELLS)" \
 	); \
+	if [[ -n "$(ICE_GRID_PITCH_UM)" && -n "$(ICE_TARGET_TOP_DIE_CELLS)" ]]; then echo "grid pitch and target cells conflict" >&2; exit 2; fi; \
+	if [[ -n "$(ICE_GRID_PITCH_UM)" ]]; then args+=(--grid-pitch-um "$(ICE_GRID_PITCH_UM)"); else args+=(--target-top-die-cells "$(ICE_TARGET_TOP_DIE_CELLS)"); fi; \
+	args+=(--map-output "$(ICE_MAP_OUTPUT)"); \
 	if [[ -n "$(ICE_SLOT_SECONDS)" ]]; then args+=(--slot-seconds "$(ICE_SLOT_SECONDS)"); fi; \
 	if [[ -n "$(ICE_STEP_SECONDS)" ]]; then args+=(--step-seconds "$(ICE_STEP_SECONDS)"); fi; \
 	"$(PYTHON)" "$${args[@]}"
@@ -249,6 +255,8 @@ coupled-run:
 	ICE_SLOT_SECONDS="$(ICE_SLOT_SECONDS)" \
 	ICE_STEP_SECONDS="$(ICE_STEP_SECONDS)" \
 	ICE_TARGET_TOP_DIE_CELLS="$(ICE_TARGET_TOP_DIE_CELLS)" \
+	ICE_GRID_PITCH_UM="$(ICE_GRID_PITCH_UM)" \
+	ICE_MAP_OUTPUT="$(ICE_MAP_OUTPUT)" \
 	DEFAULT_POWER_W="$(DEFAULT_POWER_W)" \
 	BUILD_SIMULATOR="$(BUILD_SIMULATOR)" \
 	BUILD_3DICE="$(BUILD_3DICE)" \

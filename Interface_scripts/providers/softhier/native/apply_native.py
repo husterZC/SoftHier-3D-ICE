@@ -18,7 +18,7 @@ def digest(path: Path) -> str:
 
 def fingerprint() -> str:
     value = hashlib.sha256()
-    for name in ("apply_native.py", "patch_manifest.json", "softhier.patch", "dramsys.patch", *HEADERS):
+    for name in ("apply_native.py", "patch_manifest.json", "softhier.patch", "dramsys.patch", "closed_loop_timing.h", *HEADERS):
         value.update(name.encode())
         value.update((HERE / name).read_bytes())
     return value.hexdigest()
@@ -56,6 +56,8 @@ def apply(group: str, root: Path) -> dict:
     for relative, expected in specification["files"].items():
         if digest(root / relative) != expected["after"]:
             raise ValueError(f"{relative}: patch postcondition failed")
+    if group == "softhier":
+        shutil.copyfile(HERE / "closed_loop_timing.h", root / "engine/engine/include/vp/closed_loop_timing.h")
     if group == "dramsys":
         for name in HEADERS:
             shutil.copyfile(HERE / name, root / "src/DRAMSys/simulation" / name)

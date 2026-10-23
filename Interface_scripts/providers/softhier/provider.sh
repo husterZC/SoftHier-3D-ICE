@@ -148,7 +148,8 @@ source_environment() {
     export SYSTEMC_HOME="$SOFTHIER_SYSTEMC_HOME"
     export DRAMSYS_PATH
     DRAMSYS_PATH="$("$PYTHON" "$SCRIPT_DIR/prepare_dram_config.py" \
-        --arch "$SIMULATOR_CONFIG" --source "$SOFTHIER_DRAMSYS_PATH" --workdir "$SOFTHIER_WORKDIR")"
+        --arch "$SIMULATOR_CONFIG" --source "$SOFTHIER_DRAMSYS_PATH" --workdir "$SOFTHIER_WORKDIR" \
+        --power-analysis "${SOFTHIER_DRAM_POWER_ANALYSIS:-1}")"
     export SOFTHIER_POWER_PROFILE SOFTHIER_DRAM_POWER_CONFIG
     export SOFTHIER_ARCH_FILE="$SIMULATOR_CONFIG"
 
@@ -605,10 +606,11 @@ build_simulator() {
 
 
 build_hardware() {
-    check_provider
     (
         cd "$SOFTHIER_DIR"
         source_environment
+        prepare_native_dependencies
+        check_provider
         prepare_native_source
         "$MAKE_CMD" -C "$PREPARED_SOFTHIER_SOURCE" "TARGETS=$SOFTHIER_TARGET" \
             "BUILDDIR=$PREPARED_SOFTHIER_BUILD" build
@@ -673,6 +675,7 @@ run_simulator() {
 
 
 run_uncoupled() {
+    local SOFTHIER_DRAM_POWER_ANALYSIS=0
     check_provider
     check_built_native
     require_executable "$SOFTHIER_WORKDIR/install/bin/gvsoc"

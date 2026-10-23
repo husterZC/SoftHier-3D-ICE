@@ -39,6 +39,13 @@ def positive_int(value):
     return parsed
 
 
+def positive_float(value):
+    parsed = float(value)
+    if not math.isfinite(parsed) or parsed <= 0:
+        raise argparse.ArgumentTypeError("value must be finite and positive")
+    return parsed
+
+
 def contract_roi(document, die=None):
     if document["contract"]["version"] == 2 and die is None:
         raise ValueError("version 2 floorplan generation requires --die")
@@ -136,9 +143,18 @@ def assign_discretization(entries, target_cells):
     return actual_cells, pitch
 
 
-def roi2ice(geometry, roi, output_file, target_top_die_cells):
+def roi2ice(geometry, roi, output_file, target_top_die_cells=None, grid_pitch_um=None):
     entries = [get_roi_entry(geometry, entry) for entry in roi]
-    actual_cells, pitch = assign_discretization(entries, target_top_die_cells)
+    if grid_pitch_um is not None:
+        if target_top_die_cells is not None:
+            raise ValueError("grid pitch and target cell count are mutually exclusive")
+        pitch = positive_float(grid_pitch_um)
+        for entry in entries:
+            entry["discretization"] = tuple(max(1, math.ceil(v / pitch)) for v in entry["dimension"])
+        actual_cells = sum(math.prod(entry["discretization"]) for entry in entries)
+    else:
+        target_top_die_cells = target_top_die_cells or DEFAULT_TARGET_TOP_DIE_CELLS
+        actual_cells, pitch = assign_discretization(entries, target_top_die_cells)
 
     os.makedirs(os.path.dirname(output_file), exist_ok=True)
     with open(output_file, "w", encoding="utf-8") as stream:
@@ -167,10 +183,12 @@ def main() -> int:
     parser.add_argument("geo_file", help="Geometry JSON generated from the contract.")
     parser.add_argument("output_file", help="Output 3D-ICE floorplan file.")
     parser.add_argument("--die", help="Generate only the selected thermal die.")
-    parser.add_argument(
+    mesh = parser.add_mutually_exclusive_group()
+    mesh.add_argument("--grid-pitch-um", type=positive_float,
+                      help="Maximum XY cell dimension in micrometers; retain region boundaries.")
+    mesh.add_argument(
         "--target-top-die-cells",
         type=positive_int,
-        default=DEFAULT_TARGET_TOP_DIE_CELLS,
         help="Approximate total non-uniform TOP_DIE cells.",
     )
     args = parser.parse_args()
@@ -184,6 +202,7 @@ def main() -> int:
         contract_roi(document, args.die),
         str(Path(args.output_file).resolve()),
         args.target_top_die_cells,
+        args.grid_pitch_um,
     )
     return 0
 

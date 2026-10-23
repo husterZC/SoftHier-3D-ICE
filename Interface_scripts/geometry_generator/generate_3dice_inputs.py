@@ -3,6 +3,7 @@
 
 import argparse
 import json
+import math
 import os
 import subprocess
 import sys
@@ -33,7 +34,7 @@ def positive_int(value: str) -> int:
 
 def positive_float(value: str) -> float:
     parsed = float(value)
-    if parsed <= 0:
+    if not math.isfinite(parsed) or parsed <= 0:
         raise argparse.ArgumentTypeError("value must be positive")
     return parsed
 
@@ -68,12 +69,15 @@ def parse_args() -> argparse.Namespace:
         type=positive_float,
         help="Transient step duration. Defaults to slot-seconds / 10.",
     )
-    parser.add_argument(
+    mesh = parser.add_mutually_exclusive_group()
+    mesh.add_argument("--grid-pitch-um", type=positive_float,
+                      help="Maximum XY pitch across every physical layer, in micrometers.")
+    mesh.add_argument(
         "--target-top-die-cells",
         type=positive_int,
-        default=256 * 256,
         help="Approximate non-uniform cell count per powered die.",
     )
+    parser.add_argument("--map-output", choices=("slot", "final"), default="slot")
     return parser.parse_args()
 
 
@@ -92,6 +96,12 @@ def main() -> int:
         raise SystemExit(f"missing system contract: {system_config}")
 
     document = load_contract(system_config)
+    if args.grid_pitch_um is not None and document["contract"]["version"] != 2:
+        raise ValueError("whole-stack grid pitch requires a version 2 physical-layer contract")
+    if args.map_output != "slot" and document["contract"]["version"] != 2:
+        raise ValueError("final-only maps require a version 2 physical-layer contract")
+    mesh_args = (["--grid-pitch-um", str(args.grid_pitch_um)] if args.grid_pitch_um is not None
+                 else ["--target-top-die-cells", str(args.target_top_die_cells or 65536)])
     initial_temperature_c = float(
         document.get("thermal_feedback", {}).get(
             "initial_temperature_c", 26.85
@@ -117,9 +127,11 @@ def main() -> int:
             path = floorplan if index == 0 else floorplan.with_name(f"{floorplan.stem}_{die_id.lower()}{floorplan.suffix}")
             floorplans[die_id] = path
             run([sys.executable, str(ROI2ICE_FLOORPLAN), str(system_config), str(geo), str(path),
-                 "--die", die_id, "--target-top-die-cells", str(args.target_top_die_cells)])
-        write_stack(document, floorplans, stk, slot_seconds, step_seconds)
+                 "--die", die_id, *mesh_args])
+        write_stack(document, floorplans, stk, slot_seconds, step_seconds, args.grid_pitch_um, args.map_output)
         write_manifest(document, floorplans, stk)
+        from mesh_report import write_mesh_report
+        write_mesh_report(document, floorplans, stk, args.grid_pitch_um)
         print(f"Generated multi-die geometry and stack: {stk}")
         return 0
     run(
@@ -129,8 +141,7 @@ def main() -> int:
             str(system_config),
             str(geo),
             str(floorplan),
-            "--target-top-die-cells",
-            str(args.target_top_die_cells),
+            *mesh_args,
         ]
     )
 
@@ -156,7 +167,7 @@ def main() -> int:
     print(f"Aligned 3D-ICE slot: {slot_seconds:.15g} s")
     print(f"3D-ICE transient step: {step_seconds:.15g} s")
     print(f"3D-ICE initial temperature: {initial_temperature_k:.15g} K")
-    print(f"Target TOP_DIE cells: {args.target_top_die_cells}")
+    print(f"Target TOP_DIE cells: {args.target_top_die_cells or 65536}")
     return 0
 
 

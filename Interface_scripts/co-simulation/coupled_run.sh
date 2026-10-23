@@ -37,7 +37,10 @@ POWER_INTERVAL_PS="${POWER_INTERVAL_PS:-100000000}"
 SOFTHIER_POWER_PROFILE="${SOFTHIER_POWER_PROFILE:-constant}"
 ICE_SLOT_SECONDS="${ICE_SLOT_SECONDS:-}"
 ICE_STEP_SECONDS="${ICE_STEP_SECONDS:-}"
-ICE_TARGET_TOP_DIE_CELLS="${ICE_TARGET_TOP_DIE_CELLS:-65536}"
+ICE_GRID_PITCH_UM="${ICE_GRID_PITCH_UM:-}"
+ICE_MAP_OUTPUT="${ICE_MAP_OUTPUT:-slot}"
+ICE_TARGET_TOP_DIE_CELLS="${ICE_TARGET_TOP_DIE_CELLS:-}"
+if [[ -z "$ICE_GRID_PITCH_UM" ]]; then ICE_TARGET_TOP_DIE_CELLS="${ICE_TARGET_TOP_DIE_CELLS:-65536}"; fi
 DEFAULT_POWER_W="${DEFAULT_POWER_W:-}"
 BUILD_SIMULATOR="${BUILD_SIMULATOR:-1}"
 BUILD_3DICE="${BUILD_3DICE:-1}"
@@ -115,6 +118,8 @@ Environment overrides:
   ICE_SLOT_SECONDS=$ICE_SLOT_SECONDS
   ICE_STEP_SECONDS=$ICE_STEP_SECONDS
   ICE_TARGET_TOP_DIE_CELLS=$ICE_TARGET_TOP_DIE_CELLS
+  ICE_GRID_PITCH_UM=$ICE_GRID_PITCH_UM
+  ICE_MAP_OUTPUT=$ICE_MAP_OUTPUT
   DEFAULT_POWER_W=$DEFAULT_POWER_W
   BUILD_SIMULATOR=$BUILD_SIMULATOR
   BUILD_3DICE=$BUILD_3DICE
@@ -226,6 +231,10 @@ validate_simulator_log_tail_lines() {
 }
 
 validate_target_top_die_cells() {
+    if [[ -n "$ICE_GRID_PITCH_UM" ]]; then
+        [[ -z "$ICE_TARGET_TOP_DIE_CELLS" ]] || die "grid pitch and target cells conflict"
+        return
+    fi
     nonnegative_integer "$ICE_TARGET_TOP_DIE_CELLS" ||
         die "ICE_TARGET_TOP_DIE_CELLS must be a positive integer"
     [[ "$ICE_TARGET_TOP_DIE_CELLS" != "0" ]] ||
@@ -389,8 +398,14 @@ generate_ice_inputs() {
         "--floorplan" "$ICE_FLOORPLAN_FILE"
         "--stk" "$ICE_STK_FILE"
         "--power-interval-ps" "$POWER_INTERVAL_PS"
-        "--target-top-die-cells" "$ICE_TARGET_TOP_DIE_CELLS"
+        "--map-output" "$ICE_MAP_OUTPUT"
     )
+
+    if [[ -n "$ICE_GRID_PITCH_UM" ]]; then
+        args+=("--grid-pitch-um" "$ICE_GRID_PITCH_UM")
+    else
+        args+=("--target-top-die-cells" "$ICE_TARGET_TOP_DIE_CELLS")
+    fi
 
     if [[ -n "$ICE_SLOT_SECONDS" ]]; then
         args+=("--slot-seconds" "$ICE_SLOT_SECONDS")
@@ -474,6 +489,8 @@ write_manifest() {
         kv SERVER_HOST "$SERVER_HOST"
         kv DICE_RUN_MODE "$DICE_RUN_MODE"
         kv ICE_TARGET_TOP_DIE_CELLS "$ICE_TARGET_TOP_DIE_CELLS"
+        kv ICE_GRID_PITCH_UM "$ICE_GRID_PITCH_UM"
+        kv ICE_MAP_OUTPUT "$ICE_MAP_OUTPUT"
         kv POWER_INTERVAL_PS "$POWER_INTERVAL_PS"
         kv SOFTHIER_POWER_PROFILE "$SOFTHIER_POWER_PROFILE"
         kv ICE_SLOT_SECONDS "$ICE_SLOT_SECONDS"

@@ -40,6 +40,7 @@ from system_contract import (  # noqa: E402
     thermal_components,
 )
 from thermal_manifest import artifact_path, load_manifest  # noqa: E402
+from overhead_timing import now as overhead_now, emit as overhead_emit
 
 
 PROTOCOL_NAME = "gvsoc-power-hook"
@@ -487,6 +488,7 @@ def exchange(
     document: Dict[str, Any],
     floorplan_entries: List[str],
 ) -> List[Dict[str, Any]]:
+    overhead_start = overhead_now()
     declared = thermal_components(document)
     declared_paths = {component["path"] for component in declared}
     samples_by_path = {
@@ -527,11 +529,15 @@ def exchange(
     if len(set(counts)) != 1:
         raise HookError("die temperature outputs are not at the same completed slot")
     append_power_slot(config["power_trace"], values)
+    overhead_sent = overhead_now()
+    overhead_emit("adapter", "power_mapping", overhead_start, overhead_sent, request["end_ps"])
     temperatures_k = []
     for die in outputs:
         temperatures_k.extend(wait_for_temperature_row(
             die["temperature_output"], die["elements"], counts[0],
             config["poll_seconds"], config["timeout_seconds"]))
+    overhead_ready = overhead_now()
+    overhead_emit("adapter", "temperature_wait", overhead_sent, overhead_ready, request["end_ps"])
     updates = component_temperatures(
         document, floorplan_entries, temperatures_k
     )
@@ -546,6 +552,7 @@ def exchange(
         },
         updates,
     )
+    overhead_emit("adapter", "feedback_mapping", overhead_ready, sim_ps=request["end_ps"])
     return updates
 
 
@@ -563,6 +570,7 @@ def parse_args() -> argparse.Namespace:
 
 
 def run(args: argparse.Namespace) -> int:
+    overhead_start = overhead_now()
     request_path = Path(args.request).resolve()
     response_path = Path(args.response).resolve()
     config_path = Path(args.config).resolve()
@@ -580,6 +588,7 @@ def run(args: argparse.Namespace) -> int:
     power_sources = build_power_sources(document)
     validate_floorplan_entries(floorplan_entries, power_sources)
 
+    overhead_emit("adapter", "configuration", overhead_start, sim_ps=request_document["end_ps"])
     if args.phase == "init":
         # Validate an already-created Tflp header when available. The server
         # creates it before advertising readiness.
@@ -625,13 +634,16 @@ def run(args: argparse.Namespace) -> int:
             config["power_trace"], len(floorplan_entries)
         )
 
+    overhead_response = overhead_now()
     atomic_json(response_path, response(args.phase, updates))
+    overhead_emit("adapter", "response_write", overhead_response, sim_ps=request_document["end_ps"])
     print(
         f"[3dice-power-hook] {args.phase}: "
         f"{len(request_document['components'])} power sample(s), "
         f"{len(updates)} temperature(s)",
         flush=True,
     )
+    overhead_emit("adapter", "adapter_run", overhead_start, sim_ps=request_document["end_ps"])
     return 0
 
 

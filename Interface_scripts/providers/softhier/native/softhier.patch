@@ -135,3 +135,82 @@
                      {
                          done = false;
                          break;
+diff --git a/engine/engine/src/power/power_hook.cpp b/engine/engine/src/power/power_hook.cpp
+--- a/engine/engine/src/power/power_hook.cpp
++++ b/engine/engine/src/power/power_hook.cpp
+@@ -15,6 +15,7 @@
+  */
+ 
+ #include <vp/vp.hpp>
++#include <vp/closed_loop_timing.h>
+ #include <vp/power/power_hook.hpp>
+ 
+ #include <algorithm>
+@@ -156,6 +157,7 @@
+ 
+ void vp::PowerHook::initialize()
+ {
++    int64_t timing_start = clo_now();
+     std::vector<PowerSample> no_samples;
+     this->write_request("init", 0, 0, no_samples);
+     this->trace_request("init", 0, 0, no_samples);
+@@ -181,6 +183,7 @@
+         component.block->power.get_total_energy(
+             &component.previous_dynamic_energy, &component.previous_leakage_energy);
+     }
++    clo_emit("gvsoc", "hook_init", timing_start, clo_now(), 0, 0);
+ }
+ 
+ 
+@@ -205,6 +208,7 @@
+ void vp::PowerHook::exchange(const std::string &phase, int64_t window_start_ps,
+     int64_t window_end_ps, bool apply_response)
+ {
++    int64_t timing_start = clo_now();
+     int64_t duration_ps = window_end_ps - window_start_ps;
+     if (duration_ps < 0)
+     {
+@@ -219,13 +223,20 @@
+ 
+     this->write_request(phase, window_start_ps, window_end_ps, samples);
+     this->trace_request(phase, window_start_ps, window_end_ps, samples);
++    int64_t captured = clo_now();
++    clo_emit("gvsoc", "power_capture", timing_start, captured, window_end_ps, 0);
+     this->invoke(phase);
++    int64_t returned = clo_now();
++    clo_emit("gvsoc", "adapter_wait", captured, returned, window_end_ps, 0);
+ 
+     std::vector<TemperatureUpdate> updates = this->read_response(phase, false);
+     if (apply_response)
+     {
+         this->apply_temperatures(updates);
+     }
++    int64_t finished = clo_now();
++    clo_emit("gvsoc", "feedback_apply", returned, finished, window_end_ps, 0);
++    clo_emit("gvsoc", "exchange", timing_start, finished, window_end_ps, duration_ps);
+ }
+ 
+ 
+diff --git a/pulp/pulp/chips/soft_hier_old/ctrl_registers.cpp b/pulp/pulp/chips/soft_hier_old/ctrl_registers.cpp
+--- a/pulp/pulp/chips/soft_hier_old/ctrl_registers.cpp
++++ b/pulp/pulp/chips/soft_hier_old/ctrl_registers.cpp
+@@ -1,3 +1,4 @@
++#include <vp/closed_loop_timing.h>
+ /*
+  * Copyright (C) 2024 ETH Zurich and University of Bologna
+  *
+@@ -160,10 +161,14 @@
+         }
+         if (offset == 8)
+         {
++            int64_t host = clo_now();
++            clo_emit("gvsoc", "roi_start", host, host, _this->time.get_time(), 0);
+             _this->timer_start = _this->time.get_time();
+         }
+         if (offset == 12)
+         {
++            int64_t host = clo_now();
++            clo_emit("gvsoc", "roi_end", host, host, _this->time.get_time(), 0);
+             int64_t period = _this->time.get_time() - _this->timer_start;
+             std::cout << "[Performance Counter]: Execution period is " << period/1000 << " ns" << std::endl;
+             _this->timer_start = _this->time.get_time();

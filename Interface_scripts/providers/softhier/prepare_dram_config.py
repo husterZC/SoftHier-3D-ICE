@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Enable HBM2 core power in a private, content-addressed configuration copy."""
+"""Select HBM2 power accounting in a private, content-addressed config copy."""
 import argparse
 import hashlib
 import json
@@ -17,7 +17,7 @@ def inside(path, root=REPO):
     return path
 
 
-def prepare(arch, source, workdir):
+def prepare(arch, source, workdir, power_analysis=True):
     source, workdir = inside(source), inside(workdir)
     architecture = import_architecture(inside(arch))
     if not getattr(architecture, "dram3d_enable", 0):
@@ -28,9 +28,10 @@ def prepare(arch, source, workdir):
     simulation = json.loads((configs / "hbm2-example.json").read_text())
     settings = inside(configs / simulation["simulation"]["simconfig"], configs)
     document = json.loads(settings.read_text())
-    if document["simconfig"].get("PowerAnalysis") is True:
+    if document["simconfig"].get("PowerAnalysis") is power_analysis:
         return source
     digest = hashlib.sha256(Path(__file__).read_bytes())
+    digest.update(str(power_analysis).encode())
     for path in sorted(configs.rglob("*")):
         if path.is_file():
             inside(path, configs)
@@ -42,7 +43,7 @@ def prepare(arch, source, workdir):
         if destination.exists():
             raise ValueError("incomplete provider configuration stage: {}".format(destination))
         shutil.copytree(str(configs), str(destination / "dramsys_configs"))
-        document["simconfig"].update(PowerAnalysis=True, EnableWindowing=False)
+        document["simconfig"].update(PowerAnalysis=power_analysis, EnableWindowing=False)
         # Other memories can share the original settings; change only HBM2.
         relative = "simconfig/softhier_dram3d_power.json"
         (destination / "dramsys_configs" / relative).write_text(json.dumps(document, indent=2) + "\n")
@@ -57,8 +58,9 @@ def main():
     parser.add_argument("--arch", type=Path, required=True)
     parser.add_argument("--source", type=Path, required=True)
     parser.add_argument("--workdir", type=Path, required=True)
+    parser.add_argument("--power-analysis", choices=("0", "1"), default="1")
     args = parser.parse_args()
-    print(prepare(args.arch, args.source, args.workdir))
+    print(prepare(args.arch, args.source, args.workdir, args.power_analysis == "1"))
 
 
 if __name__ == "__main__":
