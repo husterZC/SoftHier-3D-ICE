@@ -302,9 +302,18 @@ static void flex_eoc(unsigned error) {
         merged = analyze.merge_manifests([path])
         self.assertEqual(len(merged["runs"]), 2)
         self.assertEqual(merged["repeats"], 1)
+        self.assertEqual(merged["thermal_step_ps"], 2_000_000)
         with self.assertRaisesRegex(ValueError, "duplicate"):
             analyze.merge_manifests([path, path])
         other = self.root / "other.json"
+        preparation.write_json(other, dict(base, runs=entries, thermal_step_ps=20_000_000))
+        self.assertEqual(analyze.merge_manifests([other])["thermal_step_ps"], 20_000_000)
+        with self.assertRaisesRegex(ValueError, "different"):
+            analyze.merge_manifests([path, other])
+        mismatched_steps = [dict(entry, thermal_step_ps=2_000_000) for entry in entries]
+        preparation.write_json(other, dict(base, runs=mismatched_steps, thermal_step_ps=20_000_000))
+        with self.assertRaisesRegex(ValueError, "run thermal step differs"):
+            analyze.merge_manifests([other])
         preparation.write_json(other, dict(base, runs=entries, dram_power_config_sha256="different"))
         with self.assertRaisesRegex(ValueError, "different"):
             analyze.merge_manifests([path, other])

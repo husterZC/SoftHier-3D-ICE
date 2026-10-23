@@ -145,7 +145,7 @@ simulating. Thermal placement is selected by `run_study.py --floorplan`.
 |---|---|---|
 | `--cases` | `decode_b1_kv1024` | One or more unique SDK presets: `decode_b{1,8,16}_kv{1024,2048,4096}`, `prefill_s64`, or `prefill_s128`. |
 | `--repeats` | `1` | Repeat the complete layer execution with the same input and KV-cache position; a positive 32-bit integer. |
-| `--interval-ps` | `20000000` | One power/temperature interval for all 11 stages: **20 µs**. |
+| `--interval-ps` | `20000000` | Power/temperature update interval and 3D-ICE integration timestep for all 11 stages: **20 µs**. |
 | `--cells` | `16384` | Approximate thermal cell target per die; the generated grid may differ slightly. |
 | `--floorplan` | `redmule_strip` | Original placement or `square_bands`; DRAM channel regions remain aligned with their clusters. |
 | `--estimate-scale` | `1.0` | New-logic power coefficient multiplier, as in component-power studies. |
@@ -157,6 +157,12 @@ simulating. Thermal placement is selected by `run_study.py --floorplan`.
 | `--sdk` | `SoftHier/soft_hier_sdk` | Repo-local SDK checkout at the pinned revision. |
 | `--prefix` | `dram3d` | New study identifier for logs, workloads, and raw runs. |
 | `--build-hardware` | Off | Build native GVSoC models before running the layer. |
+
+The thermal timestep equals the power-update interval, giving one thermal step
+per exchange. The default generates `transient step 2e-05, slot 2e-05`;
+changing `--interval-ps` updates both values. Study manifests record
+`thermal_step_ps`. Analysis recognizes older manifests as using ten thermal
+steps per interval and rejects combining studies with different timesteps.
 
 KV counts cached past tokens; decode appends one token at that position. Prefill
 starts with an empty cache. Repeats accumulate 64-bit stage counters and extend

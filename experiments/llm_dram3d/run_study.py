@@ -33,7 +33,8 @@ def parse_args(argv=None):
     parser.add_argument("--repeats", type=int, default=1,
                         help="repeat the complete layer with the same inputs and KV-cache position")
     parser.add_argument("--all-experts", action="store_true")
-    parser.add_argument("--interval-ps", type=int, default=20_000_000)
+    parser.add_argument("--interval-ps", type=int, default=20_000_000,
+                        help="power/temperature interval and 3D-ICE timestep in picoseconds")
     parser.add_argument("--cells", type=int, default=16384)
     parser.add_argument("--floorplan", choices=tuple(RULES), default=DEFAULT_RULE,
                         help="logic placement; DRAM channel regions stay aligned with their clusters")
@@ -120,7 +121,8 @@ def main(argv=None):
     shutil.copy2(PROVIDER, frozen_provider)
     manifest = dict(experiment="llm_dram3d", version=1, prefix=args.prefix,
         llm_model=MODEL, cases=args.cases, layer=args.layer, seed=args.seed, repeats=args.repeats,
-        all_experts=args.all_experts, interval_ps=args.interval_ps, target_cells=args.cells,
+        all_experts=args.all_experts, interval_ps=args.interval_ps, thermal_step_ps=args.interval_ps,
+        target_cells=args.cells,
         estimate_scale=args.estimate_scale, floorplan_rule=args.floorplan,
         provider_sha256=sha256(frozen_provider), dram_power_temperature_dependence=False, runs=[])
     manifest_path = logs / "study.json"
@@ -155,7 +157,8 @@ def main(argv=None):
         started = time.monotonic()
         checked(["make", "coupled-run", "RUN_NAME=llm_dram3d", f"RUN_DIR={run_dir}",
             "BUILD_SIMULATOR=0", "BUILD_3DICE=0", f"SOFTHIER_POWER_PROFILE={profile}",
-            f"POWER_INTERVAL_PS={args.interval_ps}", f"ICE_STEP_SECONDS={args.interval_ps * 1e-13:.12g}",
+            f"POWER_INTERVAL_PS={args.interval_ps}", f"ICE_SLOT_SECONDS={args.interval_ps * 1e-12:.12g}",
+            f"ICE_STEP_SECONDS={args.interval_ps * 1e-12:.12g}",
             f"ICE_TARGET_TOP_DIE_CELLS={args.cells}"], env, logs / f"{name}_{profile}.log")
         contract = json.loads((run_dir / "generated/system_config.json").read_text())
         if contract["contract"]["version"] != 2:
@@ -169,7 +172,7 @@ def main(argv=None):
                 raise ValueError(f"{field} changed during paired study")
         archive(workload, case, run_dir / "artifacts", frozen_provider)
         manifest["runs"].append(dict(case=name, profile=profile, interval_ps=args.interval_ps,
-            repeats=args.repeats,
+            repeats=args.repeats, thermal_step_ps=args.interval_ps,
             path=str(run_dir.relative_to(ROOT)), binary_sha256=case["binary_sha256"],
             preload_sha256=case["preload_sha256"], numerical_validation=timing))
         write_json(manifest_path, manifest)

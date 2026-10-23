@@ -34,8 +34,10 @@ def merge_manifests(paths):
         # Studies created before --repeats always executed the layer once.
         study.setdefault("repeats", 1)
         validate_repeats(study["repeats"])
+        # Older runners used ten thermal integration steps per power interval.
+        study.setdefault("thermal_step_ps", study["interval_ps"] / 10)
     first, runs = studies[0], {}
-    settings = ("llm_model", "layer", "seed", "all_experts", "repeats", "interval_ps", "target_cells",
+    settings = ("llm_model", "layer", "seed", "all_experts", "repeats", "interval_ps", "thermal_step_ps", "target_cells",
         "estimate_scale", "floorplan_rule", "sdk_commit", "arch_sha256", "source_sha256", "native_source_sha256",
         "thermal_config_sha256", "dram_power_config_sha256", "dram_power_temperature_dependence")
     for study in studies:
@@ -51,6 +53,8 @@ def merge_manifests(paths):
                 raise ValueError("duplicate case/profile across manifests")
             if entry["interval_ps"] != study["interval_ps"]:
                 raise ValueError("run interval differs from study")
+            if entry.get("thermal_step_ps", study["thermal_step_ps"]) != study["thermal_step_ps"]:
+                raise ValueError("run thermal step differs from study")
             if entry.get("repeats", 1) != study["repeats"]:
                 raise ValueError("run repeats differ from study")
             runs[key] = entry
