@@ -64,7 +64,7 @@ export TMPDIR="$PWD/tmp/llm_dram3d/tmp"
 Adjust the build-job settings for the host's CPUs and memory. Bootstrap selects
 the pinned SDK revision and installs its RISC-V toolchain, SystemC, patched
 DRAMSys, and 3D-ICE. The runner prepares the private HBM2 configuration. Preload
-size depends on the case and active experts: B1/KV1024 uses about 260.5 MB;
+size depends on the case and active experts: B1/KV1024 uses about 465 MB;
 larger cases or `--all-experts` can require several GB plus archived copies.
 All experiment input/output paths must remain inside this repository.
 
@@ -78,7 +78,7 @@ make bootstrap
 python experiments/llm_dram3d/run_study.py \
   --prefix gptoss120b_dram3d_square_b1 \
   --cases decode_b1_kv1024 \
-  --floorplan square_bands --repeats 1 --build-hardware
+  --repeats 1 --build-hardware
 
 python experiments/llm_dram3d/analyze.py \
   --manifest experiments/llm_dram3d/logs/gptoss120b_dram3d_square_b1/study.json \
@@ -92,6 +92,16 @@ component-average GIFs. For a B1/B8 comparison, use
 `--cases decode_b1_kv1024 decode_b8_kv1024`; this produces four runs and sixteen
 GIFs with the same analysis options. To extend the heating history, use
 `--repeats 10` and a new prefix.
+
+The default floorplan is `square_bands`; use `--floorplan redmule_strip` for the
+original placement. This experiment defaults to `--opt-step 0`; select any SDK
+decode step from 0–26, for example `--opt-step 25`. The choice is passed explicitly
+to compilation and checked against the simulator report. Prefill keeps its
+original kernels. `prepare_workload.py` accepts the same option.
+The SDK defaults to skipping final numerical validation
+(`LLM_DRAM3D_DONE`, `checked=0`). To enable it, prefix the study command with
+`VALIDATE=1`; the runner passes this environment setting to the SDK build.
+Completion, timing, power, and thermal checks still run in both modes.
 
 Use a new prefix for another study; existing artifacts are not overwritten and
 the runner has no resume mode. Run studies sequentially because native builds
@@ -145,9 +155,10 @@ simulating. Thermal placement is selected by `run_study.py --floorplan`.
 |---|---|---|
 | `--cases` | `decode_b1_kv1024` | One or more unique SDK presets: `decode_b{1,8,16}_kv{1024,2048,4096}`, `prefill_s64`, or `prefill_s128`. |
 | `--repeats` | `1` | Repeat the complete layer execution with the same input and KV-cache position; a positive 32-bit integer. |
+| `--opt-step` | `0` | SDK decode optimization step, 0–26; overrides the SDK's standalone default. |
 | `--interval-ps` | `20000000` | Power/temperature update interval and 3D-ICE integration timestep for all 11 stages: **20 µs**. |
 | `--cells` | `16384` | Approximate thermal cell target per die; the generated grid may differ slightly. |
-| `--floorplan` | `redmule_strip` | Original placement or `square_bands`; DRAM channel regions remain aligned with their clusters. |
+| `--floorplan` | `square_bands` | Square-band placement or `redmule_strip`; DRAM channel regions remain aligned with their clusters. |
 | `--estimate-scale` | `1.0` | New-logic power coefficient multiplier, as in component-power studies. |
 | `--layer` | `1` | SDK layer index, 0–35. Layer 1 uses full attention; layer 0 uses sliding-window attention. |
 | `--seed` | `19` | Nonnegative seed for deterministic synthetic inputs and weights. |
@@ -167,9 +178,9 @@ steps per interval and rejects combining studies with different timesteps.
 KV counts cached past tokens; decode appends one token at that position. Prefill
 starts with an empty cache. Repeats accumulate 64-bit stage counters and extend
 the thermal history without advancing the token position or performing
-autoregressive generation. Numerical validation runs once after the final
-repeat. With one repeat, the staged application source is unchanged from the SDK.
-Changing repeats requires a software rebuild, which the runner performs.
+autoregressive generation. When enabled, numerical validation runs once after
+the final repeat. With one repeat, the staged application source is unchanged
+from the SDK. Changing repeats requires a software rebuild, which the runner performs.
 
 The thermal JSON's top-level `stack_order` selects `logic_on_dram` (logic on
 top) or `dram_on_logic` (DRAM on top, the default when omitted). Edit the
@@ -177,8 +188,7 @@ default JSON or pass a complete repo-local copy with `--thermal-config`.
 Both choices keep face-to-face bonding, BEOL next to the bond, and cooling
 above the top die. Materials and floorplan/channel alignment follow each die.
 
-The thermal integration step is one tenth of the coupling interval. The default
-17-layer package runs bottom to top through substrate, bumps, logic bulk/source,
+The default 17-layer package runs bottom to top through substrate, bumps, logic bulk/source,
 logic BEOL, hybrid bond, DRAM BEOL, DRAM source/bulk, TIM, copper, and top cooling.
 Each die retains 49 µm bulk and a 1 µm source, with 5 µm BEOL added for a 55 µm
 total die thickness. The hybrid-bond region is 2 µm; the complete package totals
@@ -246,7 +256,7 @@ including all repeats and final validation activity.
 
 The parent repo selects SoftHier commit
 `a453fa09fe53ff306c91072066ea3ff559a0853a`. The provider pins SDK branch
-`chi/soft_hier_dram3d` at `b454aeee4278bb00ecbfcdcc4d1366fe8451d7c8`; architecture
+`chi/soft_hier_dram3d_opt_step` at `bd6f4df3a8f0a9fcf36e39fb71afd4cbc755211b`; architecture
 comes from `apps_dram3d/config/arch.py` and source from `llm_dram3d/gpt-oss-120b`.
 
 Each case has one `layer.elf` and one combined `preload.elf` containing distributed
@@ -264,9 +274,11 @@ and provider Python helpers used to build it. Copies use filesystem copy-on-writ
 where available; hashing streams large ELFs. The runner freezes its provider
 shell and rejects native/provider source changes during a study.
 
-The study and workload manifests record repeats alongside input/source hashes.
+The study and workload manifests record repeats and optimization step alongside
+input/source hashes.
 Analysis also accepts earlier manifests that omitted repeats as single-repeat
-studies, and rejects combining studies with different repeat or floorplan settings.
+studies and omitted optimization steps as step 0. It rejects combining studies
+with different optimization steps, repeats, or floorplans.
 
 For an already activated Python virtual environment instead of Conda, use
 `export SOFTHIER_CONDA_ENV=''` and set `PYTHON` to that environment's interpreter.
@@ -275,16 +287,21 @@ validation; it is ignored and is not present in a fresh clone.
 
 ## Validation and interpretation
 
-Every run requires successful simulator and 3D-ICE exits, `LLM_DRAM3D_PASS`, the
-exact scenario and numerical check count, all **11 stage counters** summing to
-the 64-bit cycle total, and zero-cycle ELF preload. Repeated runs also report the
-completed repeat count. The runner normalizes split 64-bit stage counters before
+Every run requires successful simulator and 3D-ICE exits, exactly one
+`LLM_DRAM3D_DONE` or `LLM_DRAM3D_PASS` report with zero errors, the exact scenario,
+all **11 stage counters** summing to the 64-bit cycle total, and zero-cycle ELF
+preload. Repeated runs also report the completed repeat count. The runner
+normalizes split 64-bit stage counters before
 calling the staged SDK's unchanged `scripts/run.py:report()` validator.
 
-The SDK checks intermediate/output values, exact route IDs, route weights, and
-appended K/V against its reference (`atol=0.003`, `rtol=0.02`). Analysis requires
-matching paired binaries/inputs, source/model hashes, numerical logs, stage
-timings, power inventories/windows, logic leakage coefficients, and both dies'
+`DONE` requires `checked=0`; `PASS` requires the full expected numerical check
+count. With `VALIDATE=1`, the SDK checks intermediate/output values, exact route
+IDs, route weights, and appended K/V against its reference (`atol=0.003`,
+`rtol=0.02`). The report states whether these checks ran. In `validation.csv`,
+`sdk_status` and `verified_elements` record the result, and
+`numerical_reference_pass` is blank when numerical checking was skipped.
+Analysis requires matching paired binaries/inputs, source/model hashes,
+numerical logs, stage timings, power inventories/windows, logic leakage coefficients, and both dies'
 thermal files. Every component, floorplan region, and raw thermal cell must be
 finite and at least the minimum initial/cooling temperature, allowing 1 mK for
 rounding. The two-die stack uses one SuperLU worker; the tested eight-worker
@@ -293,7 +310,7 @@ configuration produced unphysical cooling below the initial/boundary temperature
 Power is integrated over exact simulator windows. The final partial window
 still advances a full thermal slot, following the existing co-simulation
 convention. Stage timing excludes untimed preload and final SDK numerical
-validation; application duration includes initialization and validation/reporting.
+validation; application duration includes initialization, reporting, and any enabled validation.
 
 Synthetic parameters, estimated power/materials, excluded controller/PHY power,
 fixed-temperature DRAM characterization, and a cold start limit interpretation.

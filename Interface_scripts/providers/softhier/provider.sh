@@ -6,8 +6,8 @@ ROOT_DIR="${ROOT_DIR:-$(cd "$SCRIPT_DIR/../../.." && pwd)}"
 SOFTHIER_DIR="${SOFTHIER_DIR:-$ROOT_DIR/SoftHier}"
 SOFTHIER_SDK_DIR="${SOFTHIER_SDK_DIR:-$SOFTHIER_DIR/soft_hier_sdk}"
 SOFTHIER_SDK_URL="${SOFTHIER_SDK_URL:-https://github.com/pulp-platform/softhier-sdk.git}"
-SOFTHIER_SDK_BRANCH="${SOFTHIER_SDK_BRANCH:-chi/soft_hier_dram3d}"
-SOFTHIER_SDK_COMMIT="${SOFTHIER_SDK_COMMIT:-b454aeee4278bb00ecbfcdcc4d1366fe8451d7c8}"
+SOFTHIER_SDK_BRANCH="${SOFTHIER_SDK_BRANCH:-chi/soft_hier_dram3d_opt_step}"
+SOFTHIER_SDK_COMMIT="${SOFTHIER_SDK_COMMIT:-bd6f4df3a8f0a9fcf36e39fb71afd4cbc755211b}"
 SOFTHIER_SDK_TOOLCHAIN_SOURCE="${SOFTHIER_SDK_TOOLCHAIN_SOURCE:-}"
 SOFTHIER_WORKDIR="${SOFTHIER_WORKDIR:-$SOFTHIER_DIR/.power_interface}"
 SOFTHIER_SW_BUILD="${SOFTHIER_SW_BUILD:-$SOFTHIER_WORKDIR/sw_build_staged}"
@@ -88,7 +88,7 @@ Floorplan rules: redmule_strip, square_bands. Select one with
 SOFTHIER_FLOORPLAN (default: redmule_strip).
 
 The provider pins softhier-sdk commit
-b454aeee4278bb00ecbfcdcc4d1366fe8451d7c8 on chi/soft_hier_dram3d. Override
+bd6f4df3a8f0a9fcf36e39fb71afd4cbc755211b on chi/soft_hier_dram3d_opt_step. Override
 SOFTHIER_SDK_URL only to use a mirror of the same repository.
 
 SOFTHIER_BINARY selects a prebuilt application (default: SOFTHIER_SW_BUILD/softhier.elf).

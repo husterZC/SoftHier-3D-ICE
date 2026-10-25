@@ -14,7 +14,7 @@ import time
 from prepare_workload import (CASES, MODEL, ROOT, SDK, build, load_sdk_report,
     native_source_hashes, prepare, sha256, validate_inputs, validate_repeats,
     validate_settings, within_repo, write_json)
-from Interface_scripts.providers.softhier.floorplans import DEFAULT_RULE, RULES
+from Interface_scripts.providers.softhier.floorplans import RULES
 
 STUDY = ROOT / "experiments/llm_dram3d"
 PROVIDER = ROOT / "Interface_scripts/providers/softhier/provider.sh"
@@ -30,13 +30,15 @@ def parse_args(argv=None):
     parser.add_argument("--dram-power-config", type=Path, default=CONFIGS / "dram3d_power.json")
     parser.add_argument("--layer", type=int, default=1)
     parser.add_argument("--seed", type=int, default=19)
+    parser.add_argument("--opt-step", type=int, choices=range(27), default=0, metavar="0..26",
+                        help="SDK decode optimization step (default: 0)")
     parser.add_argument("--repeats", type=int, default=1,
                         help="repeat the complete layer with the same inputs and KV-cache position")
     parser.add_argument("--all-experts", action="store_true")
     parser.add_argument("--interval-ps", type=int, default=20_000_000,
                         help="power/temperature interval and 3D-ICE timestep in picoseconds")
     parser.add_argument("--cells", type=int, default=16384)
-    parser.add_argument("--floorplan", choices=tuple(RULES), default=DEFAULT_RULE,
+    parser.add_argument("--floorplan", choices=tuple(RULES), default="square_bands",
                         help="logic placement; DRAM channel regions stay aligned with their clusters")
     parser.add_argument("--estimate-scale", type=float, default=1.0)
     parser.add_argument("--prefix", default="dram3d")
@@ -47,7 +49,7 @@ def parse_args(argv=None):
     if min(args.interval_ps, args.cells) <= 0:
         parser.error("interval and cell count must be positive")
     try:
-        validate_settings(args.cases, args.layer, args.seed, args.estimate_scale, args.repeats)
+        validate_settings(args.cases, args.layer, args.seed, args.estimate_scale, args.repeats, args.opt_step)
     except ValueError as error:
         parser.error(str(error))
     return args
@@ -60,11 +62,11 @@ def checked(command, env, log):
             stdout=stream, stderr=subprocess.STDOUT, check=True)
 
 
-def parse_timing(text, manifest, report, clusters, repeats=1):
+def parse_timing(text, manifest, report, clusters, repeats=1, *, require_validation=True, opt_step=None):
     validate_repeats(repeats)
     text = re.sub(r"\x1b\[[0-9;]*m", "", text)
-    if len(re.findall(r"LLM_DRAM3D_PASS\b", text)) != 1 or "LLM_DRAM3D_FAIL" in text:
-        raise ValueError("expected exactly one successful SDK layer validation report")
+    if len(re.findall(r"LLM_DRAM3D_(?:PASS|DONE)\b", text)) != 1 or "LLM_DRAM3D_FAIL" in text:
+        raise ValueError("expected exactly one successful SDK layer completion report")
     markers = re.findall(r"^LLM_DRAM3D_REPEATS count=(\d+)$", text, re.M)
     if (repeats == 1 and "LLM_DRAM3D_REPEATS" in text) or (repeats > 1 and (
             markers != [str(repeats)] or text.count("LLM_DRAM3D_REPEATS") != 1)):
@@ -79,6 +81,10 @@ def parse_timing(text, manifest, report, clusters, repeats=1):
         text = re.sub(pattern, lambda m:
             f"LLM_STAGE id={m[1]} cycles={(int(m[2]) << 32) | int(m[3])}", text, flags=re.M)
     result = report(text, manifest)
+    if opt_step is not None and result.get("optimization_step", 0) != opt_step:
+        raise ValueError("SDK optimization step differs from the requested step")
+    if require_validation and result["status"] != "PASS":
+        raise ValueError("SDK numerical validation is required but was skipped")
     preload = re.findall(r"Direct ELF preload complete .*cycle: (\d+)\)", text)
     if len(preload) != clusters + 1 or set(preload) != {"0"}:
         raise ValueError("direct preload did not complete at cycle zero for every loader")
@@ -122,7 +128,7 @@ def main(argv=None):
     manifest = dict(experiment="llm_dram3d", version=1, prefix=args.prefix,
         llm_model=MODEL, cases=args.cases, layer=args.layer, seed=args.seed, repeats=args.repeats,
         all_experts=args.all_experts, interval_ps=args.interval_ps, thermal_step_ps=args.interval_ps,
-        target_cells=args.cells,
+        target_cells=args.cells, opt_step=args.opt_step,
         estimate_scale=args.estimate_scale, floorplan_rule=args.floorplan,
         provider_sha256=sha256(frozen_provider), dram_power_temperature_dependence=False, runs=[])
     manifest_path = logs / "study.json"
@@ -130,7 +136,7 @@ def main(argv=None):
     with (logs / "prepare.log").open("w") as log:
         workload = prepare(args.sdk, output, args.cases, args.thermal_config, args.dram_power_config,
             layer=args.layer, seed=args.seed, estimate_scale=args.estimate_scale,
-            all_experts=args.all_experts, repeats=args.repeats, log=log)
+            all_experts=args.all_experts, repeats=args.repeats, opt_step=args.opt_step, log=log)
     env = dict(os.environ, PYTHON=sys.executable, SIMULATOR_CONFIG=workload["arch"],
         SIMULATOR_APP=workload["source"], SOFTHIER_FLOORPLAN=args.floorplan,
         SOFTHIER_DRAMSYS_PATH=workload["dramsys_path"], SOFTHIER_PRELOAD_MODE="direct",
@@ -164,7 +170,8 @@ def main(argv=None):
         if contract["contract"]["version"] != 2:
             raise ValueError("memory-on-logic experiment requires the multi-die contract")
         timing = parse_timing((run_dir / "logs/simulator.log").read_text(), case["manifest"],
-            report, contract["metadata"]["cluster_grid"]["count"], args.repeats)
+            report, contract["metadata"]["cluster_grid"]["count"], args.repeats,
+            require_validation=False, opt_step=args.opt_step)
         timing["host_seconds"] = time.monotonic() - started
         write_json(run_dir / "results/simulator/validation.json", timing)
         for field in ("binary", "preload"):
@@ -172,7 +179,7 @@ def main(argv=None):
                 raise ValueError(f"{field} changed during paired study")
         archive(workload, case, run_dir / "artifacts", frozen_provider)
         manifest["runs"].append(dict(case=name, profile=profile, interval_ps=args.interval_ps,
-            repeats=args.repeats, thermal_step_ps=args.interval_ps,
+            repeats=args.repeats, opt_step=args.opt_step, thermal_step_ps=args.interval_ps,
             path=str(run_dir.relative_to(ROOT)), binary_sha256=case["binary_sha256"],
             preload_sha256=case["preload_sha256"], numerical_validation=timing))
         write_json(manifest_path, manifest)

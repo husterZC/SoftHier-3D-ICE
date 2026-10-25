@@ -14,7 +14,7 @@ import sys
 
 ROOT = Path(__file__).resolve().parents[2]
 SDK = ROOT / "SoftHier/soft_hier_sdk"
-SDK_COMMIT = "b454aeee4278bb00ecbfcdcc4d1366fe8451d7c8"
+SDK_COMMIT = "bd6f4df3a8f0a9fcf36e39fb71afd4cbc755211b"
 CONFIGS = ROOT / "Interface_scripts/providers/softhier/configs"
 CASES = tuple(f"decode_b{batch}_kv{past}" for batch in (1, 8, 16)
               for past in (1024, 2048, 4096)) + ("prefill_s64", "prefill_s128")
@@ -79,8 +79,10 @@ def validate_repeats(repeats):
         raise ValueError("repeats must be a positive 32-bit integer")
 
 
-def validate_settings(cases, layer, seed, estimate_scale, repeats=1):
+def validate_settings(cases, layer, seed, estimate_scale, repeats=1, opt_step=0):
     validate_repeats(repeats)
+    if type(opt_step) is not int or not 0 <= opt_step <= 26:
+        raise ValueError("opt step must be an integer between 0 and 26")
     if not cases or len(set(cases)) != len(cases) or any(case not in CASES for case in cases):
         raise ValueError("cases must be supported SDK presets without duplicates")
     if isinstance(layer, bool) or not isinstance(layer, int) or not 0 <= layer < 36:
@@ -176,9 +178,9 @@ def stage_architecture(source, destination, estimate_scale):
 
 def prepare(sdk, output, cases, thermal_config=None, dram_power_config=None,
             layer=1, seed=19, estimate_scale=1.0, all_experts=False,
-            plan_only=False, dramsys_source=None, log=None, repeats=1):
+            plan_only=False, dramsys_source=None, log=None, repeats=1, opt_step=0):
     sdk, output = within_repo(sdk), within_repo(output)
-    validate_settings(cases, layer, seed, estimate_scale, repeats)
+    validate_settings(cases, layer, seed, estimate_scale, repeats, opt_step)
     thermal_config = thermal_config or CONFIGS / "dram3d_thermal.json"
     dram_power_config = dram_power_config or CONFIGS / "dram3d_power.json"
     resolved_inputs = validate_inputs(thermal_config, dram_power_config)
@@ -207,6 +209,7 @@ def prepare(sdk, output, cases, thermal_config=None, dram_power_config=None,
         arch=str(arch), arch_sha256=sha256(arch),
         upstream_arch_sha256=sha256(upstream_arch), cases={}, layer=layer, seed=seed,
         all_experts=all_experts, estimate_scale=estimate_scale, plan_only=plan_only, repeats=repeats,
+        opt_step=opt_step,
         preload_mode="direct", dram_power_temperature_dependence=False,
         scope="One complete transformer layer with deterministic synthetic weights")
     if resolved_inputs:
@@ -255,7 +258,8 @@ def build(workload, log=None):
     for case in workload["cases"].values():
         output = within_repo(case["output"])
         subprocess.run(["make", "-f", str(source / "Makefile"), "compile",
-            f"SDK_DIR={sdk}", f"RUNTIME={sdk / 'runtime/runtime'}", f"OUT={output}"],
+            f"SDK_DIR={sdk}", f"RUNTIME={sdk / 'runtime/runtime'}", f"OUT={output}",
+            f"OPT_STEP={workload.get('opt_step', 0)}"],
             cwd=output, stdout=log, stderr=subprocess.STDOUT if log else None, check=True)
         case.update(binary=str(output / "layer.elf"), binary_sha256=sha256(output / "layer.elf"))
     write_json(source.parent / "workload.json", workload)
@@ -271,6 +275,8 @@ def main(argv=None):
     parser.add_argument("--dram-power-config", type=Path)
     parser.add_argument("--layer", type=int, default=1)
     parser.add_argument("--seed", type=int, default=19)
+    parser.add_argument("--opt-step", type=int, choices=range(27), default=0, metavar="0..26",
+                        help="SDK decode optimization step (default: 0)")
     parser.add_argument("--repeats", type=int, default=1,
                         help="repeat the complete layer with the same inputs and KV-cache position")
     parser.add_argument("--estimate-scale", type=float, default=1.0)

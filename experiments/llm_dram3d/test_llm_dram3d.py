@@ -45,21 +45,36 @@ class DramStudyTests(unittest.TestCase):
         self.assertEqual(args.layer, 1)
         self.assertEqual(args.seed, 19)
         self.assertEqual(args.repeats, 1)
-        self.assertEqual(args.floorplan, "redmule_strip")
+        self.assertEqual(args.opt_step, 0)
+        self.assertEqual(args.floorplan, "square_bands")
         self.assertEqual(args.thermal_config.name, "dram3d_thermal.json")
         args = run_study.parse_args(["--cases", "decode_b8_kv1024", "prefill_s128",
-                                     "--repeats", "3", "--floorplan", "square_bands"])
+                                     "--repeats", "3", "--floorplan", "redmule_strip"])
         self.assertEqual(len(args.cases), 2)
         self.assertEqual(args.repeats, 3)
-        self.assertEqual(args.floorplan, "square_bands")
+        self.assertEqual(args.floorplan, "redmule_strip")
         for options in (["--cases", "decode_b1_kv1024", "decode_b1_kv1024"],
                         ["--layer", "36"], ["--seed", "-1"], ["--interval-ps", "0"],
                         ["--prefix", "../old"], ["--estimate-scale", "nan"],
                         ["--repeats", "0"], ["--repeats", "-1"], ["--repeats", "1.5"],
-                        ["--repeats", "4294967296"], ["--floorplan", "unknown"]):
+                        ["--repeats", "4294967296"], ["--floorplan", "unknown"],
+                        ["--opt-step", "-1"], ["--opt-step", "27"], ["--opt-step", "1.5"]):
             with self.subTest(options=options), contextlib.redirect_stderr(io.StringIO()):
                 with self.assertRaises(SystemExit):
                     run_study.parse_args(options)
+
+    @unittest.skipUnless(shutil.which("make"), "requires make")
+    def test_build_step_overrides_sdk_default_and_environment(self):
+        source = self.root / "source"
+        source.mkdir()
+        (source / "Makefile").write_text("OPT_STEP ?= 25\ncompile:\n\t@printf '%s' '$(OPT_STEP)' > $(OUT)/layer.elf\n")
+        workload = dict(sdk=str(INSPECTED_SDK), source=str(source), plan_only=False,
+                        cases={"decode_b1_kv1024": dict(output=str(self.root))})
+        with mock.patch.dict(os.environ, OPT_STEP="26"):
+            for step in (0, 25):
+                workload["opt_step"] = step
+                preparation.build(workload, log=subprocess.DEVNULL)
+                self.assertEqual((self.root / "layer.elf").read_text(), str(step))
 
     def test_invalid_repeats_fail_before_workload_output_exists(self):
         output = self.root / "workload"
@@ -90,6 +105,7 @@ class DramStudyTests(unittest.TestCase):
 #include <assert.h>
 #include <stdint.h>
 #include <stdio.h>
+#define LLM_VALIDATE 1
 #define NC 1
 #define L_BATCH 1
 #define L_SEQ 1
@@ -280,13 +296,31 @@ static void flex_eoc(unsigned error) {
         self.assertEqual(timing["preload_cycles"], 0)
         self.assertEqual(timing["repeats"], 1)
         self.assertEqual(timing["mean_layer_time_us"], timing["layer_time_us"])
+        optimized = text + "\nLLM_OPT_STEP id=25\n"
+        self.assertEqual(run_study.parse_timing(optimized, manifest, report, 16, opt_step=25)["optimization_step"], 25)
+        for measured, selected in ((optimized, 0), (text, 25)):
+            with self.assertRaisesRegex(ValueError, "optimization step"):
+                run_study.parse_timing(measured, manifest, report, 16, opt_step=selected)
+        unchecked = text.replace("LLM_DRAM3D_PASS", "LLM_DRAM3D_DONE").replace("checked=10", "checked=0")
+        unchecked_timing = run_study.parse_timing(unchecked, manifest, report, 16, require_validation=False)
+        self.assertEqual(unchecked_timing["status"], "DONE")
+        self.assertEqual(unchecked_timing["verified_elements"], 0)
+        self.assertEqual(unchecked_timing["stage_cycles"], timing["stage_cycles"])
+        with self.assertRaisesRegex(ValueError, "numerical validation is required"):
+            run_study.parse_timing(unchecked, manifest, report, 16)
         with self.assertRaisesRegex(ValueError, "repeat count"):
             run_study.parse_timing(text, manifest, report, 16, repeats=2)
         for corrupt in (text.replace("cycle: 0", "cycle: 1", 1), text.replace("id=0 cycles=10", "id=0 cycles=11"),
                         text.replace("checked=10", "checked=9"), text.replace("past=1024", "past=2048"),
-                        text + "\nMISMATCH", text + "\nLLM_DRAM3D_PASS"):
+                        text + "\nMISMATCH", text + "\nLLM_DRAM3D_PASS",
+                        unchecked.replace("checked=0", "checked=10"),
+                        unchecked.replace("errors=0", "errors=1"),
+                        unchecked.replace("id=0 cycles=10", "id=0 cycles=11"),
+                        unchecked.replace("cycle: 0", "cycle: 1", 1),
+                        unchecked + "\nLLM_DRAM3D_PASS", unchecked + "\nLLM_DRAM3D_DONE",
+                        unchecked + "\nLLM_DRAM3D_FAIL", unchecked + "\nLLM_ROUTING_FAIL"):
             with self.subTest(tail=corrupt[-80:]), self.assertRaises(ValueError):
-                run_study.parse_timing(corrupt, manifest, report, 16)
+                run_study.parse_timing(corrupt, manifest, report, 16, require_validation=False)
 
     def test_merge_rejects_partial_duplicate_or_different_models(self):
         base = dict(experiment="llm_dram3d", version=1, cases=[preparation.CASES[0]], interval_ps=20_000_000,

@@ -331,8 +331,8 @@ The default integration is intentionally contained in:
   exact component mappings;
 - `providers/softhier/floorplans/` for selectable cluster placement rules.
 
-The current provider pins SDK branch `chi/soft_hier_dram3d` at commit
-`b454aeee4278bb00ecbfcdcc4d1366fe8451d7c8`. Override
+The current provider pins SDK branch `chi/soft_hier_dram3d_opt_step` at commit
+`bd6f4df3a8f0a9fcf36e39fb71afd4cbc755211b`. Override
 `SOFTHIER_SDK_URL` only to use a mirror; override
 `SOFTHIER_SDK_COMMIT` deliberately when validating a new SDK revision.
 On a fresh clone, `bootstrap` also prepares SystemC `3.0.1` and patched

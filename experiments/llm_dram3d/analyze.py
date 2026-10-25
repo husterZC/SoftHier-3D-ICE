@@ -33,13 +33,14 @@ def merge_manifests(paths):
     for study in studies:
         # Studies created before --repeats always executed the layer once.
         study.setdefault("repeats", 1)
+        study.setdefault("opt_step", 0)
         validate_repeats(study["repeats"])
         # Older runners used ten thermal integration steps per power interval.
         study.setdefault("thermal_step_ps", study["interval_ps"] / 10)
     first, runs = studies[0], {}
     settings = ("llm_model", "layer", "seed", "all_experts", "repeats", "interval_ps", "thermal_step_ps", "target_cells",
         "estimate_scale", "floorplan_rule", "sdk_commit", "arch_sha256", "source_sha256", "native_source_sha256",
-        "thermal_config_sha256", "dram_power_config_sha256", "dram_power_temperature_dependence")
+        "thermal_config_sha256", "dram_power_config_sha256", "dram_power_temperature_dependence", "opt_step")
     for study in studies:
         if any(study.get(key) != first.get(key) for key in settings):
             raise ValueError("cannot combine studies with different workload or model settings")
@@ -57,6 +58,8 @@ def merge_manifests(paths):
                 raise ValueError("run thermal step differs from study")
             if entry.get("repeats", 1) != study["repeats"]:
                 raise ValueError("run repeats differ from study")
+            if entry.get("opt_step", 0) != study["opt_step"]:
+                raise ValueError("run optimization step differs from study")
             runs[key] = entry
     return dict(first, runs=list(runs.values()), cases=sorted({case for case, _ in runs}),
                 source_manifests=[str(path) for path in paths])
@@ -95,6 +98,8 @@ def check_artifacts(entry, run, study):
     workload = json.loads((artifacts / "workload.json").read_text())
     if workload.get("repeats", 1) != study["repeats"]:
         raise ValueError("archived workload repeats differ from study")
+    if workload.get("opt_step", 0) != study["opt_step"]:
+        raise ValueError("archived workload optimization step differs from study")
     for field in ("source_sha256", "native_source_sha256"):
         if workload[field] != study[field]:
             raise ValueError(f"archived {field} differs from study")
@@ -124,7 +129,8 @@ def check_artifacts(entry, run, study):
     numerical = json.loads((run.path / "results/simulator/validation.json").read_text())
     sdk_manifest = json.loads((artifacts / "manifest.json").read_text())
     checked = parse_timing((run.path / "logs/simulator.log").read_text(), sdk_manifest,
-        load_sdk_report(artifacts / "source"), run.metadata["cluster_grid"]["count"], study["repeats"])
+        load_sdk_report(artifacts / "source"), run.metadata["cluster_grid"]["count"], study["repeats"],
+        require_validation=False, opt_step=study["opt_step"])
     normalized = dict(numerical)
     normalized.setdefault("repeats", 1)
     validate_repeats(normalized["repeats"])
@@ -332,8 +338,9 @@ def main(argv=None):
         for field in ("binary_sha256", "preload_sha256"):
             if left[field] != right[field]:
                 raise ValueError(f"A/B {field} differs")
-        if left["numerical_validation"]["stage_cycles"] != right["numerical_validation"]["stage_cycles"]:
-            raise ValueError("A/B SDK stage timing differs")
+        for field in ("stage_cycles", "status", "verified_elements"):
+            if left["numerical_validation"][field] != right["numerical_validation"][field]:
+                raise ValueError(f"A/B SDK {field} differs")
         plot_pair(common, case, pair, case_contracts, output)
         cell_stats = render_maps(common, case, pair, [thermal[key] for key in keys], output,
                                  args.animations, args.full_maps,
@@ -342,7 +349,11 @@ def main(argv=None):
             fields = dict(case=case, profile=run.profile, repeats=study["repeats"])
             paths = die_paths(contract)
             error = validate_logic_leakage(common, run, paths)
-            validation.append(dict(fields, numerical_reference_pass=True, direct_preload_cycles=0,
+            sdk_result = entries[key]["numerical_validation"]
+            validation.append(dict(fields, sdk_status=sdk_result["status"],
+                verified_elements=sdk_result["verified_elements"],
+                numerical_reference_pass=True if sdk_result["status"] == "PASS" else None,
+                direct_preload_cycles=0,
                 max_dynamic_pair_difference_w=delta, max_logic_leakage_error_w=error,
                 physical_thermal_lower_bound_k=physical[key]["bounds"]["lower_bound_k"]))
             energy = grouped_energy(run, paths)
@@ -375,8 +386,16 @@ def main(argv=None):
                        ("stages", stages), ("validation", validation)):
         common.csv_file(output / f"{name}.csv", rows)
     write_json(output / "study.json", study)
+    validated_runs = sum(row["sdk_status"] == "PASS" for row in validation)
+    if validated_runs == 0:
+        numerical_summary = "Final SDK numerical checking was disabled for all runs (`DONE`, `checked=0`)."
+    elif validated_runs == len(validation):
+        numerical_summary = "Final SDK numerical checking passed for all runs (`PASS`)."
+    else:
+        numerical_summary = (f"Final SDK numerical checking passed for {validated_runs} of {len(validation)} runs; "
+                             "the remaining runs skipped it. See the per-run status in validation.csv.")
     report = ["# Memory-on-logic transformer-layer thermal study", "",
-        "One GPT-OSS-120B layer with deterministic synthetic FP16 weights and SDK numerical checks. "
+        "One GPT-OSS-120B layer with deterministic synthetic FP16 weights. "
         "The package contains one logic die and one face-to-face DRAM die divided into 16 aligned channel regions. "
         "Controller and PHY power are excluded.", "",
         f"Floorplan: `{study['floorplan_rule']}`; repeats: {study['repeats']}; "
@@ -384,7 +403,8 @@ def main(argv=None):
         "Repeats execute the complete layer with the same inputs and KV-cache position. "
         "They extend the thermal history without advancing the token sequence. "
         "Stage counters and layer_time_us accumulate all repeats; mean_layer_time_us is their per-layer mean. "
-        "Numerical checking runs once after the final repeat.", "",
+        "When enabled, numerical checking runs once after the final repeat.", "",
+        numerical_summary, "",
         "The constant and temperature-aware profiles change logic leakage only. DRAM command and background "
         "energy use a fixed electrical characterization temperature. The default DRAM electrical profile and "
         "package parameters are engineering estimates, not calibrated device measurements; inspect the archived "
@@ -398,8 +418,8 @@ def main(argv=None):
         report.append(f"| {row['case']} | {row['profile']} | {row['die']} | {row['layer_time_us']:.3f} | "
             f"{row['mean_layer_time_us']:.3f} | "
             f"{row['peak_component_temperature_c']:.4f} | {row['peak_cell_temperature_c']:.4f} | {row['total_energy_uj']:.3f} |")
-    report += ["", "Both profile runs passed the SDK report checks (11 complete stages, all intermediate/output, "
-        "routing and appended-KV checks). The analysis verified archived source/input hashes, paired stage "
+    report += ["", "Both profile runs passed the SDK completion and timing checks (11 complete stages). "
+        "The analysis verified archived source/input hashes, paired stage "
         "timing, power inventories, interval lengths, logic leakage coefficients, and both die outputs. "
         "DRAM background may vary between intervals with DRAM state occupancy; it must agree across profiles "
         "for the same workload. See validation.csv and each run's archived validation.json.", "",

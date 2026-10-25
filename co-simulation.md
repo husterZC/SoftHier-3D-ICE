@@ -92,7 +92,7 @@ contract and protocol boundaries.
 clone the SoftHier SDK when absent, pin it to:
 
 ```text
-b454aeee4278bb00ecbfcdcc4d1366fe8451d7c8
+bd6f4df3a8f0a9fcf36e39fb71afd4cbc755211b
 ```
 
 It also builds the native dependencies required by the current SoftHier
@@ -431,7 +431,7 @@ sampling resolution, not GVSoC’s simulated functional behavior.
 ## Memory-on-logic configuration
 
 SoftHier is pinned at `a453fa09fe53ff306c91072066ea3ff559a0853a`; its SDK uses
-`chi/soft_hier_dram3d` at `b454aeee4278bb00ecbfcdcc4d1366fe8451d7c8`.
+`chi/soft_hier_dram3d_opt_step` at `bd6f4df3a8f0a9fcf36e39fb71afd4cbc755211b`.
 The provider detects `dram3d_enable` in the architecture and emits contract v2:
 one logic die and one DRAM die with one channel region aligned to each cluster.
 The default SDK architecture has sixteen channels. The powered layers face each

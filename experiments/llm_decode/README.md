@@ -154,8 +154,8 @@ and the same power/temperature comparison plots used by `component_power`.
 ## Untimed preload and reproducibility
 
 The current parent repo selects SoftHier commit `a453fa09fe53ff306c91072066ea3ff559a0853a`.
-The provider pins SDK branch `chi/soft_hier_dram3d` at
-`b454aeee4278bb00ecbfcdcc4d1366fe8451d7c8`. Historical study manifests retain
+The provider pins SDK branch `chi/soft_hier_dram3d_opt_step` at
+`bd6f4df3a8f0a9fcf36e39fb71afd4cbc755211b`. Historical study manifests retain
 the original revisions; reruns use the currently pinned SDK. The separate
 [`llm_dram3d` experiment](../llm_dram3d/README.md) exercises memory-on-logic.
 
