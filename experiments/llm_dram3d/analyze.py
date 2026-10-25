@@ -13,7 +13,7 @@ import sys
 from types import SimpleNamespace
 
 from prepare_workload import ROOT, load_sdk_report, sha256, validate_repeats, within_repo, write_json
-from run_study import PROFILES, parse_timing
+from run_study import PROFILES, checked, parse_timing, replay_seconds
 from thermal_validation import checked_tmap_statistics, thermal_bounds, validate_temperature
 
 
@@ -34,13 +34,21 @@ def merge_manifests(paths):
         # Studies created before --repeats always executed the layer once.
         study.setdefault("repeats", 1)
         study.setdefault("opt_step", 0)
+        study.setdefault("allow_model_clamp", False)
         validate_repeats(study["repeats"])
+        if study.get("thermal_replay") is not None:
+            validate_repeats(study["thermal_replay"])
+        if study.get("thermal_replay_till") is not None:
+            replay_seconds(study["thermal_replay_till"])
+            if study.get("thermal_replay") is not None:
+                raise ValueError("replay count and duration are mutually exclusive")
         # Older runners used ten thermal integration steps per power interval.
         study.setdefault("thermal_step_ps", study["interval_ps"] / 10)
     first, runs = studies[0], {}
     settings = ("llm_model", "layer", "seed", "all_experts", "repeats", "interval_ps", "thermal_step_ps", "target_cells",
         "estimate_scale", "floorplan_rule", "sdk_commit", "arch_sha256", "source_sha256", "native_source_sha256",
-        "thermal_config_sha256", "dram_power_config_sha256", "dram_power_temperature_dependence", "opt_step")
+        "thermal_config_sha256", "dram_power_config_sha256", "dram_power_temperature_dependence", "opt_step",
+        "thermal_replay", "thermal_replay_till", "allow_model_clamp")
     for study in studies:
         if any(study.get(key) != first.get(key) for key in settings):
             raise ValueError("cannot combine studies with different workload or model settings")
@@ -60,9 +68,18 @@ def merge_manifests(paths):
                 raise ValueError("run repeats differ from study")
             if entry.get("opt_step", 0) != study["opt_step"]:
                 raise ValueError("run optimization step differs from study")
+            if entry.get("allow_model_clamp", False) != study["allow_model_clamp"]:
+                raise ValueError("run leakage clamp setting differs from study")
+            if study.get("thermal_replay") is not None and entry.get("replay_cycles") != study["thermal_replay"]:
+                raise ValueError("run thermal replay count differs from study")
+            if study.get("thermal_replay_till") is not None and entry.get("replay_seconds") != study["thermal_replay_till"]:
+                raise ValueError("run thermal replay duration differs from study")
             runs[key] = entry
-    return dict(first, runs=list(runs.values()), cases=sorted({case for case, _ in runs}),
-                source_manifests=[str(path) for path in paths])
+    merged = dict(first, runs=list(runs.values()), cases=sorted({case for case, _ in runs}),
+                  source_manifests=[str(path) for path in paths])
+    if first.get("thermal_replay") or first.get("thermal_replay_till"):
+        merged["source_runs"] = [entry for study in studies for entry in study.get("source_runs", [])]
+    return merged
 
 
 def die_paths(contract):
@@ -317,6 +334,21 @@ def main(argv=None):
     output = within_repo(args.output)
     output.mkdir(parents=True, exist_ok=True)
     os.environ["MPLCONFIGDIR"] = str(output / ".matplotlib")
+    if study.get("thermal_replay") or study.get("thermal_replay_till"):
+        if args.full_maps:
+            parser.error("thermal replay analysis supports --animations for floorplan maps, not --full-maps")
+        entries = {(entry["case"], entry["profile"]): entry for entry in study["runs"]}
+        for case in study["cases"]:
+            command = [sys.executable, "-m", "experiments.thermal_replay.analyze",
+                "--constant-run", within_repo(ROOT / entries[case, "constant"]["path"]),
+                "--aware-run", within_repo(ROOT / entries[case, "temperature_aware"]["path"]),
+                "--output", output / case]
+            if args.animations:
+                command.append("--animations")
+            checked(command, None, output / f"{case}_analysis.log")
+        write_json(output / "study.json", study)
+        print(f"Wrote thermal replay analysis: {output}", flush=True)
+        return
     common = load_common()
     common.BASE.configure_style()
     loaded, entries, contracts, thermal, physical = {}, {}, {}, {}, {}

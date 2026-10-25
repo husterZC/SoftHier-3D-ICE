@@ -46,6 +46,8 @@ class DramStudyTests(unittest.TestCase):
         self.assertEqual(args.seed, 19)
         self.assertEqual(args.repeats, 1)
         self.assertEqual(args.opt_step, 0)
+        self.assertIsNone(args.thermal_replay)
+        self.assertIsNone(args.thermal_replay_till)
         self.assertEqual(args.floorplan, "square_bands")
         self.assertEqual(args.thermal_config.name, "dram3d_thermal.json")
         args = run_study.parse_args(["--cases", "decode_b8_kv1024", "prefill_s128",
@@ -53,15 +55,108 @@ class DramStudyTests(unittest.TestCase):
         self.assertEqual(len(args.cases), 2)
         self.assertEqual(args.repeats, 3)
         self.assertEqual(args.floorplan, "redmule_strip")
+        replay = run_study.parse_args(["--thermal-replay", "100", "--repeats", "3"])
+        self.assertEqual((replay.thermal_replay, replay.repeats), (100, 3))
+        self.assertEqual(run_study.parse_args(["--thermal-replay-till"]).thermal_replay_till, 1.)
+        self.assertFalse(replay.allow_model_clamp)
+        self.assertTrue(run_study.parse_args(["--thermal-replay-till", "--allow-model-clamp"]).allow_model_clamp)
+        for duration in ("0.1s", "1s", "2s", "0.1"):
+            replay = run_study.parse_args(["--thermal-replay-till", duration, "--opt-step", "25"])
+            self.assertEqual((replay.thermal_replay_till, replay.opt_step),
+                             (float(duration.removesuffix("s")), 25))
         for options in (["--cases", "decode_b1_kv1024", "decode_b1_kv1024"],
                         ["--layer", "36"], ["--seed", "-1"], ["--interval-ps", "0"],
                         ["--prefix", "../old"], ["--estimate-scale", "nan"],
                         ["--repeats", "0"], ["--repeats", "-1"], ["--repeats", "1.5"],
                         ["--repeats", "4294967296"], ["--floorplan", "unknown"],
-                        ["--opt-step", "-1"], ["--opt-step", "27"], ["--opt-step", "1.5"]):
+                        ["--thermal-replay", "0"], ["--thermal-replay", "-1"],
+                        ["--thermal-replay", "1.5"], ["--thermal-replay", "4294967296"],
+                        ["--opt-step", "-1"], ["--opt-step", "27"], ["--opt-step", "1.5"],
+                        ["--allow-model-clamp"],
+                        ["--thermal-replay", "100", "--thermal-replay-till", "1s"],
+                        *[["--thermal-replay-till", v] for v in ("0s", "-1s", "nan", "inf", "1e-20s", "1ms")]):
             with self.subTest(options=options), contextlib.redirect_stderr(io.StringIO()):
                 with self.assertRaises(SystemExit):
                     run_study.parse_args(options)
+
+    def test_replay_requires_native_absolute_bounds_and_matching_timer(self):
+        (self.root / "timing").mkdir()
+        (self.root / "logs").mkdir()
+        log = self.root / "logs/simulator.log"
+        log.write_text("[Performance Counter]: Execution period is 10440002 ns\n")
+        path = self.root / "timing/123.jsonl"
+        events = [dict(actor="gvsoc", phase="roi_start", sim_ps=447000, pid=123),
+                  dict(actor="gvsoc", phase="roi_end", sim_ps=10440449000, pid=123)]
+        path.write_text("\n".join(map(json.dumps, events)) + "\n")
+        start, end = run_study.replay_bounds(self.root)
+        self.assertEqual((start, end), (447000, 10440449000))
+        for corrupt in (events[:1], events + events[:1],
+                        [events[0], dict(events[1], pid=999)],
+                        [events[0], dict(events[1], sim_ps=10)]):
+            path.write_text("\n".join(map(json.dumps, corrupt)) + "\n")
+            with self.subTest(events=corrupt), self.assertRaises(ValueError):
+                run_study.replay_bounds(self.root)
+        path.write_text("\n".join(map(json.dumps, events)) + "\n")
+        log.write_text("[Performance Counter]: Execution period is 10439994 ns\n")
+        with self.assertRaisesRegex(ValueError, "performance counter"):
+            run_study.replay_bounds(self.root)
+
+    @unittest.skipIf(np is None, "requires numpy for the replay recorder")
+    def test_replay_count_extends_cap_past_one_second_and_rejects_partial_completion(self):
+        entry = dict(case="decode_b1_kv1024", path=str(self.root.relative_to(ROOT)),
+                     repeats=3, thermal_step_ps=20000000)
+        destinations = {profile: self.root / profile for profile in run_study.PROFILES}
+        complete = dict(status="complete", cycles_completed=100, layers_completed=300)
+        def execute(command, env, log):
+            cap = command[command.index("--max-seconds") + 1]
+            self.assertGreater(cap, 1.)
+            self.assertGreaterEqual(round(cap * 1e12), 447000 + 100 * 10440002000)
+            self.assertEqual(command[command.index("--cycles") + 1], 100)
+            output = command[command.index("--output") + 1]
+            output.mkdir(exist_ok=True)
+            preparation.write_json(output / "summary.json", complete)
+        with mock.patch("experiments.thermal_replay.record.record", return_value={"power_interval_ps": 20000000}), \
+                mock.patch.object(run_study, "replay_bounds", return_value=(447000, 10440449000)), \
+                mock.patch.object(run_study, "checked", side_effect=execute):
+            entries = run_study.run_replays(entry, self.root / "recording", destinations, 100, self.root, {})
+            self.assertEqual([e["profile"] for e in entries], list(run_study.PROFILES))
+            for corrupt in (dict(complete, status="time_limit"), dict(complete, status="model_limit"),
+                            dict(complete, cycles_completed=99), dict(complete, layers_completed=100)):
+                complete = corrupt
+                with self.subTest(summary=corrupt), self.assertRaises(ValueError):
+                    run_study.run_replays(entry, self.root / "recording", destinations, 100, self.root, {})
+
+    @unittest.skipIf(np is None, "requires numpy for the replay recorder")
+    def test_replay_duration_rounds_to_slot_and_requires_full_history(self):
+        entry = dict(case="decode_b1_kv1024", path=str(self.root.relative_to(ROOT)),
+                     repeats=3, opt_step=25, thermal_step_ps=20000000)
+        destinations = {profile: self.root / profile for profile in run_study.PROFILES}
+        def execute(command, env, log):
+            self.assertNotIn("--cycles", command)
+            self.assertEqual("--allow-model-clamp" in command, allow_clamp)
+            self.assertEqual(command[command.index("--max-seconds") + 1], seconds)
+            output = command[command.index("--output") + 1]
+            output.mkdir(exist_ok=True)
+            preparation.write_json(output / "summary.json", complete)
+        with mock.patch("experiments.thermal_replay.record.record", return_value={"power_interval_ps": 20000000}), \
+                mock.patch.object(run_study, "replay_bounds", return_value=(447000, 1200447000)), \
+                mock.patch.object(run_study, "checked", side_effect=execute):
+            for seconds in (.1, 1., 2., .100001):
+                allow_clamp = seconds == 1.
+                slots = (round(seconds * 1e12) + 19999999) // 20000000
+                cycles = (slots * 20000000 - 447000) // 1200000000
+                complete = dict(status="time_limit", cycles_completed=cycles, layers_completed=cycles * 3,
+                                slots=slots, simulated_seconds=slots * .00002, allow_model_clamp=allow_clamp)
+                entries = run_study.run_replays(entry, self.root / "recording", destinations,
+                                               None, self.root, {}, seconds=seconds, allow_model_clamp=allow_clamp)
+                self.assertTrue(all(e["replay_seconds"] == seconds and e["opt_step"] == 25 for e in entries))
+                self.assertTrue(all(e["allow_model_clamp"] == allow_clamp for e in entries))
+            for corrupt in (dict(complete, status="model_limit"), dict(complete, slots=slots - 1),
+                            dict(complete, simulated_seconds=.1), dict(complete, cycles_completed=cycles - 1)):
+                complete = corrupt
+                with self.subTest(summary=corrupt), self.assertRaises(ValueError):
+                    run_study.run_replays(entry, self.root / "recording", destinations,
+                                         None, self.root, {}, seconds=seconds)
 
     @unittest.skipUnless(shutil.which("make"), "requires make")
     def test_build_step_overrides_sdk_default_and_environment(self):
@@ -337,6 +432,29 @@ static void flex_eoc(unsigned error) {
         self.assertEqual(len(merged["runs"]), 2)
         self.assertEqual(merged["repeats"], 1)
         self.assertEqual(merged["thermal_step_ps"], 2_000_000)
+        replay_path = self.root / "replay.json"
+        preparation.write_json(replay_path, dict(base, runs=entries, thermal_replay=100))
+        with self.assertRaisesRegex(ValueError, "replay count differs"):
+            analyze.merge_manifests([replay_path])
+        replay_entries = [dict(entry, replay_cycles=100) for entry in entries]
+        preparation.write_json(replay_path, dict(base, runs=replay_entries, thermal_replay=100))
+        self.assertEqual(analyze.merge_manifests([replay_path])["thermal_replay"], 100)
+        with self.assertRaisesRegex(ValueError, "different"):
+            analyze.merge_manifests([path, replay_path])
+        duration_entries = [dict(entry, path=str(self.root / entry["profile"]), opt_step=25,
+                                 replay_seconds=1., replay_cycles=800) for entry in entries]
+        preparation.write_json(replay_path, dict(base, runs=duration_entries, opt_step=25, thermal_replay_till=1.))
+        self.assertEqual(analyze.merge_manifests([replay_path])["thermal_replay_till"], 1.)
+        with mock.patch.object(analyze, "checked") as command, mock.patch.dict(os.environ):
+            analyze.main(["--manifest", str(replay_path), "--output", str(self.root / "plots"), "--animations"])
+            self.assertIn("--animations", command.call_args.args[0])
+            self.assertIn("experiments.thermal_replay.analyze", command.call_args.args[0])
+        for changed in (dict(opt_step=0), dict(thermal_replay_till=2.), dict(thermal_replay=100),
+                        dict(allow_model_clamp=True)):
+            preparation.write_json(replay_path, dict(dict(base, runs=duration_entries, opt_step=25,
+                                                          thermal_replay_till=1.), **changed))
+            with self.assertRaises(ValueError):
+                analyze.merge_manifests([replay_path])
         with self.assertRaisesRegex(ValueError, "duplicate"):
             analyze.merge_manifests([path, path])
         other = self.root / "other.json"

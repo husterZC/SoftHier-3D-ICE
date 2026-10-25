@@ -3,6 +3,7 @@
 
 import argparse
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -22,6 +23,16 @@ CONFIGS = PROVIDER.parent / "configs"
 PROFILES = ("constant", "temperature_aware")
 
 
+def replay_seconds(value):
+    try:
+        seconds = float(str(value).removesuffix("s"))
+        if math.isfinite(seconds) and seconds > 0 and round(seconds * 1e12) >= 1:
+            return seconds
+    except (ValueError, OverflowError):
+        pass
+    raise argparse.ArgumentTypeError("replay duration must be positive seconds, e.g. 0.1s, 1s or 2s")
+
+
 def parse_args(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--sdk", type=Path, default=SDK)
@@ -34,6 +45,13 @@ def parse_args(argv=None):
                         help="SDK decode optimization step (default: 0)")
     parser.add_argument("--repeats", type=int, default=1,
                         help="repeat the complete layer with the same inputs and KV-cache position")
+    replay = parser.add_mutually_exclusive_group()
+    replay.add_argument("--thermal-replay", type=int, metavar="BLOCKS",
+                        help="thermally replay a block of --repeats layers BLOCKS times per profile")
+    replay.add_argument("--thermal-replay-till", type=replay_seconds, nargs="?", const=1., metavar="SECONDS",
+                        help="replay until this simulated time per profile (default when supplied: 1s)")
+    parser.add_argument("--allow-model-clamp", action="store_true",
+                        help="allow thermal replay above 125 C using GVSoC's endpoint leakage clamp")
     parser.add_argument("--all-experts", action="store_true")
     parser.add_argument("--interval-ps", type=int, default=20_000_000,
                         help="power/temperature interval and 3D-ICE timestep in picoseconds")
@@ -44,12 +62,16 @@ def parse_args(argv=None):
     parser.add_argument("--prefix", default="dram3d")
     parser.add_argument("--build-hardware", action="store_true")
     args = parser.parse_args(argv)
+    if args.allow_model_clamp and args.thermal_replay is None and args.thermal_replay_till is None:
+        parser.error("--allow-model-clamp requires thermal replay")
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", args.prefix):
         parser.error("prefix must be a simple run name without path separators")
     if min(args.interval_ps, args.cells) <= 0:
         parser.error("interval and cell count must be positive")
     try:
         validate_settings(args.cases, args.layer, args.seed, args.estimate_scale, args.repeats, args.opt_step)
+        if args.thermal_replay is not None:
+            validate_repeats(args.thermal_replay)
     except ValueError as error:
         parser.error(str(error))
     return args
@@ -112,14 +134,80 @@ def archive(workload, case, destination, provider):
     shutil.copytree(workload["dramsys_path"], destination / "environment")
 
 
+def replay_bounds(source):
+    """Read absolute MMIO timer bounds from the existing native timing probes."""
+    events = []
+    for path in sorted((source / "timing").glob("*.jsonl")):
+        for line in path.read_text().splitlines():
+            event = json.loads(line)
+            if event.get("actor") == "gvsoc" and event.get("phase") in ("roi_start", "roi_end"):
+                events.append(event)
+    starts = [event for event in events if event["phase"] == "roi_start"]
+    ends = [event for event in events if event["phase"] == "roi_end"]
+    if len(starts) != 1 or len(ends) != 1:
+        raise ValueError("thermal replay requires one native timer start/end pair; rebuild hardware with timing probes")
+    start, end = starts[0]["sim_ps"], ends[0]["sim_ps"]
+    if (type(start) is not int or type(end) is not int or not 0 <= start < end
+            or starts[0]["pid"] != ends[0]["pid"]):
+        raise ValueError("invalid native replay timer bounds")
+    periods = re.findall(r"\[Performance Counter\]: Execution period is (\d+) ns",
+                         (source / "logs/simulator.log").read_text())
+    if periods != [str((end - start) // 1000)]:
+        raise ValueError("native timer bounds differ from the simulator performance counter")
+    return start, end
+
+
+def run_replays(source_entry, recording, destinations, cycles, logs, env, seconds=None, allow_model_clamp=False):
+    from experiments.thermal_replay.record import record
+
+    source = within_repo(ROOT / source_entry["path"])
+    start, end = replay_bounds(source)
+    repeats, name = source_entry["repeats"], source_entry["case"]
+    manifest = record(source, recording, start=start, end=end, layers_per_cycle=repeats)
+    slot = manifest["power_interval_ps"]
+    # Extend the engine's default one-second cap through the final thermal slot.
+    stop = round(seconds * 1e12) if seconds is not None else start + cycles * (end - start)
+    stop = ((stop + slot - 1) // slot) * slot
+    cap = seconds if seconds is not None else stop / 1e12
+    entries = []
+    for profile in PROFILES:
+        destination = within_repo(destinations[profile])
+        checked([sys.executable, "-m", "experiments.thermal_replay", "replay",
+            "--recording", recording, "--output", destination, "--profile", profile,
+            "--max-seconds", cap, "--thermal-step", source_entry["thermal_step_ps"] / 1e12]
+            + (["--cycles", cycles] if cycles is not None else [])
+            + (["--allow-model-clamp"] if allow_model_clamp else []),
+            env, logs / f"{name}_{profile}_replay.log")
+        summary = json.loads((destination / "summary.json").read_text())
+        expected = cycles if cycles is not None else max(0, (stop - start) // (end - start))
+        if (summary.get("status") != ("time_limit" if seconds is not None else "complete")
+                or summary.get("allow_model_clamp", False) != allow_model_clamp
+                or summary.get("cycles_completed") != expected
+                or summary.get("layers_completed") != expected * repeats
+                or (seconds is not None and (summary.get("slots") != stop // slot
+                    or round(summary.get("simulated_seconds", 0) * 1e12) != stop))):
+            raise ValueError(f"thermal replay did not reach the requested count/duration: {summary.get('status')}")
+        entries.append(dict(case=name, profile=profile, repeats=repeats,
+            opt_step=source_entry.get("opt_step", 0), allow_model_clamp=allow_model_clamp,
+            interval_ps=slot, thermal_step_ps=source_entry["thermal_step_ps"],
+            path=str(destination.relative_to(ROOT)), source_run=source_entry["path"],
+            recording=str(recording.relative_to(ROOT)), replay_cycles=expected, replay_seconds=seconds))
+    return entries
+
+
 def main(argv=None):
     args = parse_args(argv)
+    replay = args.thermal_replay is not None or args.thermal_replay_till is not None
     # Fail on incomplete physical/electrical input before building or preloading.
     validate_inputs(args.thermal_config, args.dram_power_config)
     logs, output = STUDY / "logs" / args.prefix, STUDY / "workloads" / args.prefix
-    run_dirs = {(case, profile): ROOT / "runs/llm_dram3d" / f"{args.prefix}_{case}_{profile}"
-                for case in args.cases for profile in PROFILES}
-    for path in (logs, output, *run_dirs.values()):
+    source_profiles = ("constant",) if replay else PROFILES
+    source_tag = "source_" if replay else ""
+    run_dirs = {(case, profile): ROOT / "runs/llm_dram3d" / f"{args.prefix}_{case}_{source_tag}{profile}"
+                for case in args.cases for profile in source_profiles}
+    replay_dirs = {(case, profile): ROOT / "runs/llm_dram3d" / f"{args.prefix}_{case}_{profile}"
+                   for case in args.cases for profile in PROFILES} if replay else {}
+    for path in (logs, output, *run_dirs.values(), *replay_dirs.values()):
         if path.exists():
             raise ValueError(f"refusing to overwrite existing study artifacts: {path}")
     logs.mkdir(parents=True)
@@ -128,10 +216,13 @@ def main(argv=None):
     manifest = dict(experiment="llm_dram3d", version=1, prefix=args.prefix,
         llm_model=MODEL, cases=args.cases, layer=args.layer, seed=args.seed, repeats=args.repeats,
         all_experts=args.all_experts, interval_ps=args.interval_ps, thermal_step_ps=args.interval_ps,
-        target_cells=args.cells, opt_step=args.opt_step,
+        target_cells=args.cells, opt_step=args.opt_step, thermal_replay=args.thermal_replay,
+        thermal_replay_till=args.thermal_replay_till, allow_model_clamp=args.allow_model_clamp,
         estimate_scale=args.estimate_scale, floorplan_rule=args.floorplan,
         provider_sha256=sha256(frozen_provider), dram_power_temperature_dependence=False, runs=[])
     manifest_path = logs / "study.json"
+    if replay:
+        manifest["source_runs"] = []
     write_json(manifest_path, manifest)
     with (logs / "prepare.log").open("w") as log:
         workload = prepare(args.sdk, output, args.cases, args.thermal_config, args.dram_power_config,
@@ -160,6 +251,10 @@ def main(argv=None):
         case = workload["cases"][name]
         env.update(SIMULATOR_PLATFORM=case["preload"], SOFTHIER_BINARY=case["binary"],
                    SOFTHIER_RUN_CWD=str(run_dir / "results/simulator"))
+        if replay:
+            timing_dir = run_dir / "timing"
+            timing_dir.mkdir(parents=True)
+            env["CLO_TIMING_DIR"] = str(timing_dir)
         started = time.monotonic()
         checked(["make", "coupled-run", "RUN_NAME=llm_dram3d", f"RUN_DIR={run_dir}",
             "BUILD_SIMULATOR=0", "BUILD_3DICE=0", f"SOFTHIER_POWER_PROFILE={profile}",
@@ -178,10 +273,23 @@ def main(argv=None):
             if sha256(case[field]) != case[field + "_sha256"]:
                 raise ValueError(f"{field} changed during paired study")
         archive(workload, case, run_dir / "artifacts", frozen_provider)
-        manifest["runs"].append(dict(case=name, profile=profile, interval_ps=args.interval_ps,
+        entry = dict(case=name, profile=profile, interval_ps=args.interval_ps,
             repeats=args.repeats, opt_step=args.opt_step, thermal_step_ps=args.interval_ps,
             path=str(run_dir.relative_to(ROOT)), binary_sha256=case["binary_sha256"],
-            preload_sha256=case["preload_sha256"], numerical_validation=timing))
+            preload_sha256=case["preload_sha256"], numerical_validation=timing)
+        if replay:
+            manifest["source_runs"].append(entry)
+            write_json(manifest_path, manifest)
+            target = (f"until {args.thermal_replay_till:g}s" if args.thermal_replay_till is not None
+                      else f"of {args.thermal_replay} blocks")
+            print(f"Captured {name}: {args.repeats} layer(s); starting replay {target} per profile", flush=True)
+            replay_env = dict(env)
+            replay_env.pop("CLO_TIMING_DIR", None)
+            manifest["runs"].extend(run_replays(entry, Path(case["output"]) / "recording",
+                {p: replay_dirs[name, p] for p in PROFILES}, args.thermal_replay, logs, replay_env,
+                seconds=args.thermal_replay_till, allow_model_clamp=args.allow_model_clamp))
+        else:
+            manifest["runs"].append(entry)
         write_json(manifest_path, manifest)
         print(f"Completed {name}, {profile}: {args.repeats} repeat(s), "
               f"{timing['layer_time_us']:.3f} us total, "

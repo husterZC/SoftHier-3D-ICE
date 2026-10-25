@@ -109,6 +109,52 @@ and SDK toolchain setup are shared. Omit `--build-hardware` after a compatible
 simulator is built. This option builds native models; the runner always compiles
 the staged SDK application. `make bootstrap` supplies the thermal solver.
 
+### Repeat the recorded block with thermal replay
+
+```bash
+python experiments/llm_dram3d/run_study.py \
+  --prefix gptoss120b_dram3d_b1_opt25_replay1s \
+  --cases decode_b1_kv1024 --opt-step 25 --thermal-replay-till 1s --allow-model-clamp
+
+python experiments/llm_dram3d/analyze.py \
+  --manifest experiments/llm_dram3d/logs/gptoss120b_dram3d_b1_opt25_replay1s/study.json \
+  --output experiments/llm_dram3d/results/gptoss120b_dram3d_b1_opt25_replay1s --animations
+```
+
+`--thermal-replay N` runs one constant-profile source co-simulation per case,
+then uses [`experiments/thermal_replay`](../thermal_replay/README.md) to replay
+its measured block **N times per leakage profile**. Each block contains
+`--repeats` layers with the same inputs and KV position. Existing native timer
+probes identify the exact region: startup runs once and final reporting is
+excluded. Package temperatures persist and logic leakage is recalculated each
+slot; DRAM power retains its fixed electrical characterization. The runner
+extends the time cap to cover N blocks and rejects incomplete results.
+
+Alternatively, `--thermal-replay-till 0.1s`, `1s`, or `2s` stops at that simulated
+time, including the one-time startup. Bare seconds are also accepted; supplying
+`--thermal-replay-till` without a value defaults to **1s**. The final interval
+rounds up to a thermal slot, so the last block can be partial. Count and duration
+options are mutually exclusive; omitting both keeps normal co-simulation.
+By default, crossing the leakage-table limit (125 °C) stops replay; a shorter
+history is not accepted as completing the request. `--allow-model-clamp` continues
+with GVSoC's endpoint leakage clamp while temperatures keep evolving. The clamp
+setting and first limit crossing are recorded; cooling and thermal inputs stay
+unchanged. Results above 125 °C use the clamped model.
+
+Replay assumes periodic component activity and timing, including cache, memory,
+and routing behavior. Growing KV caches, changing tokens, throttling, or other
+temperature-dependent activity require a new recording or co-simulation.
+Completing N blocks does not establish thermal convergence; see the linked
+replay documentation for boundary averaging and timestep rounding.
+
+Source runs use `_source_constant`; replays use the usual profile suffixes.
+Recordings are saved in each case's workload directory. The same `analyze.py`
+command writes `<output>/<case>/report.html`, plots, CSV data, and die maps.
+`--animations` produces four floorplan-average GIFs: both dies and both profiles.
+Each covers the whole replay through its final frame, with display frames sampled
+every 10 ms; energy and validation still use every thermal interval.
+`--full-maps` (dense thermal-cell GIFs) is unavailable for replay.
+
 ### Rebuild after the Spatz completion fix
 
 The provider's staged native patch corrects a vector-immediate operand lookup
@@ -156,6 +202,9 @@ simulating. Thermal placement is selected by `run_study.py --floorplan`.
 | `--cases` | `decode_b1_kv1024` | One or more unique SDK presets: `decode_b{1,8,16}_kv{1024,2048,4096}`, `prefill_s64`, or `prefill_s128`. |
 | `--repeats` | `1` | Repeat the complete layer execution with the same input and KV-cache position; a positive 32-bit integer. |
 | `--opt-step` | `0` | SDK decode optimization step, 0–26; overrides the SDK's standalone default. |
+| `--thermal-replay BLOCKS` | Off | Replay one captured block this many times per profile; each block contains `--repeats` layers. |
+| `--thermal-replay-till [SECONDS]` | Off; bare flag uses `1s` | Replay until this simulated time per profile, rounded up to a thermal slot; accepts `0.1s`, `1s`, `2s`, or bare seconds. |
+| `--allow-model-clamp` | Off | Continue replay above 125 °C using the endpoint leakage factor; does not cap temperatures. |
 | `--interval-ps` | `20000000` | Power/temperature update interval and 3D-ICE integration timestep for all 11 stages: **20 µs**. |
 | `--cells` | `16384` | Approximate thermal cell target per die; the generated grid may differ slightly. |
 | `--floorplan` | `square_bands` | Square-band placement or `redmule_strip`; DRAM channel regions remain aligned with their clusters. |
@@ -275,10 +324,10 @@ where available; hashing streams large ELFs. The runner freezes its provider
 shell and rejects native/provider source changes during a study.
 
 The study and workload manifests record repeats and optimization step alongside
-input/source hashes.
+input/source hashes; replay entries also record the requested duration or count.
 Analysis also accepts earlier manifests that omitted repeats as single-repeat
 studies and omitted optimization steps as step 0. It rejects combining studies
-with different optimization steps, repeats, or floorplans.
+with different optimization steps, replay limits, repeats, or floorplans.
 
 For an already activated Python virtual environment instead of Conda, use
 `export SOFTHIER_CONDA_ENV=''` and set `PYTHON` to that environment's interpreter.
@@ -335,6 +384,17 @@ for measurements; separate logic/DRAM maps and animations are in the same result
 directory. These generated files are available in the working checkout only.
 Capacity/address plans passed for all eleven SDK cases; other cases' full
 numerical and thermal simulations remain unrun.
+
+Completed replay: `b1_opt25_replay1s_20261025T0850Z`, `decode_b1_kv1024`, step 25,
+with `square_bands` and unchanged thermal inputs. Both profiles reached **1 s**,
+50,000 slots and 813 complete blocks plus a partial block. The source layer took
+1,229,765 cycles (`DONE`, final numerical checking disabled). With
+`--allow-model-clamp`, component peaks were 129.49 °C (constant) and 252.36 °C
+(temperature-aware); leakage above 125 °C uses the table endpoint.
+The [report](results/b1_opt25_replay1s_20261025T0850Z/decode_b1_kv1024/report.html)
+includes four GIFs with 101 frames each, from the first saved 20 µs endpoint through 1 s.
+The [manifest](logs/b1_opt25_replay1s_20261025T0850Z/study.json) records the selected
+step and clamp setting. These generated artifacts are local to this checkout.
 
 Maintainer checks:
 
