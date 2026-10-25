@@ -42,6 +42,8 @@ def main():
     mode.add_argument("--cycles", type=int, help="fixed number of recorded blocks, subject to the time cap")
     mode.add_argument("--single-pass", action="store_true", help="replay every original window once, including startup/reporting")
     replay.add_argument("--max-seconds", type=float, default=1., help="simulated time cap (default: 1 s)")
+    replay.add_argument("--allow-model-clamp", action="store_true",
+                        help="continue above 125 C using GVSoC's endpoint leakage clamp")
     replay.add_argument("--thermal-step", type=float, metavar="SECONDS",
                         help="thermal integration step in seconds (default: equal to the recorded power slot)")
     replay.add_argument("--dense-maps", action="store_true", help="also write dense Tmap at every power interval")

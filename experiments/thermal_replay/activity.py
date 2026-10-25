@@ -129,7 +129,7 @@ class LeakageModel:
 
     def factors(self, temperatures):
         # Match GVSoC's sampled table and linear interpolation, including its
-        # clamp. The runner separately limits logic temperatures to 125 C.
+        # clamp. The runner stops above 125 C unless continuation is requested.
         temperatures = np.clip(temperatures, self.grid[0], self.grid[-1])
         lower = np.minimum(np.searchsorted(self.grid, temperatures, side="right") - 1,
                            len(self.grid) - 2)

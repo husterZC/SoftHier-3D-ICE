@@ -54,7 +54,8 @@ class Mapping:
 
 def run(recording, output, server=ROOT / "3D-ICE/bin/3D-ICE-Server", profile="temperature_aware",
         cycles=None, max_seconds=1.,
-        single_pass=False, dense_maps=False, timeout=180., factorization_threads=1, thermal_step=None):
+        single_pass=False, dense_maps=False, timeout=180., factorization_threads=1, thermal_step=None,
+        allow_model_clamp=False):
     manifest, document, activity = load_recording(recording)
     paths = manifest["component_paths"]
     layers_per_cycle = manifest.get("layers_per_cycle", 1)
@@ -85,6 +86,7 @@ def run(recording, output, server=ROOT / "3D-ICE/bin/3D-ICE-Server", profile="te
                "simulated_seconds": 0., "dynamic_energy_j": 0., "leakage_energy_j": 0.,
                "floorplan_constant_energy_j": 0., "peak_component_c": initial_temperature_c(document),
                "time_cap_seconds": max_seconds, "requested_cycles": cycles,
+               "allow_model_clamp": allow_model_clamp, "first_model_limit_seconds": None,
                "period_ps": activity.period, "layer_start_ps": activity.start,
                "recording_sha256": manifest["sha256"],
                "server": str(Path(server).resolve()), "server_sha256": digest(server),
@@ -186,8 +188,11 @@ def run(recording, output, server=ROOT / "3D-ICE/bin/3D-ICE-Server", profile="te
                 temperatures = new_temperatures
                 # Above the characterization range, GVSoC clamps leakage.
                 if np.any(temperatures[leakage_model.temperature_dependent] > leakage_model.grid[-1]):
-                    summary["status"] = "model_limit"
-                    break
+                    if summary["first_model_limit_seconds"] is None:
+                        summary["first_model_limit_seconds"] = t1 * 1e-12
+                    if not allow_model_clamp:
+                        summary["status"] = "model_limit"
+                        break
                 if time.monotonic() - last_progress >= 10:
                     summary["host_seconds"] = time.monotonic() - started
                     write_json(output / "summary.json", summary)

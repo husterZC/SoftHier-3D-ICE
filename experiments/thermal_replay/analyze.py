@@ -343,6 +343,8 @@ class ReplayRun:
         hottest = int(self.component_peak_c.argmax())
         late = self.time_s > max(0., self.duration - .1) + 1e-12
         return {"profile": self.profile, "run": str(self.path), "status": s["status"],
+                "allow_model_clamp": s.get("allow_model_clamp", False),
+                "first_model_limit_seconds": s.get("first_model_limit_seconds"),
                 "simulated_seconds": self.duration, "host_minutes": s["host_seconds"] / 60,
                 "slots": self.n, "thermal_step_us": s["step_ps"] * 1e-6,
                 "power_slot_us": self.slot_ps * 1e-6, "h_w_m2_k": self.h,
@@ -366,6 +368,8 @@ class ReplayRun:
 
 def validate_pair(constant, aware):
     require(constant.paths == aware.paths and constant.mapping == aware.mapping, "A/B component mapping mismatch")
+    require(constant.summary.get("allow_model_clamp", False) == aware.summary.get("allow_model_clamp", False),
+            "A/B leakage clamp setting mismatch")
     for key in ("recording_sha256", "server_sha256", "step_ps", "slot_ps", "period_ps", "layer_start_ps",
                 "simulated_seconds", "slots", "factorization_threads", "layers_per_cycle"):
         require(constant.summary[key] == aware.summary[key], f"A/B {key} mismatch")
@@ -638,7 +642,10 @@ class Figures:
             cell.set_edgecolor("#dddddd")
             if row % 2 == 0:
                 cell.set_facecolor("#f4f4f4")
-        table_ax.text(0, .06, "Linear interpolation between archived samples.\nCharacterization ends at 125 °C.", fontsize=9, transform=table_ax.transAxes)
+        limit = ("Above 125 °C: endpoint leakage; temperatures continue." if run.summary.get("allow_model_clamp", False)
+                 else "Characterization ends at 125 °C.")
+        table_ax.text(0, .06, "Linear interpolation between archived samples.\n" + limit,
+                      fontsize=9, transform=table_ax.transAxes)
         fig.suptitle(self.title + "\nModel assumptions and actual replay settings")
         self.save(fig, "model_assumptions", "Leakage factors come from the recording's archived tables at the selected technology. No model parameters are copied from the older reference experiment.")
 
@@ -759,6 +766,9 @@ def write_report(figures, gifs, command):
                 "dynamic includes DRAM commands and leakage includes DRAM background. The per-die CSV and figures "
                 "separate them. All die maps and GIFs share one temperature scale." if a.layout.multidie else "")
     states = "; ".join(f'{PROFILE_LABELS[r.profile]}: <code>{r.summary["status"]}</code>' for r in (c, a))
+    clamp_note = ("Continuation above 125 °C was enabled: temperature-dependent leakage uses the 125 °C endpoint; "
+                  "simulated temperatures are not capped. Results above that limit use the clamped model."
+                  if a.summary.get("allow_model_clamp", False) else "")
     report = f'''<!doctype html>
 <html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>{html.escape(figures.title)}</title>
@@ -772,7 +782,7 @@ The same recorded {a.summary['layers_per_cycle']}-layer block repeats with conti
 <section><h2>Results</h2><table><tr><th>Metric</th><th>Constant leakage</th><th>Temperature-aware</th></tr>{table}</table>
 <p class="note">Temperature-aware leakage raises the sampled component peak by {peak_increase:.2f} °C and total energy by {energy_increase:.1f}%.
 Every saved component dynamic-power sample is identical between profiles, so the energy difference comes from leakage.</p>
-<p>{states}. Temperatures and energies cover the saved simulation interval.</p><p>{die_note}</p></section>
+<p>{states}. Temperatures and energies cover the saved simulation interval.</p><p>{die_note}</p><p>{clamp_note}</p></section>
 {cards}{animations}
 <section><h2>Data and validation</h2><p>{links} · <a href="analysis_summary.json">Analysis JSON</a></p>
 <p>Metrics and integration use every saved {a.slot_ps * 1e-6:g} µs interval. The comparison figure plots every saved sample without display averaging or shaded bands.

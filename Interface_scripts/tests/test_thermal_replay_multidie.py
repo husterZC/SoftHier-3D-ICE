@@ -122,16 +122,16 @@ class MultiDieReplayTests(unittest.TestCase):
             self.assertEqual(int(model.temperature_dependent.sum()), len(paths) - 1)
             if temperature > 25:
                 self.assertTrue((factors[:-1] > 1).all())
+        np.testing.assert_array_equal(model.factors(np.full(len(paths), 125.)),
+                                      model.factors(np.full(len(paths), 180.)))
         bad = copy.deepcopy(self.document)
         bad["metadata"]["dram_power_model"]["temperature_dependence"] = "unknown"
         with self.assertRaisesRegex(ValueError, "DRAM"):
             LeakageModel(bad, paths)
 
-    def test_hot_dram_does_not_trigger_the_logic_model_limit(self):
+    def test_hot_components_stop_only_for_logic_unless_clamp_is_allowed(self):
         layout = Layout(self.recording, self.document)
-        dram_regions = [layout.entries.index(name) for die in layout.dies if die["id"] == "DRAM_DIE"
-                        for name in die["elements"]]
-        class HotDramClient:
+        class HotClient:
             count = len(layout.entries)
             state_calls = 0
             def __init__(self, *args, **kwargs):
@@ -146,15 +146,27 @@ class MultiDieReplayTests(unittest.TestCase):
             def temperatures(self, expected):
                 values = np.full(self.count, 26.85)
                 if self.slots:
-                    values[dram_regions] = 180.
+                    values[hot_regions] = 180.
                 return values
             def advance(self, powers):
                 self.slots += 1
-        with patch("experiments.thermal_replay.replay.IceClient", HotDramClient):
-            summary = run(self.recording, self.folder / "hot_dram", server=Path(__file__), cycles=2)
-        self.assertEqual(summary["status"], "complete")
-        self.assertEqual(summary["per_die"]["DRAM_DIE"]["peak_component_c"], 180)
-        self.assertEqual(HotDramClient.state_calls, 2)
+        for die_id, allow, status in (("DRAM_DIE", False, "complete"),
+                                      ("LOGIC_DIE", False, "model_limit"), ("LOGIC_DIE", True, "complete")):
+            hot_regions = [layout.entries.index(name) for die in layout.dies if die["id"] == die_id
+                           for name in die["elements"]]
+            HotClient.state_calls = 0
+            with self.subTest(die=die_id, allow=allow), patch("experiments.thermal_replay.replay.IceClient", HotClient):
+                summary = run(self.recording, self.folder / f"hot_{die_id}_{allow}", server=Path(__file__),
+                              cycles=2, allow_model_clamp=allow)
+                self.assertEqual(summary["status"], status)
+                self.assertEqual(summary["allow_model_clamp"], allow)
+                if die_id == "LOGIC_DIE":
+                    self.assertAlmostEqual(summary["first_model_limit_seconds"], .00002)
+                else:
+                    self.assertIsNone(summary["first_model_limit_seconds"])
+                self.assertEqual(summary["cycles_completed"], 0 if status == "model_limit" else 2)
+                self.assertEqual(summary["per_die"][die_id]["peak_component_c"], 180)
+                self.assertEqual(HotClient.state_calls, 2)
 
     def test_capture_uses_combined_preload_and_keeps_dram_voltage(self):
         artifacts = self.source / "artifacts"
@@ -218,10 +230,17 @@ else:
         from experiments.thermal_replay import analyze, power_maps, plot_stack
         summaries = {}
         for profile in ("constant", "temperature_aware"):
-            summaries[profile] = run(self.recording, self.folder / profile, profile=profile, cycles=3)
+            summaries[profile] = run(self.recording, self.folder / profile, profile=profile, cycles=3,
+                                     allow_model_clamp=True)
         constant = analyze.ReplayRun(self.folder / "constant", "constant")
         aware = analyze.ReplayRun(self.folder / "temperature_aware", "temperature_aware")
         analyze.validate_pair(constant, aware)
+        self.assertTrue(aware.metrics["allow_model_clamp"])
+        self.assertIsNone(aware.metrics["first_model_limit_seconds"])
+        aware.summary["allow_model_clamp"] = False
+        with self.assertRaisesRegex(ValueError, "clamp setting mismatch"):
+            analyze.validate_pair(constant, aware)
+        aware.summary["allow_model_clamp"] = True
         np.testing.assert_array_equal(constant.die_power["DRAM_DIE"]["leakage"], aware.die_power["DRAM_DIE"]["leakage"])
         self.assertGreater(np.ptp(constant.die_power["DRAM_DIE"]["leakage"]), 0)
         self.assertGreater(aware.energy["leakage"][:-1].sum(), constant.energy["leakage"][:-1].sum())
@@ -243,6 +262,8 @@ else:
         figures = analyze.Figures(output, constant, aware)
         name = figures.animation(aware, "DRAM_DIE")
         self.assertTrue((output / name).is_file())
+        analyze.write_report(figures, {"temperature_aware/DRAM_DIE": name}, "test")
+        self.assertIn("simulated temperatures are not capped", (output / "report.html").read_text())
         import matplotlib.pyplot as plt
         fig, ax = plt.subplots()
         collection = figures.map_panel(ax, aware.map_frames[-1], die="DRAM_DIE")

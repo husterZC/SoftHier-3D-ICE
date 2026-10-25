@@ -158,7 +158,11 @@ because temperatures become stable.
 
 `summary.json` reports `time_limit`, `complete` (fixed count or single pass),
 `model_limit`, `interrupted`, or `failure`. Logic feedback temperatures above the
-archived leakage-table maximum (125 °C here) stop with `model_limit`. Exit codes
+archived leakage-table maximum (125 °C here) stop with `model_limit` by default.
+`--allow-model-clamp` continues with GVSoC's endpoint leakage clamp; temperatures
+are not capped and thermal inputs are unchanged. The summary records
+`allow_model_clamp` and `first_model_limit_seconds` (null if never crossed).
+Exit codes
 are 0 for normal completion or a time cap, 2 for a model limit or failed
 validation, 1 for an execution error, and 130 for interruption.
 
