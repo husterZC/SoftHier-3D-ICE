@@ -39,6 +39,10 @@ def parse_args(argv=None):
     parser.add_argument("--cases", choices=CASES, nargs="+", default=[CASES[0]])
     parser.add_argument("--thermal-config", type=Path, default=CONFIGS / "dram3d_thermal.json")
     parser.add_argument("--dram-power-config", type=Path, default=CONFIGS / "dram3d_power.json")
+    parser.add_argument("--stack-order", choices=("dram_on_logic", "logic_on_dram"), default="logic_on_dram",
+                        help="upper die placement (default: logic_on_dram)")
+    parser.add_argument("--heat-transfer-coefficient", type=float, default=15000., metavar="W_PER_M2_K",
+                        help="top cooling boundary in W/(m² K) (default: 15000)")
     parser.add_argument("--layer", type=int, default=1)
     parser.add_argument("--seed", type=int, default=19)
     parser.add_argument("--opt-step", type=int, choices=range(27), default=0, metavar="0..26",
@@ -68,6 +72,8 @@ def parse_args(argv=None):
         parser.error("prefix must be a simple run name without path separators")
     if min(args.interval_ps, args.cells) <= 0:
         parser.error("interval and cell count must be positive")
+    if not math.isfinite(args.heat_transfer_coefficient) or args.heat_transfer_coefficient <= 0:
+        parser.error("heat-transfer coefficient must be positive and finite")
     try:
         validate_settings(args.cases, args.layer, args.seed, args.estimate_scale, args.repeats, args.opt_step)
         if args.thermal_replay is not None:
@@ -199,7 +205,7 @@ def main(argv=None):
     args = parse_args(argv)
     replay = args.thermal_replay is not None or args.thermal_replay_till is not None
     # Fail on incomplete physical/electrical input before building or preloading.
-    validate_inputs(args.thermal_config, args.dram_power_config)
+    validate_inputs(args.thermal_config, args.dram_power_config, args.stack_order, args.heat_transfer_coefficient)
     logs, output = STUDY / "logs" / args.prefix, STUDY / "workloads" / args.prefix
     source_profiles = ("constant",) if replay else PROFILES
     source_tag = "source_" if replay else ""
@@ -227,7 +233,8 @@ def main(argv=None):
     with (logs / "prepare.log").open("w") as log:
         workload = prepare(args.sdk, output, args.cases, args.thermal_config, args.dram_power_config,
             layer=args.layer, seed=args.seed, estimate_scale=args.estimate_scale,
-            all_experts=args.all_experts, repeats=args.repeats, opt_step=args.opt_step, log=log)
+            all_experts=args.all_experts, repeats=args.repeats, opt_step=args.opt_step, log=log,
+            stack_order=args.stack_order, heat_transfer_coefficient=args.heat_transfer_coefficient)
     env = dict(os.environ, PYTHON=sys.executable, SIMULATOR_CONFIG=workload["arch"],
         SIMULATOR_APP=workload["source"], SOFTHIER_FLOORPLAN=args.floorplan,
         SOFTHIER_DRAMSYS_PATH=workload["dramsys_path"], SOFTHIER_PRELOAD_MODE="direct",

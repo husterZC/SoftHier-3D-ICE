@@ -46,6 +46,9 @@ def validate_thermal_config(document):
     stack_order = result.setdefault("stack_order", "dram_on_logic")
     if not isinstance(stack_order, str) or stack_order not in ("dram_on_logic", "logic_on_dram"):
         raise ValueError("thermal config stack_order must be 'dram_on_logic' or 'logic_on_dram'")
+    if "heat_transfer_coefficient_w_m2_k" in result:
+        result["heat_transfer_coefficient_w_m2_k"] = positive_number(
+            result["heat_transfer_coefficient_w_m2_k"], "heat_transfer_coefficient_w_m2_k")
     for name in ("logic_die", "dram_die", "face_to_face_bond"):
         section = result.get(name)
         if not isinstance(section, dict):
@@ -134,5 +137,6 @@ def memory_on_logic_stack(config, initial_temperature_k=300.0):
         "order": "bottom-to-top", "materials": materials,
         "dies": dies,
         "layers": layers,
-        "cooling": {"heat_transfer_coefficient_w_m2_k": 15000.0, "temperature_k": initial_temperature_k},
+        "cooling": {"heat_transfer_coefficient_w_m2_k": config.get("heat_transfer_coefficient_w_m2_k", 15000.0),
+                    "temperature_k": initial_temperature_k},
     }

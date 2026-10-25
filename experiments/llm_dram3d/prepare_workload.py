@@ -128,11 +128,13 @@ def repeat_source(source, repeats):
         '        printf("LLM_DRAM3D_REPEATS count=%u\\n", study_repeat);')
 
 
-def validate_inputs(thermal_config, dram_power_config):
+def validate_inputs(thermal_config, dram_power_config, stack_order="logic_on_dram", heat_transfer_coefficient=15000.):
     # Keep validation authoritative in the provider, before generating GBs of data.
-    from Interface_scripts.providers.softhier.thermal_config import load_thermal_config
+    from Interface_scripts.providers.softhier.thermal_config import load_thermal_config, validate_thermal_config
     from Interface_scripts.providers.softhier.native.power_config import load_power_config
-    return (load_thermal_config(within_repo(thermal_config)),
+    thermal = load_thermal_config(within_repo(thermal_config))
+    thermal.update(stack_order=stack_order, heat_transfer_coefficient_w_m2_k=heat_transfer_coefficient)
+    return (validate_thermal_config(thermal),
             load_power_config(within_repo(dram_power_config)))
 
 
@@ -178,12 +180,13 @@ def stage_architecture(source, destination, estimate_scale):
 
 def prepare(sdk, output, cases, thermal_config=None, dram_power_config=None,
             layer=1, seed=19, estimate_scale=1.0, all_experts=False,
-            plan_only=False, dramsys_source=None, log=None, repeats=1, opt_step=0):
+            plan_only=False, dramsys_source=None, log=None, repeats=1, opt_step=0,
+            stack_order="logic_on_dram", heat_transfer_coefficient=15000.):
     sdk, output = within_repo(sdk), within_repo(output)
     validate_settings(cases, layer, seed, estimate_scale, repeats, opt_step)
     thermal_config = thermal_config or CONFIGS / "dram3d_thermal.json"
     dram_power_config = dram_power_config or CONFIGS / "dram3d_power.json"
-    resolved_inputs = validate_inputs(thermal_config, dram_power_config)
+    resolved_inputs = validate_inputs(thermal_config, dram_power_config, stack_order, heat_transfer_coefficient)
     source = within_repo(sdk / "llm_dram3d" / MODEL)
     upstream_arch = within_repo(sdk / "apps_dram3d/config/arch.py")
     commit = subprocess.check_output(["git", "-C", str(sdk), "rev-parse", "HEAD"], text=True).strip()
@@ -216,7 +219,10 @@ def prepare(sdk, output, cases, thermal_config=None, dram_power_config=None,
         for name, original, normalized in zip(("thermal", "dram_power"),
                 (thermal_config, dram_power_config), resolved_inputs):
             destination = output / f"{name}_config.json"
-            shutil.copy2(within_repo(original), destination)
+            if name == "thermal":
+                write_json(destination, normalized)
+            else:
+                shutil.copy2(within_repo(original), destination)
             workload[f"{name}_config"] = str(destination)
             workload[f"{name}_config_sha256"] = sha256(destination)
             workload[f"resolved_{name}_config"] = normalized
@@ -273,6 +279,10 @@ def main(argv=None):
     parser.add_argument("--cases", choices=CASES, nargs="+", default=[CASES[0]])
     parser.add_argument("--thermal-config", type=Path)
     parser.add_argument("--dram-power-config", type=Path)
+    parser.add_argument("--stack-order", choices=("dram_on_logic", "logic_on_dram"), default="logic_on_dram",
+                        help="upper die placement (default: logic_on_dram)")
+    parser.add_argument("--heat-transfer-coefficient", type=float, default=15000., metavar="W_PER_M2_K",
+                        help="top cooling boundary in W/(m² K) (default: 15000)")
     parser.add_argument("--layer", type=int, default=1)
     parser.add_argument("--seed", type=int, default=19)
     parser.add_argument("--opt-step", type=int, choices=range(27), default=0, metavar="0..26",

@@ -208,11 +208,13 @@ simulating. Thermal placement is selected by `run_study.py --floorplan`.
 | `--interval-ps` | `20000000` | Power/temperature update interval and 3D-ICE integration timestep for all 11 stages: **20 µs**. |
 | `--cells` | `16384` | Approximate thermal cell target per die; the generated grid may differ slightly. |
 | `--floorplan` | `square_bands` | Square-band placement or `redmule_strip`; DRAM channel regions remain aligned with their clusters. |
+| `--stack-order` | `logic_on_dram` | `logic_on_dram` puts logic on top; `dram_on_logic` puts DRAM on top, nearest the cooling boundary. |
+| `--heat-transfer-coefficient` | `15000` | Top cooling boundary in W/(m²·K); must be positive and finite. |
 | `--estimate-scale` | `1.0` | New-logic power coefficient multiplier, as in component-power studies. |
 | `--layer` | `1` | SDK layer index, 0–35. Layer 1 uses full attention; layer 0 uses sliding-window attention. |
 | `--seed` | `19` | Nonnegative seed for deterministic synthetic inputs and weights. |
 | `--all-experts` | Off | Also preload inactive experts, increasing file size without changing the reserved memory mapping. |
-| `--thermal-config` | Provider `configs/dram3d_thermal.json` | Repo-local physical package parameters, `stack_order`, and provenance. |
+| `--thermal-config` | Provider `configs/dram3d_thermal.json` | Repo-local package parameters and provenance; stack order and cooling follow the CLI options. |
 | `--dram-power-config` | Provider `configs/dram3d_power.json` | Repo-local HBM2 electrical parameters and provenance. |
 | `--sdk` | `SoftHier/soft_hier_sdk` | Repo-local SDK checkout at the pinned revision. |
 | `--prefix` | `dram3d` | New study identifier for logs, workloads, and raw runs. |
@@ -231,21 +233,25 @@ autoregressive generation. When enabled, numerical validation runs once after
 the final repeat. With one repeat, the staged application source is unchanged
 from the SDK. Changing repeats requires a software rebuild, which the runner performs.
 
-The thermal JSON's top-level `stack_order` selects `logic_on_dram` (logic on
-top) or `dram_on_logic` (DRAM on top, the default when omitted). Edit the
-default JSON or pass a complete repo-local copy with `--thermal-config`.
+Use `--stack-order logic_on_dram` (default, logic on top) or `dram_on_logic`
+(DRAM on top), and `--heat-transfer-coefficient 15000` to set the cooling boundary.
+For example, `--stack-order dram_on_logic --heat-transfer-coefficient 25000` selects
+DRAM on top with h = 25000 W/(m²·K). `prepare_workload.py` accepts both options.
+These values override the corresponding fields in `--thermal-config` in the
+staged copy; the input file is unchanged. Resolved values and hashes are archived
+in the workload/study manifests and inherited by thermal replay.
 Both choices keep face-to-face bonding, BEOL next to the bond, and cooling
 above the top die. Materials and floorplan/channel alignment follow each die.
 
-The default 17-layer package runs bottom to top through substrate, bumps, logic bulk/source,
-logic BEOL, hybrid bond, DRAM BEOL, DRAM source/bulk, TIM, copper, and top cooling.
+The default 17-layer package runs bottom to top through substrate, bumps, DRAM bulk/source,
+DRAM BEOL, hybrid bond, logic BEOL, logic source/bulk, TIM, copper, and top cooling.
 Each die retains 49 µm bulk and a 1 µm source, with 5 µm BEOL added for a 55 µm
 total die thickness. The hybrid-bond region is 2 µm; the complete package totals
 1,242 µm. DRAM BEOL uses a logic-derived placeholder pending DRAM-specific data.
-The `logic_on_dram` option reverses the two-die region around the bond while
+The `dram_on_logic` option reverses the two-die region around the bond while
 retaining the same layer count and total thickness.
 BEOL heat capacity and hybrid-bond material properties also remain provisional.
-The initial and cooling temperatures are **300 K**, with top heat-sink coefficient
+The initial and cooling temperatures are **300 K**, with default top heat-sink coefficient
 **h = 15000 W/(m²·K)** (`1.5e-8 W/(µm²·K)` in 3D-ICE).
 See the [model input specification](../../Interface_scripts/providers/softhier/configs/README.md)
 for materials, units, and the stack arrangement.
@@ -386,7 +392,7 @@ Capacity/address plans passed for all eleven SDK cases; other cases' full
 numerical and thermal simulations remain unrun.
 
 Completed replay: `b1_opt25_replay1s_20261025T0850Z`, `decode_b1_kv1024`, step 25,
-with `square_bands` and unchanged thermal inputs. Both profiles reached **1 s**,
+with `square_bands`, `dram_on_logic`, and unchanged thermal inputs. Both profiles reached **1 s**,
 50,000 slots and 813 complete blocks plus a partial block. The source layer took
 1,229,765 cycles (`DONE`, final numerical checking disabled). With
 `--allow-model-clamp`, component peaks were 129.49 °C (constant) and 252.36 °C

@@ -49,12 +49,16 @@ class DramStudyTests(unittest.TestCase):
         self.assertIsNone(args.thermal_replay)
         self.assertIsNone(args.thermal_replay_till)
         self.assertEqual(args.floorplan, "square_bands")
+        self.assertEqual(args.stack_order, "logic_on_dram")
+        self.assertEqual(args.heat_transfer_coefficient, 15000.)
         self.assertEqual(args.thermal_config.name, "dram3d_thermal.json")
         args = run_study.parse_args(["--cases", "decode_b8_kv1024", "prefill_s128",
-                                     "--repeats", "3", "--floorplan", "redmule_strip"])
+                                     "--repeats", "3", "--floorplan", "redmule_strip",
+                                     "--stack-order", "dram_on_logic", "--heat-transfer-coefficient", "25000"])
         self.assertEqual(len(args.cases), 2)
         self.assertEqual(args.repeats, 3)
         self.assertEqual(args.floorplan, "redmule_strip")
+        self.assertEqual((args.stack_order, args.heat_transfer_coefficient), ("dram_on_logic", 25000.))
         replay = run_study.parse_args(["--thermal-replay", "100", "--repeats", "3"])
         self.assertEqual((replay.thermal_replay, replay.repeats), (100, 3))
         self.assertEqual(run_study.parse_args(["--thermal-replay-till"]).thermal_replay_till, 1.)
@@ -69,6 +73,8 @@ class DramStudyTests(unittest.TestCase):
                         ["--prefix", "../old"], ["--estimate-scale", "nan"],
                         ["--repeats", "0"], ["--repeats", "-1"], ["--repeats", "1.5"],
                         ["--repeats", "4294967296"], ["--floorplan", "unknown"],
+                        ["--stack-order", "unknown"],
+                        *[["--heat-transfer-coefficient", v] for v in ("0", "-1", "nan", "inf")],
                         ["--thermal-replay", "0"], ["--thermal-replay", "-1"],
                         ["--thermal-replay", "1.5"], ["--thermal-replay", "4294967296"],
                         ["--opt-step", "-1"], ["--opt-step", "27"], ["--opt-step", "1.5"],
@@ -303,6 +309,45 @@ static void flex_eoc(unsigned error) {
         preparation.write_json(fixture, power)
         with self.assertRaisesRegex(ValueError, "synthetic"):
             preparation.validate_inputs(preparation.CONFIGS / "dram3d_thermal.json", fixture)
+        for coefficient in (0, -1, True, float("nan"), float("inf")):
+            with self.subTest(coefficient=coefficient), self.assertRaisesRegex(ValueError, "heat_transfer_coefficient"):
+                preparation.prepare(INSPECTED_SDK, output, [preparation.CASES[0]],
+                                    heat_transfer_coefficient=coefficient)
+            self.assertFalse(output.exists())
+
+    @unittest.skipUnless((INSPECTED_SDK / "llm_dram3d/gpt-oss-120b/sw/main.c").is_file(), "requires pinned SDK")
+    def test_thermal_options_reach_staged_inputs_and_generated_stack(self):
+        from Interface_scripts.tests.test_memory_on_logic import contract, GENERATOR
+        source = preparation.CONFIGS / "dram3d_thermal.json"
+        original = source.read_bytes()
+        for order, coefficient, top in (("logic_on_dram", 15000., "LOGIC_DIE"),
+                                         ("dram_on_logic", 25000., "DRAM_DIE")):
+            with self.subTest(order=order):
+                output = self.root / order
+                # Skip the SDK plan generator: only configuration staging is under test.
+                with mock.patch.object(preparation.subprocess, "check_output",
+                                       side_effect=[preparation.SDK_COMMIT, "{}"]):
+                    workload = preparation.prepare(INSPECTED_SDK, output, [preparation.CASES[0]],
+                        plan_only=True, stack_order=order, heat_transfer_coefficient=coefficient)
+                thermal = workload["resolved_thermal_config"]
+                self.assertEqual(json.loads(Path(workload["thermal_config"]).read_text()), thermal)
+                self.assertEqual(workload["thermal_config_sha256"], preparation.sha256(workload["thermal_config"]))
+                self.assertEqual((thermal["stack_order"], thermal["heat_transfer_coefficient_w_m2_k"]),
+                                 (order, coefficient))
+                document = contract(1, 1, thermal_config=thermal)
+                self.assertEqual(document["thermal_stack"]["dies"][-1]["id"], top)
+                system = output / "system.json"
+                preparation.write_json(system, document)
+                subprocess.run([sys.executable, str(GENERATOR), "--system-config", str(system),
+                    "--geo", str(output / "geo.json"), "--floorplan", str(output / "floorplan.flp"),
+                    "--stk", str(output / "ice.stk"), "--power-interval-ps", "20000000",
+                    "--target-top-die-cells", "32"],
+                    check=True, capture_output=True, text=True)
+                stack = (output / "ice.stk").read_text()
+                self.assertEqual(re.search(r"\bdie\s+(\w+)\s+\w+\s+floorplan", stack)[1], top)
+                self.assertAlmostEqual(float(re.search(r"heat transfer coefficient\s+([^;]+)", stack)[1]) * 1e12,
+                                       coefficient)
+        self.assertEqual(source.read_bytes(), original)
 
     def test_native_source_snapshot_covers_provider_build_helpers(self):
         provider = self.root / "provider"
