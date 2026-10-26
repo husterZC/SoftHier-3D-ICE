@@ -12,7 +12,7 @@ from .analyze import read_events, summarize_events
 from Interface_scripts.providers.softhier.export_system_config import import_architecture
 
 
-def run(output, replicates=3):
+def prepare_smoke(output):
     output = Path(output).resolve()
     output.relative_to(ROOT)
     output.mkdir(parents=True, exist_ok=False)
@@ -50,6 +50,13 @@ SECTIONS {{
              "-fno-builtin", "-fno-tree-vectorize", "-ffp-contract=off", "-ffunction-sections",
              "-fdata-sections", "-Wl,--gc-sections", str(runtime / "flex_start.s"), str(HERE / "smoke.c"),
              "-o", str(binary)], env, output / "build.log", 60)
+    from .runner import build_hook_client
+    build_hook_client()  # Outside every timed execution.
+    return output, binary, env
+
+
+def run(output, replicates=3, coupling_mode="optimized"):
+    output, binary, env = prepare_smoke(output)
     rows, signature = [], None
     cpus = ",".join(map(str, select_cpus()))
     rng = random.Random(19)
@@ -66,7 +73,7 @@ SECTIONS {{
             if instrument:
                 (directory / "timing").mkdir()
                 run_env["CLO_TIMING_DIR"] = str(directory / "timing")
-            command = ["taskset", "-c", cpus, *command_for(pitch, directory, 20_000_000)]
+            command = ["taskset", "-c", cpus, *command_for(pitch, directory, 20_000_000, coupling_mode)]
             start, end = execute(command, run_env, directory / "logs" /
                                  ("simulator.log" if pitch is None else "driver.log"), 300)
             text = (directory / "logs/simulator.log").read_text()
@@ -76,7 +83,7 @@ SECTIONS {{
             if len(cycles) != 1 or (signature is not None and signature != cycles[0]):
                 raise ValueError("simulated time changed between matched smoke runs")
             signature = cycles[0]
-            row = dict(mode=mode, instrumented=instrument, block=block, pilot=block == 0,
+            row = dict(mode=mode, coupling_mode=coupling_mode, instrumented=instrument, block=block, pilot=block == 0,
                        host_seconds=(end - start) * 1e-9, simulated_ns=int(signature), path=str(directory))
             if instrument:
                 row["timing"] = summarize_events(read_events(directory / "timing"), start, end,

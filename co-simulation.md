@@ -212,6 +212,32 @@ make coupled-run \
 The feedback hook is identical in both modes; only transport from the power
 trace file into the 3D-ICE server changes.
 
+The default `COUPLING_MODE=optimized` runs one persistent Python adapter per
+simulation. A compiled executable client preserves SoftHier's existing hook
+interface, while the worker caches static mappings and reads newly appended
+temperature rows. Both host polling intervals default to 5 ms. These host
+intervals are independent of the simulated thermal timestep above.
+
+```bash
+make coupled-run RUN_NAME=optimized COUPLING_MODE=optimized
+# Reproduce the original per-exchange Python and full-history reader:
+make coupled-run RUN_NAME=legacy COUPLING_MODE=legacy
+# Explicit host polling overrides (seconds):
+make coupled-run DICE_POLL_SECONDS=0.005 POWER_HOOK_POLL_SECONDS=0.005
+```
+
+Legacy mode defaults to 1 s native polling and 20 ms adapter polling. A custom
+`POWER_HOOK_EXECUTABLE` requires legacy mode. Standalone 3D-ICE binaries retain
+their 1 s default and accept fractional `--poll` values. Rebuild 3D-ICE after
+updating these sources; `BUILD_3DICE=0` requires already updated binaries.
+
+The helper client builds automatically into `runs/.coupling_tools`; the overhead
+study builds it before measurements and fingerprints it with the other native
+artifacts. Worker logs are in `logs/adapter.log`, diagnostics in
+`state/adapter_diagnostics.json`, and status/stop include the worker. Timeouts or
+worker failures fail the exchange without retrying a potentially consumed power
+slot. A run restart uses fresh thermal state and fresh temperature-file cursors.
+
 ## Run Directory
 
 A timestamped run is written under:

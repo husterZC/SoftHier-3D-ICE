@@ -22,6 +22,8 @@ PROVIDER = ROOT / "Interface_scripts/providers/softhier/provider.sh"
 CONFIGS = PROVIDER.parent / "configs"
 CASE = "decode_b8_kv1024"
 sys.path.insert(0, str(ROOT / "experiments/llm_dram3d"))
+sys.path.insert(0, str(ROOT / "Interface_scripts/co-simulation"))
+from build_hook_client import build as build_hook_client
 from prepare_workload import (prepare, build, load_sdk_report, sha256, write_json, validate_inputs,
                               source_hashes as workload_source_hashes)
 from run_study import parse_timing
@@ -50,12 +52,16 @@ def parse_args(argv=None):
     smoke = commands.add_parser("smoke", help="Run a short native kernel, not the B8 study")
     smoke.add_argument("--output", type=Path, required=True)
     smoke.add_argument("--replicates", type=positive_int, default=3)
+    smoke.add_argument("--coupling-mode", choices=("optimized", "legacy"), default="optimized")
     for command in ("plan", "run"):
         p = commands.add_parser(command, help="Print configuration only" if command == "plan" else "Execute the study")
         p.add_argument("--prefix", default=datetime.now(timezone.utc).strftime("b8_%Y%m%dT%H%M%SZ"))
         p.add_argument("--grid-pitches-um", nargs=3, type=positive_float, default=[100., 50., 20.])
         p.add_argument("--replicates", type=positive_int, default=5)
         p.add_argument("--interval-ps", type=positive_int, default=20_000_000)
+        p.add_argument("--coupling-mode", choices=("optimized", "legacy"), default="optimized")
+        p.add_argument("--dice-poll-seconds", type=positive_float)
+        p.add_argument("--adapter-poll-seconds", type=positive_float)
         p.add_argument("--seed", type=int, default=19, help="Workload and randomized schedule seed")
         p.add_argument("--layer", type=int, default=1)
         p.add_argument("--cpus", help="Comma-separated allowed CPUs; default four physical cores on one socket")
@@ -100,8 +106,9 @@ def settings(args):
                 floorplan="square_bands", profile="temperature_aware",
                 grid_pitches_um=args.grid_pitches_um, replicates=args.replicates,
                 interval_ps=args.interval_ps, thermal_step_seconds=args.interval_ps * 1e-12,
-                cpus=select_cpus(args.cpus), thermal_threads=1, adapter_poll_seconds=.02,
-                server_poll_seconds=1,
+                cpus=select_cpus(args.cpus), thermal_threads=1, coupling_mode=args.coupling_mode,
+                adapter_poll_seconds=args.adapter_poll_seconds or (.005 if args.coupling_mode == "optimized" else .02),
+                server_poll_seconds=args.dice_poll_seconds or (.005 if args.coupling_mode == "optimized" else 1.),
                 thermal_config=str(args.thermal_config.resolve()),
                 dram_power_config=str(args.dram_power_config.resolve()),
                 output_policy="region_temperatures_each_slot_and_final_maps",
@@ -152,6 +159,8 @@ def host_info():
 def source_files():
     files = [ROOT / "Makefile", ROOT / "3D-ICE/bin/3D-ICE-Server.c",
              ROOT / "3D-ICE/sources/thermal_data.c", ROOT / "3D-ICE/include/closed_loop_timing.h",
+             ROOT / "3D-ICE/bin/3D-ICE-Client.c", ROOT / "3D-ICE/bin/power_trace_reader.c",
+             ROOT / "3D-ICE/bin/power_trace_reader.h",
              ROOT / "Interface_scripts/overhead_timing.py", ROOT / "Interface_scripts/system_contract.py",
              ROOT / "Interface_scripts/thermal_manifest.py"]
     for directory in (HERE, PROVIDER.parent, ROOT / "Interface_scripts/geometry_generator",
@@ -182,7 +191,7 @@ def no_power_environment(source, destination):
 
 def environment(workload):
     # Keep toolchain/environment activation, but isolate experiment-owned knobs.
-    prefixes = ("SOFTHIER_", "SIMULATOR_", "ICE_", "DICE_", "POWER_HOOK_", "RUN_", "CLO_")
+    prefixes = ("SOFTHIER_", "SIMULATOR_", "ICE_", "DICE_", "POWER_HOOK_", "RUN_", "CLO_", "COUPLING_")
     paths = {"ROOT_DIR", "GENERATED_DIR", "TRACE_DIR", "RESULT_DIR", "STATE_DIR", "LOG_DIR", "PID_DIR",
              "SYSTEM_CONFIG_FILE", "GEO_FILE", "DEFAULT_POWER_W", "OTHERS_POWER", "PWR_INTERVAL_PS"}
     base = {k: v for k, v in os.environ.items() if not k.startswith(prefixes) and k not in paths}
@@ -199,7 +208,7 @@ def environment(workload):
                SOFTHIER_DRAMSYS_PATH=workload["dramsys_path"],
                SIMULATOR_PROVIDER=str(PROVIDER), SOFTHIER_PROVIDER_SCRIPT_DIR=str(PROVIDER.parent),
                OPENBLAS_NUM_THREADS="1", OMP_NUM_THREADS="1", MKL_NUM_THREADS="1",
-               POWER_HOOK_POLL_SECONDS="0.02",
+               COUPLING_MODE="optimized", POWER_HOOK_POLL_SECONDS="0.005", DICE_POLL_SECONDS="0.005",
                AUTO_BOOTSTRAP="0", ICE_GENERATE_GIF="0", DICE_RUN_MODE="local-server")
     return env
 
@@ -211,15 +220,19 @@ def native_artifacts():
         raise ValueError("native ROI instrumentation is missing; use --build-hardware")
     return [ROOT / "3D-ICE/bin/3D-ICE-Server", install / "native_build.json",
             ROOT / "SoftHier/.power_interface/dependencies/dramsys-install/native_build.json",
-            install / "lib/libpulpvp.so", install / "lib/libpulpvp-profile.so", *controllers]
+            install / "lib/libpulpvp.so", install / "lib/libpulpvp-profile.so", *controllers,
+            ROOT / "3D-ICE/bin/3D-ICE-Client", build_hook_client()]
 
 
-def command_for(pitch, run_dir, interval):
+def command_for(pitch, run_dir, interval, coupling_mode="optimized", server_poll=None, adapter_poll=None, profile="temperature_aware"):
     if pitch is None:
         return ["bash", str(PROVIDER), "run-uncoupled"]
     seconds = f"{interval * 1e-12:.12g}"
     return ["make", "coupled-run", "RUN_NAME=closed_loop_overhead", f"RUN_DIR={run_dir}",
-            "BUILD_SIMULATOR=0", "BUILD_3DICE=0", "SOFTHIER_POWER_PROFILE=temperature_aware",
+            "BUILD_SIMULATOR=0", "BUILD_3DICE=0", f"SOFTHIER_POWER_PROFILE={profile}",
+            f"COUPLING_MODE={coupling_mode}",
+            f"DICE_POLL_SECONDS={server_poll if server_poll is not None else (.005 if coupling_mode == 'optimized' else 1.)}",
+            f"POWER_HOOK_POLL_SECONDS={adapter_poll if adapter_poll is not None else (.005 if coupling_mode == 'optimized' else .02)}",
             f"POWER_INTERVAL_PS={interval}", f"ICE_SLOT_SECONDS={seconds}", f"ICE_STEP_SECONDS={seconds}",
             f"ICE_GRID_PITCH_UM={pitch:g}", "ICE_TARGET_TOP_DIE_CELLS=", "ICE_MAP_OUTPUT=final",
             "DICE_RUN_MODE=local-server", "ICE_GENERATE_GIF=0", "WAIT_TIMEOUT=3600"]
@@ -403,7 +416,8 @@ def run_locked(args, directory, config, modes):
                        SOFTHIER_BINARY=case["binary"], SOFTHIER_RUN_CWD=str(run_dir / "results/simulator"),
                        SOFTHIER_DRAMSYS_PATH=workload["dramsys_path"] if pitch is not None else str(baseline))
         command = ["taskset", "-c", ",".join(map(str, config["cpus"])),
-                   *command_for(pitch, run_dir, config["interval_ps"])]
+                   *command_for(pitch, run_dir, config["interval_ps"], config["coupling_mode"],
+                                config["server_poll_seconds"], config["adapter_poll_seconds"])]
         record = dict(item, status="running", command=command, loadavg_start=os.getloadavg(),
                       environment={k: run_env[k] for k in sorted(run_env) if k in
                                    ("PYTHON", "OPENBLAS_NUM_THREADS", "OMP_NUM_THREADS", "MKL_NUM_THREADS",
@@ -417,6 +431,11 @@ def run_locked(args, directory, config, modes):
                                       load_sdk_report(workload["source"]), 16, 1)
             timing = summarize_events(read_events(timing_dir), start, end, pitch is not None, config["interval_ps"])
             record["effective_configuration"] = effective_configuration(run_dir, run_env["SOFTHIER_DRAMSYS_PATH"], pitch is not None)
+            diagnostics = run_dir / "state/adapter_diagnostics.json"
+            if diagnostics.exists():
+                record["adapter_diagnostics"] = json.loads(diagnostics.read_text())
+                if record["adapter_diagnostics"]["status"] != "complete":
+                    raise ValueError("persistent adapter did not complete successfully")
             record["process_tree_resources"] = json.loads(log.with_suffix(".resources.json").read_text())
             signature = dict(cycles=validation["cycles"], stage_cycles=validation["stage_cycles"],
                              roi_simulated_ps=timing["roi_simulated_ps"])
@@ -451,6 +470,6 @@ def main(argv=None):
         print(json.dumps(analyze(args.study), indent=2))
     elif args.command == "smoke":
         from .smoke import run as smoke_run
-        smoke_run(args.output, args.replicates)
+        smoke_run(args.output, args.replicates, args.coupling_mode)
     else:
         run(args)

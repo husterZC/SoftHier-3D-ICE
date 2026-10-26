@@ -18,7 +18,8 @@ Build the native timing probes and run the complete experiment:
 
 ```bash
 python -m experiments.closed_loop_overhead run \
-  --prefix b8_overhead \
+  --prefix b8_overhead_optimized \
+  --coupling-mode optimized \
   --grid-pitches-um 100 50 20 \
   --interval-ps 20000000 \
   --replicates 5 \
@@ -31,7 +32,7 @@ four configurations: 20 measured runs plus four pilots. Each run starts new
 processes and resets temperatures. Full B8 executions can take hours; this is
 a multi-run study, not a short test. No one-second replay is involved.
 
-Results are stored under `experiments/closed_loop_overhead/results/b8_overhead`.
+Results are stored under `experiments/closed_loop_overhead/results/<prefix>`.
 The runner refuses to overwrite a study. Resume with identical settings and
 source files using `--resume`; completed runs are skipped and failed attempts
 are preserved under suffixed directories. Do not pass `--build-hardware` on
@@ -54,7 +55,7 @@ Analysis can be regenerated without simulating:
 
 ```bash
 python -m experiments.closed_loop_overhead analyze \
-  experiments/closed_loop_overhead/results/b8_overhead
+  experiments/closed_loop_overhead/results/b8_overhead_optimized
 ```
 
 ## Fixed physical and numerical settings
@@ -122,10 +123,43 @@ Time before/after ROI is initialization/completion. `detail_seconds` retains
 nested diagnostic spans; those totals must not be added to the exclusive
 phase totals.
 
-The existing file-based transport is retained: the server's follow loop polls
-every **1 host second**, and the Python feedback adapter polls every **20 host
-milliseconds**. These host waits differ from the 20 µs simulated interval and
-can dominate coarse meshes. They belong to coupling overhead, not solver time.
+The default `--coupling-mode optimized` retains the file-based thermal transport,
+but uses **5 host milliseconds** for both polling intervals. One persistent Python
+worker loads configuration and mappings once and reads each temperature row once.
+A small compiled client uses the existing executable-hook interface to contact
+that worker; SoftHier itself is unchanged. Each run starts a fresh worker.
+
+`--coupling-mode legacy` retains a Python process per exchange, full-history
+temperature parsing, **1 host second** native polling, and **20 host milliseconds**
+adapter polling. Explicit `--dice-poll-seconds` and `--adapter-poll-seconds` override
+the selected mode's host intervals. These settings never change the simulated
+thermal step or power interval. Custom `POWER_HOOK_EXECUTABLE` integrations use
+`COUPLING_MODE=legacy` when invoked through `make coupled-run`.
+
+For a legacy comparison, use a separate prefix:
+
+```bash
+python -m experiments.closed_loop_overhead run \
+  --prefix b8_overhead_legacy_new \
+  --coupling-mode legacy \
+  --grid-pitches-um 100 50 20 \
+  --interval-ps 20000000 --replicates 5 --build-hardware
+```
+
+The completed original `b8_overhead` study is legacy data. It remains readable;
+do not overwrite or resume it with changed sources. Run comparisons sequentially.
+
+The compiled hook client and 3D-ICE client/server hashes are recorded alongside
+the native simulator hashes. Helper compilation occurs before timed runs.
+`state/adapter_diagnostics.json` records worker status, configuration-load count,
+rows/bytes read, bounded buffer usage, and worker CPU time. Worker/socket failures
+fail the run; an ambiguous exchange is never retried automatically. Interrupted
+runs restart with fresh thermal state through the existing study-resume workflow.
+
+`timing.coupling_diagnostics` reports power-publication-to-solver delay and nested
+adapter stage times. Nested times and client/worker round trips overlap thermal
+work; do not add them to the exclusive phase totals. Inline power accounting is
+still included in architecture execution, not fully isolated by `power_capture`.
 
 Resources are per process. Do not sum independent peak RSS values and describe
 that sum as peak simultaneous memory. Exchange latency samples describe one
@@ -151,6 +185,22 @@ The PDF/PNG figures are `runtime` (absolute time and slowdown for both scopes),
 per step, and 3D-ICE peak RSS against native cell count).
 
 ## Validation
+
+Run focused streaming/worker checks and a native equivalence/performance check:
+
+```bash
+make -C 3D-ICE -j4
+python -m unittest Interface_scripts.tests.test_optimized_coupling
+python -m experiments.closed_loop_overhead.validate_coupling \
+  --output experiments/closed_loop_overhead/results/coupling_validation_new
+```
+
+The latter runs a short actual SoftHier kernel in both modes, leakage profiles,
+and stack orders, then a synthetic 128-exchange producer against native 3D-ICE
+at 100 µm. It checks identical power rows, temperature feedback, final maps, and
+guest cycles, and records whether average coordination is below 100 ms/exchange.
+Run it in isolation. This is a transport check, not B8 performance or a confidence
+interval. Full B8 measurements are launched separately using the commands above.
 
 Focused tests, including native thermal checks when the server is built:
 

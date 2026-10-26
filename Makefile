@@ -44,6 +44,8 @@ SIMULATOR_PLATFORM ?= $(PLD)
 PORT ?= 54322
 SERVER_HOST ?= 127.0.0.1
 DICE_RUN_MODE ?= local-server
+COUPLING_MODE ?= optimized
+DICE_POLL_SECONDS ?=
 PWR_INTERVAL_PS ?= 100000000
 POWER_INTERVAL_PS ?= $(PWR_INTERVAL_PS)
 ICE_SLOT_SECONDS ?=
@@ -83,14 +85,14 @@ ICE_RUNTIME_STK_FILE ?= $(RUN_3DICE_DIR)/ice.stk
 RAW_POWER_TRACE ?= $(TRACE_DIR)/power_hook_trace.jsonl
 DICE_POWER_TRACE ?= $(TRACE_DIR)/3dice_power_traces.txt
 DONE_FILE ?= $(STATE_DIR)/simulator.done
-POWER_HOOK_EXECUTABLE ?= $(CO_SIMULATION_SCRIPT_DIR)/3dice_power_hook.py
+POWER_HOOK_EXECUTABLE ?=
 POWER_HOOK_CONFIG_FILE ?= $(GENERATED_DIR)/power_hook_config.json
 POWER_HOOK_REQUEST_FILE ?= $(STATE_DIR)/power_hook_request.json
 POWER_HOOK_RESPONSE_FILE ?= $(STATE_DIR)/power_hook_response.json
 POWER_HOOK_TRACE_FILE ?= $(RAW_POWER_TRACE)
 COMPONENT_TEMPERATURE_TRACE ?= $(TRACE_DIR)/component_temperatures.csv
 THERMAL_FEEDBACK_FILE ?= $(RUN_3DICE_DIR)/output_top_die_flp_avg.txt
-POWER_HOOK_POLL_SECONDS ?= 0.02
+POWER_HOOK_POLL_SECONDS ?=
 POWER_HOOK_TIMEOUT_SECONDS ?= $(WAIT_TIMEOUT)
 
 .PHONY: help bootstrap co-simulation dirs 3dice-build simulator-init simulator-check simulator-build softhier-init softhier-power-check softhier-build ice-inputs coupled-run coupled-status coupled-stop clean-run clean-latest clean-runs list-runs latest-run adapter-smoke interface-tests
@@ -106,6 +108,7 @@ help:
 		'  make ice-inputs       Generate run-local 3D-ICE geo/floorplan/stk files' \
 		'  make simulator-build  Build through the selected provider' \
 		'  make coupled-run      Run the localhost coupled simulation' \
+		'  COUPLING_MODE=optimized|legacy (default optimized; host polling defaults to 5 ms)' \
 		'  make interface-tests  Validate the neutral interface contract' \
 		'  make coupled-status   Show recorded process status' \
 		'  make coupled-stop     Stop recorded coupled-run processes' \
@@ -250,6 +253,8 @@ coupled-run:
 	PORT="$(PORT)" \
 	SERVER_HOST="$(SERVER_HOST)" \
 	DICE_RUN_MODE="$(DICE_RUN_MODE)" \
+	COUPLING_MODE="$(COUPLING_MODE)" \
+	DICE_POLL_SECONDS="$(DICE_POLL_SECONDS)" \
 	POWER_INTERVAL_PS="$(POWER_INTERVAL_PS)" \
 	SOFTHIER_POWER_PROFILE="$(SOFTHIER_POWER_PROFILE)" \
 	ICE_SLOT_SECONDS="$(ICE_SLOT_SECONDS)" \

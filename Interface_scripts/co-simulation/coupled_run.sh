@@ -33,6 +33,16 @@ SIMULATOR_PLATFORM="${SIMULATOR_PLATFORM:-}"
 PORT="${PORT:-54322}"
 SERVER_HOST="${SERVER_HOST:-127.0.0.1}"
 DICE_RUN_MODE="${DICE_RUN_MODE:-local-server}"
+COUPLING_MODE="${COUPLING_MODE:-optimized}"
+if [[ "$COUPLING_MODE" == "legacy" ]]; then
+    DICE_POLL_SECONDS="${DICE_POLL_SECONDS:-1}"
+    POWER_HOOK_POLL_SECONDS="${POWER_HOOK_POLL_SECONDS:-0.02}"
+else
+    DICE_POLL_SECONDS="${DICE_POLL_SECONDS:-0.005}"
+    POWER_HOOK_POLL_SECONDS="${POWER_HOOK_POLL_SECONDS:-0.005}"
+fi
+HOOK_SOCKET_DIR=""
+POWER_HOOK_SOCKET=""
 POWER_INTERVAL_PS="${POWER_INTERVAL_PS:-100000000}"
 SOFTHIER_POWER_PROFILE="${SOFTHIER_POWER_PROFILE:-constant}"
 ICE_SLOT_SECONDS="${ICE_SLOT_SECONDS:-}"
@@ -74,14 +84,13 @@ THERMAL_MANIFEST_TOOL="$ROOT_DIR/Interface_scripts/thermal_manifest.py"
 RAW_POWER_TRACE="${RAW_POWER_TRACE:-$TRACE_DIR/power_hook_trace.jsonl}"
 DICE_POWER_TRACE="${DICE_POWER_TRACE:-$TRACE_DIR/3dice_power_traces.txt}"
 DONE_FILE="${DONE_FILE:-$STATE_DIR/simulator.done}"
-POWER_HOOK_EXECUTABLE="${POWER_HOOK_EXECUTABLE:-$SCRIPT_DIR/3dice_power_hook.py}"
+POWER_HOOK_EXECUTABLE="${POWER_HOOK_EXECUTABLE:-}"
 POWER_HOOK_CONFIG_FILE="${POWER_HOOK_CONFIG_FILE:-$GENERATED_DIR/power_hook_config.json}"
 POWER_HOOK_REQUEST_FILE="${POWER_HOOK_REQUEST_FILE:-$STATE_DIR/power_hook_request.json}"
 POWER_HOOK_RESPONSE_FILE="${POWER_HOOK_RESPONSE_FILE:-$STATE_DIR/power_hook_response.json}"
 POWER_HOOK_TRACE_FILE="${POWER_HOOK_TRACE_FILE:-$RAW_POWER_TRACE}"
 COMPONENT_TEMPERATURE_TRACE="${COMPONENT_TEMPERATURE_TRACE:-$TRACE_DIR/component_temperatures.csv}"
 THERMAL_FEEDBACK_FILE="${THERMAL_FEEDBACK_FILE:-$RUN_3DICE_DIR/output_top_die_flp_avg.txt}"
-POWER_HOOK_POLL_SECONDS="${POWER_HOOK_POLL_SECONDS:-0.02}"
 POWER_HOOK_TIMEOUT_SECONDS="${POWER_HOOK_TIMEOUT_SECONDS:-$WAIT_TIMEOUT}"
 MANIFEST_FILE="${MANIFEST_FILE:-$RUN_DIR/run.env}"
 SUMMARY_FILE="${SUMMARY_FILE:-$RUN_DIR/summary.txt}"
@@ -113,6 +122,8 @@ Environment overrides:
   SIMULATOR_PLATFORM=$SIMULATOR_PLATFORM
   PORT=$PORT
   DICE_RUN_MODE=$DICE_RUN_MODE
+  COUPLING_MODE=$COUPLING_MODE [optimized|legacy]
+  DICE_POLL_SECONDS=$DICE_POLL_SECONDS
   POWER_INTERVAL_PS=$POWER_INTERVAL_PS
   SOFTHIER_POWER_PROFILE=$SOFTHIER_POWER_PROFILE
   ICE_SLOT_SECONDS=$ICE_SLOT_SECONDS
@@ -174,6 +185,8 @@ provider_command() {
     SYSTEM_CONFIG_FILE="$SYSTEM_CONFIG_FILE" \
     GEO_FILE="$GEO_FILE" \
     DEFAULT_POWER_W="$DEFAULT_POWER_W" \
+    POWER_HOOK_SOCKET="$POWER_HOOK_SOCKET" \
+    POWER_HOOK_TIMEOUT_SECONDS="$POWER_HOOK_TIMEOUT_SECONDS" \
     POWER_HOOK_EXECUTABLE="$POWER_HOOK_EXECUTABLE" \
     POWER_HOOK_CONFIG_FILE="$POWER_HOOK_CONFIG_FILE" \
     POWER_HOOK_REQUEST_FILE="$POWER_HOOK_REQUEST_FILE" \
@@ -373,6 +386,9 @@ build_or_verify_3dice() {
         SRC_DIR="$DICE_DIR" "$SCRIPT_DIR/3dice_client_server.sh" install
     fi
 
+    if [[ "$BUILD_3DICE" == "1" && "$need_build" == "0" ]]; then
+        "$MAKE_CMD" -C "$DICE_DIR" -j2
+    fi
     require_executable "$SERVER_BIN"
 
     if [[ "$need_client" == "1" ]]; then
@@ -488,6 +504,9 @@ write_manifest() {
         kv PORT "$PORT"
         kv SERVER_HOST "$SERVER_HOST"
         kv DICE_RUN_MODE "$DICE_RUN_MODE"
+        kv COUPLING_MODE "$COUPLING_MODE"
+        kv DICE_POLL_SECONDS "$DICE_POLL_SECONDS"
+        kv POWER_HOOK_SOCKET "$POWER_HOOK_SOCKET"
         kv ICE_TARGET_TOP_DIE_CELLS "$ICE_TARGET_TOP_DIE_CELLS"
         kv ICE_GRID_PITCH_UM "$ICE_GRID_PITCH_UM"
         kv ICE_MAP_OUTPUT "$ICE_MAP_OUTPUT"
@@ -693,7 +712,7 @@ start_server() {
             "$SERVER_BIN" "$(basename "$ICE_RUNTIME_STK_FILE")" \
                 --power-trace "$DICE_POWER_TRACE" \
                 --follow \
-                --until-minus-one
+                --until-minus-one --poll "$DICE_POLL_SECONDS"
         ) > "$LOG_DIR/3dice_server.log" 2>&1 &
         wait_pattern="Running local power trace mode."
     else
@@ -720,7 +739,7 @@ start_client() {
     (
         cd "$RUN_3DICE_DIR"
         "$CLIENT_BIN" "$SERVER_HOST" "$PORT" "$DICE_POWER_TRACE" \
-            --follow --until-minus-one
+            --follow --until-minus-one --poll "$DICE_POLL_SECONDS"
     ) > "$LOG_DIR/3dice_client.log" 2>&1 &
 
     write_pid 3dice_client "$!"
@@ -812,7 +831,7 @@ stop_pid_name() {
 
     if pid_is_running "$pid"; then
         printf '%-16s stopping pid %s\n' "$name" "$pid"
-        kill "$pid" >/dev/null 2>&1 || true
+        "$PYTHON" "$SCRIPT_DIR/stop_process_tree.py" "$pid"
     else
         printf '%-16s stale pid %s\n' "$name" "$pid"
     fi
@@ -907,6 +926,8 @@ write_summary() {
         printf 'power_interval_ps: %s\n' "$POWER_INTERVAL_PS"
         printf 'softhier_power_profile: %s\n' "$SOFTHIER_POWER_PROFILE"
         printf '3dice_mode: %s\n' "$DICE_RUN_MODE"
+        printf 'coupling_mode: %s\n' "$COUPLING_MODE"
+        printf 'native_poll_seconds: %s\n' "$DICE_POLL_SECONDS"
         printf '3dice_slot_seconds: %s\n' "$(effective_slot_seconds)"
         printf '3dice_step_seconds: %s\n' "$(effective_step_seconds)"
         printf '\n'
@@ -956,6 +977,59 @@ write_summary() {
     } > "$SUMMARY_FILE"
 }
 
+prepare_hook_runtime() {
+    case "$COUPLING_MODE" in
+        legacy) POWER_HOOK_EXECUTABLE="${POWER_HOOK_EXECUTABLE:-$SCRIPT_DIR/3dice_power_hook.py}" ;;
+        optimized)
+            [[ -z "$POWER_HOOK_EXECUTABLE" ]] || die "custom POWER_HOOK_EXECUTABLE requires COUPLING_MODE=legacy"
+            POWER_HOOK_EXECUTABLE="$("$PYTHON" "$SCRIPT_DIR/build_hook_client.py")"
+            HOOK_SOCKET_DIR="$(mktemp -d /tmp/softhier-hook.XXXXXXXX)"
+            POWER_HOOK_SOCKET="$HOOK_SOCKET_DIR/worker.sock"
+            ;;
+        *) die "COUPLING_MODE must be optimized or legacy" ;;
+    esac
+    "$PYTHON" - "$DICE_POLL_SECONDS" "$POWER_HOOK_POLL_SECONDS" <<'PYVALIDATE'
+import math, sys
+if any(not math.isfinite(float(x)) or float(x) <= 0 for x in sys.argv[1:]):
+    raise SystemExit("poll intervals must be finite positive host seconds")
+PYVALIDATE
+}
+
+start_hook_worker() {
+    [[ "$COUPLING_MODE" == "optimized" ]] || return 0
+    local args=("$SCRIPT_DIR/power_hook_worker.py" --socket "$POWER_HOOK_SOCKET"
+        --ready "$STATE_DIR/adapter.ready.json" --diagnostics "$STATE_DIR/adapter_diagnostics.json"
+        --config "$POWER_HOOK_CONFIG_FILE" --request "$POWER_HOOK_REQUEST_FILE"
+        --response "$POWER_HOOK_RESPONSE_FILE" --watch-pid "$$"
+        --watch-pid "$(read_pid 3dice_server)")
+    if [[ "$DICE_RUN_MODE" == "client-server" ]]; then
+        args+=(--watch-pid "$(read_pid 3dice_client)")
+    fi
+    "$PYTHON" "${args[@]}" > "$LOG_DIR/adapter.log" 2>&1 &
+    local pid=$!
+    write_pid adapter "$pid"
+    "$PYTHON" "$SCRIPT_DIR/wait_for_log.py" --file "$LOG_DIR/adapter.log" \
+        --pattern "Power hook worker ready" --pid "$pid" --timeout "$WAIT_TIMEOUT"
+}
+
+cleanup_run() {
+    local status=$?
+    trap - EXIT INT TERM
+    local name pid
+    for name in simulator_log_tail simulator adapter 3dice_client 3dice_server; do
+        pid="$(read_pid "$name" || true)"
+        if [[ -n "$pid" ]] && pid_is_running "$pid"; then
+            "$PYTHON" "$SCRIPT_DIR/stop_process_tree.py" "$pid" || true
+        fi
+        if [[ -n "$pid" ]]; then wait "$pid" 2>/dev/null || true; fi
+    done
+    if [[ -n "$HOOK_SOCKET_DIR" ]]; then
+        rm -f "$POWER_HOOK_SOCKET" "$STATE_DIR/adapter.ready.json"
+        rmdir "$HOOK_SOCKET_DIR" 2>/dev/null || true
+    fi
+    exit "$status"
+}
+
 run_all() {
     resolve_provider
     validate_simulator_log_tail_lines
@@ -965,6 +1039,10 @@ run_all() {
     make_dirs
     write_latest_link
     reset_runtime_files
+    trap cleanup_run EXIT
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
+    prepare_hook_runtime
 
     if [[ "$AUTO_BOOTSTRAP" == "1" ]]; then
         log "Running bootstrap because AUTO_BOOTSTRAP=1"
@@ -998,6 +1076,8 @@ run_all() {
         start_client
     fi
 
+    start_hook_worker
+
     local simulator_status=0
     run_simulator || simulator_status=$?
     ensure_3dice_termination
@@ -1005,7 +1085,11 @@ run_all() {
     local client_pid server_pid
     server_pid="$(read_pid 3dice_server)"
 
-    local client_status=0 server_status=0
+    local client_status=0 server_status=0 adapter_status=0
+    if [[ "$COUPLING_MODE" == "optimized" ]]; then
+        if [[ "$simulator_status" != "0" ]]; then stop_pid_name adapter; fi
+        wait_for_exit adapter "$(read_pid adapter)" "$EXIT_TIMEOUT" || adapter_status=$?
+    fi
 
     if [[ "$DICE_RUN_MODE" == "client-server" ]]; then
         client_pid="$(read_pid 3dice_client)"
@@ -1031,6 +1115,7 @@ run_all() {
     if [[ "$simulator_status" != "0" ]]; then
         return "$simulator_status"
     fi
+    if [[ "$adapter_status" != "0" ]]; then return "$adapter_status"; fi
     if [[ "$client_status" != "0" && "$client_status" != "skipped" ]]; then
         return "$client_status"
     fi
@@ -1051,12 +1136,14 @@ case "$cmd" in
         run_all
         ;;
     status)
+        status_pid_name adapter
         status_pid_name 3dice_server
         status_pid_name 3dice_client
         status_pid_name simulator
         status_pid_name simulator_log_tail
         ;;
     stop)
+        stop_pid_name adapter
         stop_pid_name simulator
         stop_pid_name simulator_log_tail
         stop_pid_name 3dice_client

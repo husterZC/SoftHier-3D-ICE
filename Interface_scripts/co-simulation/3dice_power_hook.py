@@ -41,6 +41,7 @@ from system_contract import (  # noqa: E402
 )
 from thermal_manifest import artifact_path, load_manifest  # noqa: E402
 from overhead_timing import now as overhead_now, emit as overhead_emit
+from temperature_stream import TemperatureStream
 
 
 PROTOCOL_NAME = "gvsoc-power-hook"
@@ -52,6 +53,88 @@ KELVIN_OFFSET = 273.15
 
 class HookError(RuntimeError):
     """Raised when an exchange cannot be completed safely."""
+
+
+class HookSession:
+    """One immutable mapping and one set of stream cursors for a coupled run."""
+    def __init__(self, config_path, health_check=None):
+        started = overhead_now()
+        self.config = validate_hook_config(load_json(Path(config_path), "power-hook configuration"),
+                                          Path(config_path))
+        self.document = load_contract(self.config["system_config"])
+        self.outputs = thermal_outputs(self.config, self.document)
+        self.config["thermal_outputs"] = self.outputs
+        self.floorplan = [name for die in self.outputs for name in die["elements"]]
+        self.sources = build_power_sources(self.document)
+        validate_floorplan_entries(self.floorplan, self.sources)
+        self.components = thermal_components(self.document)
+        self.paths = {c["path"] for c in self.components}
+        self.columns = power_columns(self.document)
+        self.weights = []
+        for component in self.components:
+            terms = []
+            for name in component["floorplan_elements"]:
+                shape = geometry_entry(self.document["geometry"], name)["shape"]
+                terms.append((self.floorplan.index(flattened_floorplan_name(name)),
+                              float(shape[0]) * float(shape[1])))
+            self.weights.append(terms)
+        self.readers = [TemperatureStream(d["temperature_output"], d["elements"]) for d in self.outputs]
+        self.health_check = health_check
+        self.initialized = self.finished = False
+        self.last_end = self.exchanges = 0
+        self.config["_session"] = self
+        overhead_emit("adapter", "configuration", started)
+
+    def check_request(self, request):
+        phase = request["phase"]
+        if self.finished or (phase == "init" and self.initialized):
+            raise HookError("duplicate or post-final hook request")
+        if phase != "init" and not self.initialized:
+            raise HookError("hook update requires initialization")
+        if request["start_ps"] != self.last_end:
+            raise HookError("non-contiguous or duplicate power window")
+        if phase == "init" and request["end_ps"] != 0:
+            raise HookError("initialization window must be zero")
+        if phase == "update" and request["end_ps"] <= request["start_ps"]:
+            raise HookError("update window must advance simulated time")
+
+    def check_idle(self):
+        for reader in self.readers:
+            if reader.rows != self.exchanges or reader.read_row() is not None:
+                raise HookError("unexpected temperature row; dies must be at the same completed slot")
+
+    def temperatures(self):
+        deadline = time.monotonic() + self.config["timeout_seconds"]
+        rows = [None] * len(self.readers)
+        while any(row is None for row in rows):
+            if self.health_check:
+                self.health_check()
+            for index, reader in enumerate(self.readers):
+                if rows[index] is None:
+                    rows[index] = reader.read_row()
+            if all(row is not None for row in rows):
+                break
+            if time.monotonic() >= deadline:
+                raise HookError(f"timed out waiting for thermal slot {self.exchanges + 1}")
+            time.sleep(self.config["poll_seconds"])
+        self.exchanges += 1
+        return [value for row in rows for value in row[1]]
+
+    def feedback(self, temperatures):
+        updates = []
+        for component, terms in zip(self.components, self.weights):
+            weighted_sum = total_area = 0.0
+            for index, area in terms:
+                weighted_sum += temperatures[index] * area
+                total_area += area
+            if total_area <= 0:
+                raise HookError("thermal mapping has zero area")
+            updates.append(dict(path=component["path"], temperature_c=weighted_sum / total_area - KELVIN_OFFSET))
+        return updates
+
+    def close(self):
+        for reader in self.readers:
+            reader.close()
 
 
 def _mapping(value: Any, location: str) -> Dict[str, Any]:
@@ -489,8 +572,9 @@ def exchange(
     floorplan_entries: List[str],
 ) -> List[Dict[str, Any]]:
     overhead_start = overhead_now()
-    declared = thermal_components(document)
-    declared_paths = {component["path"] for component in declared}
+    session = config.get("_session")
+    declared = session.components if session else thermal_components(document)
+    declared_paths = session.paths if session else {component["path"] for component in declared}
     samples_by_path = {
         component["path"]: component
         for component in request["components"]
@@ -510,9 +594,9 @@ def exchange(
         component["power_column"]: samples_by_path[component["path"]]["total_w"]
         for component in declared
     }
-    columns = power_columns(document)
+    columns = session.columns if session else power_columns(document)
     raw_values = [power_by_column[column] for column in columns]
-    power_sources = build_power_sources(document)
+    power_sources = session.sources if session else build_power_sources(document)
     values = adapt_slot(
         raw_values,
         columns,
@@ -524,23 +608,26 @@ def exchange(
     )
 
     outputs = config.get("thermal_outputs") or thermal_outputs(config, document)
-    counts = [len(parse_temperature_rows(die["temperature_output"], die["elements"]))
-              for die in outputs]
-    if len(set(counts)) != 1:
-        raise HookError("die temperature outputs are not at the same completed slot")
+    if session:
+        session.check_idle()
+    else:
+        counts = [len(parse_temperature_rows(die["temperature_output"], die["elements"]))
+                  for die in outputs]
+        if len(set(counts)) != 1:
+            raise HookError("die temperature outputs are not at the same completed slot")
     append_power_slot(config["power_trace"], values)
     overhead_sent = overhead_now()
     overhead_emit("adapter", "power_mapping", overhead_start, overhead_sent, request["end_ps"])
-    temperatures_k = []
-    for die in outputs:
-        temperatures_k.extend(wait_for_temperature_row(
-            die["temperature_output"], die["elements"], counts[0],
-            config["poll_seconds"], config["timeout_seconds"]))
+    temperatures_k = session.temperatures() if session else []
+    if not session:
+        for die in outputs:
+            temperatures_k.extend(wait_for_temperature_row(
+                die["temperature_output"], die["elements"], counts[0],
+                config["poll_seconds"], config["timeout_seconds"]))
     overhead_ready = overhead_now()
     overhead_emit("adapter", "temperature_wait", overhead_sent, overhead_ready, request["end_ps"])
-    updates = component_temperatures(
-        document, floorplan_entries, temperatures_k
-    )
+    updates = session.feedback(temperatures_k) if session else component_temperatures(
+        document, floorplan_entries, temperatures_k)
     write_history(
         config["temperature_history"],
         request["phase"],
@@ -569,7 +656,7 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def run(args: argparse.Namespace) -> int:
+def run(args: argparse.Namespace, session=None) -> int:
     overhead_start = overhead_now()
     request_path = Path(args.request).resolve()
     response_path = Path(args.response).resolve()
@@ -578,22 +665,26 @@ def run(args: argparse.Namespace) -> int:
     request_document = validate_request(
         load_json(request_path, "power-hook request"), args.phase
     )
-    config = validate_hook_config(
-        load_json(config_path, "power-hook configuration"), config_path
-    )
-    document = load_contract(config["system_config"])
-
-    config["thermal_outputs"] = thermal_outputs(config, document)
-    floorplan_entries = [name for die in config["thermal_outputs"] for name in die["elements"]]
-    power_sources = build_power_sources(document)
-    validate_floorplan_entries(floorplan_entries, power_sources)
-
-    overhead_emit("adapter", "configuration", overhead_start, sim_ps=request_document["end_ps"])
+    if session:
+        session.check_request(request_document)
+        config, document, floorplan_entries = session.config, session.document, session.floorplan
+        overhead_emit("adapter", "request_validation", overhead_start, sim_ps=request_document["end_ps"])
+    else:
+        config = validate_hook_config(load_json(config_path, "power-hook configuration"), config_path)
+        document = load_contract(config["system_config"])
+        config["thermal_outputs"] = thermal_outputs(config, document)
+        floorplan_entries = [name for die in config["thermal_outputs"] for name in die["elements"]]
+        power_sources = build_power_sources(document)
+        validate_floorplan_entries(floorplan_entries, power_sources)
+        overhead_emit("adapter", "configuration", overhead_start, sim_ps=request_document["end_ps"])
     if args.phase == "init":
         # Validate an already-created Tflp header when available. The server
         # creates it before advertising readiness.
-        for die in config["thermal_outputs"]:
-            parse_temperature_rows(die["temperature_output"], die["elements"])
+        if session:
+            session.check_idle()
+        else:
+            for die in config["thermal_outputs"]:
+                parse_temperature_rows(die["temperature_output"], die["elements"])
         temperature = initial_temperature_c(document)
         updates = [
             {
@@ -644,6 +735,10 @@ def run(args: argparse.Namespace) -> int:
         flush=True,
     )
     overhead_emit("adapter", "adapter_run", overhead_start, sim_ps=request_document["end_ps"])
+    if session:
+        session.initialized = True
+        session.last_end = request_document["end_ps"]
+        session.finished = args.phase == "final"
     return 0
 
 

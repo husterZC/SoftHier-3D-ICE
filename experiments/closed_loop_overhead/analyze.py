@@ -1,5 +1,6 @@
 """Exclusive host timing, randomized-block statistics, and paper figures."""
 from collections import Counter, defaultdict
+import bisect
 import csv
 import json
 from pathlib import Path
@@ -8,6 +9,28 @@ import statistics
 
 PHASES = ("initialization", "architecture", "power_capture", "thermal_advancement",
           "coupling_output", "completion")
+
+
+def coupling_diagnostics(events, roi):
+    """Nested diagnostics, never added to the exclusive wall-time partition."""
+    steps = sorted((e for e in events if e["phase"] == "thermal_step"), key=lambda e: e["start_ns"])
+    starts = [e["start_ns"] for e in steps]
+    ready = [e for e in events if e["phase"] == "power_mapping"
+             and roi[0] <= e["start_ns"] and e["end_ns"] <= roi[1]]
+    latencies = []
+    for event in ready:
+        i = bisect.bisect_left(starts, event["end_ns"])
+        if i and steps[i - 1]["end_ns"] > event["end_ns"]:
+            i -= 1
+        if i < len(steps) and steps[i]["end_ns"] <= roi[1]:
+            latencies.append(max(0, steps[i]["start_ns"] - event["end_ns"]) * 1e-9)
+    phases = ("configuration", "request_validation", "power_mapping", "temperature_wait",
+              "feedback_mapping", "response_write", "worker_roundtrip")
+    return dict(power_to_solver_count=len(latencies), power_to_solver_seconds=sum(latencies),
+                mean_power_to_solver_seconds=statistics.mean(latencies) if latencies else 0,
+                p95_power_to_solver_seconds=percentile(latencies, .95) if latencies else 0,
+                nested_roi_seconds={phase: sum(max(0, min(roi[1], e["end_ns"]) - max(roi[0], e["start_ns"])) * 1e-9
+                    for e in events if e["phase"] == phase) for phase in phases})
 
 
 def read_events(directory):
@@ -106,7 +129,7 @@ def summarize_events(events, start, end, thermal, interval_ps):
                 p95_exchange_seconds=percentile(latency, .95) if latency else 0,
                 exchange_latency_seconds=latency,
                 solver_seconds_per_step=(sum(durations["thermal_solve"]) / len(steps)) if steps else 0,
-                processes=processes)
+                processes=processes, coupling_diagnostics=coupling_diagnostics(events, roi))
 
 
 def percentile(values, fraction):
@@ -156,6 +179,7 @@ def analyze(directory):
             rows.append(json.loads(path.read_text()))
     stats, blocks = block_statistics(rows, manifest["configurations"], seed=manifest["settings"]["seed"])
     results = dict(schema_version=1, statistics=stats,
+                   coupling_mode=manifest["settings"].get("coupling_mode", "legacy"),
                    requested_blocks=manifest["settings"]["replicates"], complete_blocks=len(blocks),
                    excluded_runs=[r["id"] for r in rows if r["status"] != "complete"],
                    missing_runs=[i["id"] for i in manifest["schedule"] if i["id"] not in {r["id"] for r in rows}],
@@ -167,6 +191,7 @@ def analyze(directory):
     flat = []
     for row in rows:
         record = {key: row[key] for key in ("id", "configuration", "block", "pilot", "status")}
+        record["coupling_mode"] = manifest["settings"].get("coupling_mode", "legacy")
         timing = row.get("timing", {})
         record.update({key: timing.get(key) for key in ("end_to_end_seconds", "roi_seconds", "native_cells",
                        "matrix_nnz", "exchange_count", "thermal_steps", "factorizations", "solver_seconds_per_step")})
