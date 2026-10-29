@@ -216,6 +216,63 @@ The PDF/PNG figures are `runtime` (absolute time and slowdown for both scopes),
 `phases` (exclusive wall-time breakdown), and `mesh_cost` (runtime, solver cost
 per step, and 3D-ICE peak RSS against native cell count).
 
+### Publication figure for the optimized study
+
+Generate a single-panel workload-execution figure from saved measurements,
+without running a simulator:
+
+```bash
+python plot_script/experiment_4_closed_loop_overhead/plot_closed_loop_overhead.py
+```
+
+The default input is `results/b8_overhead_optimized` under this experiment.
+The script and default exports are in `plot_script/experiment_4_closed_loop_overhead/`.
+Default paths resolve relative to the script, so an absolute script invocation
+works from any working directory. Override input or destination with
+`--study /path/to/study --output-dir /path/to/figures`; use `--dpi` to change
+the default 600-dpi PNG resolution.
+
+`closed_loop_overhead.pdf` and `.svg` are vector figures; `.png` is the raster
+version. The `.csv` records exact plotted values and the `.json` records input
+hashes, selected/excluded runs, timing definitions, font identities, and plotting
+settings. `closed_loop_overhead_caption.txt` supplies the figure caption.
+Times New Roman regular/bold fonts are required. The script searches the local
+font caches beside this script and the layer-stack plot, plus installed fonts;
+`--font-dir` supplies a different font directory. PDF fonts are embedded and SVG
+text is outlined for portability.
+
+The layout is 3.6 × 2.85 inches for a single journal column. Muted solid fills,
+light gridlines, and a shared label for the three closed-loop grids keep the
+breakdown readable at that size. Bar labels show total minutes in bold and
+relative overhead underneath. Fill colors and the style version are recorded
+in the JSON metadata; all segment heights remain proportional to measured time.
+
+The figure shows workload execution time in minutes, excluding initialization
+and finalization. Percentages use the architecture-only workload baseline.
+The legend contains four workload phases: SoftHier execution (blue), power
+estimation (yellow), 3D-ICE thermal steps (orange), and coordination/output
+(green). Yellow combines directly measured inline accounting with capture and
+mapping. Raw mapping intervals are repartitioned using the original overlap
+priorities; nested durations are never added twice. CSV/JSON also retain the
+inline and capture/mapping durations separately. Baseline bookkeeping is plotted
+when measured, rather than forced to zero. Setup/factorization is outside ROI.
+
+The combined figure requires a completed run with direct counters. Point
+`--study` at the results of a completed manual run. Historical results without
+direct counters produce an explanatory error before writing outputs. Missing
+timings cannot be backfilled into old measurements.
+
+Only complete measured blocks with numerical PASS and matching cycle signatures
+are plotted; pilots and incomplete blocks are excluded. A study with
+one measured repeat per case has no error bars. Studies with multiple
+complete blocks use mean runtimes and paired-block bootstrap confidence intervals.
+
+Focused plot-accounting checks:
+
+```bash
+python -m unittest discover -s plot_script/experiment_4_closed_loop_overhead -p 'test_*.py'
+```
+
 ## Validation
 
 Run focused streaming/worker checks and a native equivalence/performance check:
