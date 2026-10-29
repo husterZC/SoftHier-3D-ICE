@@ -11,7 +11,7 @@ import sys
 HERE = Path(__file__).resolve().parent
 REPO = HERE.parents[2]
 sys.path.insert(0, str(HERE / "native"))
-from apply_native import apply
+from apply_native import apply, ENGINE_HEADERS
 
 
 def git(root, *args):
@@ -67,7 +67,8 @@ def source_identity(source):
     patch_identity = {"specification": specification["groups"]["softhier"],
                       "patch_sha256": file_digest(HERE / "native/softhier.patch"),
                       "applicator_sha256": file_digest(HERE / "native/apply_native.py"),
-                      "timing_header_sha256": file_digest(HERE / "native/closed_loop_timing.h")}
+                      "timing_headers_sha256": {name: file_digest(HERE / "native" / name)
+                                                for name in ENGINE_HEADERS}}
     return {"bases": bases, "softhier_patch": patch_identity,
             "stager_sha256": file_digest(Path(__file__))}
 
@@ -122,6 +123,8 @@ def installed_artifacts(workdir):
     symbols = subprocess.check_output(["nm", "-D", "-C", str(install / "lib/libpulpvp-profile.so")]).decode()
     if " T vp::BlockPower::get_external_energy(" not in symbols:
         raise ValueError("installed GVSoC engine lacks the external-energy callback")
+    if " T clo_power_timing_abi_version" not in symbols:
+        raise ValueError("installed GVSoC engine lacks direct power-accounting timing; rebuild hardware")
     if b"dram_get_core_energy_j" not in (install / "models/profile/memory/dramsys.so").read_bytes():
         raise ValueError("installed DRAM wrapper lacks the cumulative-energy ABI")
     return result

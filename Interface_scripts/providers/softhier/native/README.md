@@ -75,8 +75,8 @@ The external power hook owns the sampling windows.
 `patch_manifest.json` records exact input/output source hashes. The applicator
 rejects unexpected or partially patched sources, verifies its postconditions,
 and writes `.softhier_native_energy.json` with source revisions and bundle hash.
-Its fingerprint covers the patches, manifest, applicator, and both native
-headers. A rebuild must occur when this fingerprint changes.
+Its fingerprint covers the patches, manifest, applicator, power-model headers,
+and timing headers. A rebuild must occur when this fingerprint changes.
 
 The C ABI is:
 
@@ -102,6 +102,30 @@ accounting category and does not imply that all DRAM background consumption is
 transistor leakage. Thermal source power is their sum. Only `dram3d_chan_*`
 wrappers register this callback; ordinary off-chip memory settings remain
 independent.
+
+## Direct inline-power timing
+
+The overhead experiment enables `CLO_POWER_ACCOUNTING_TIMING=1` together with
+`CLO_TIMING_DIR`. Ordinary provider runs leave this optional probe disabled.
+`power_accounting_timing.h` declares the engine-owned accumulator and scopes;
+its implementation is compiled once through the staged `power_trace.cpp`.
+DRAMSys receives enter/leave callbacks through
+`softhier_dram_set_power_timing_callbacks` (ABI version 1), avoiding independent
+counters in each shared library. Nested logic/DRAM work is counted once.
+
+Only workload ROI time outside hook exchanges is collected. Power-source checks,
+trace accounting, maintenance callbacks and their enqueue calls, and the DRAMPower
+command-processing block are covered. Generic scheduler work outside those
+routines is not attributed to power. The single simulation-thread restriction
+is enforced; accumulated wall times cannot silently overlap. One scalar JSONL
+record reports elapsed nanoseconds and outer-call count at ROI end. Disabled
+probes perform no clock reads or logging. The diagnostic launcher can select an
+external bounded window with `CLO_POWER_TIMING_EXTERNAL_WINDOW=1`.
+
+Native timing tests load a separate shared library and verify nesting, paused
+hook work, reset/disabled behavior, and invalid concurrent calls with a controlled
+clock. Full integration checks and bounded calibration are documented in
+`experiments/closed_loop_overhead/README.md`.
 
 ## Verification
 

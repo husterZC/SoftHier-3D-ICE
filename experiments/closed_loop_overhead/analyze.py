@@ -7,8 +7,31 @@ from pathlib import Path
 import random
 import statistics
 
-PHASES = ("initialization", "architecture", "power_capture", "thermal_advancement",
+PHASES = ("initialization", "architecture", "inline_power_accounting", "power_capture", "thermal_advancement",
           "coupling_output", "completion")
+
+
+def power_accounting_counter(events, window, *, required=False, scope="roi"):
+    """Read a measured scalar, never interpret its window as a timing span."""
+    counters = [e for e in events if e["phase"] == "inline_power_accounting" and e.get("scope") == scope]
+    if not counters and not required:
+        return None  # Historical/disabled instrumentation is unknown, not measured zero.
+    if len(counters) != 1:
+        raise ValueError("expected one direct inline-power counter; rerun with power-accounting timing enabled")
+    e = counters[0]
+    if (e.get("kind") != "counter" or e.get("method_version") != 1 or
+            (e.get("window_start_ns"), e.get("window_end_ns")) != tuple(window) or
+            e["start_ns"] != window[1] or e["end_ns"] != window[1] or
+            e.get("dram_callbacks_registered") is not True):
+        raise ValueError("invalid inline-power counter boundaries, method, or DRAM callback coverage")
+    if (type(e.get("value")) is not int or type(e.get("calls")) is not int or
+            e["value"] < 0 or e["calls"] < 0 or e["value"] > window[1] - window[0] or
+            (e["calls"] == 0 and e["value"] != 0)):
+        raise ValueError("invalid inline-power duration or call count")
+    return dict(method_version=1, seconds=e["value"] * 1e-9, elapsed_ns=e["value"], calls=e["calls"],
+                scope=scope, window_start_ns=window[0], window_end_ns=window[1],
+                window_start_ps=e["window_start_ps"], window_end_ps=e["window_end_ps"], pid=e["pid"],
+                dram_callbacks_registered=True)
 
 
 def coupling_diagnostics(events, roi):
@@ -49,7 +72,8 @@ def partition(events, start, end, roi):
 
     Initialization/completion are outside ROI, regardless of their internal work.
     Inside ROI, native thermal work takes priority over capture and hook waits.
-    Remaining time is architecture execution, including inline power accounting.
+    A direct ROI counter, when present, is transferred out of architecture.
+    Historical runs without that counter still include inline power there.
     """
     if end <= start:
         raise ValueError("empty measurement interval")
@@ -85,10 +109,18 @@ def partition(events, start, end, roi):
         previous = timestamp
     if sum(result.values()) != end - start:
         raise ValueError("timing partition does not reconcile")
+    counter = power_accounting_counter(events, roi)
+    if counter:
+        if not start <= roi[0] < roi[1] <= end:
+            raise ValueError("cannot clip an aggregated inline-power counter to a partial workload")
+        if counter["elapsed_ns"] > result["architecture"]:
+            raise ValueError("inline-power counter exceeds exclusive architecture time")
+        result["architecture"] -= counter["elapsed_ns"]
+        result["inline_power_accounting"] = counter["elapsed_ns"]
     return {key: value * 1e-9 for key, value in result.items()}
 
 
-def summarize_events(events, start, end, thermal, interval_ps):
+def summarize_events(events, start, end, thermal, interval_ps, power_accounting_timing=None):
     starts = [e for e in events if e["phase"] == "roi_start"]
     ends = [e for e in events if e["phase"] == "roi_end"]
     if len(starts) != 1 or len(ends) != 1:
@@ -96,6 +128,14 @@ def summarize_events(events, start, end, thermal, interval_ps):
     roi = (starts[0]["start_ns"], ends[0]["end_ns"])
     if not start <= roi[0] < roi[1] <= end:
         raise ValueError("ROI markers lie outside the measured execution")
+    counter = power_accounting_counter(events, roi, required=power_accounting_timing is True)
+    if counter:
+        if power_accounting_timing is False:
+            raise ValueError("unexpected inline-power counter with timing disabled")
+        if (counter["pid"] != starts[0]["pid"] or counter["pid"] != ends[0]["pid"] or
+                counter["window_start_ps"] != starts[0]["sim_ps"] or
+                counter["window_end_ps"] != ends[0]["sim_ps"]):
+            raise ValueError("inline-power counter does not match native workload markers")
     durations = defaultdict(list)
     processes = {}
     for e in events:
@@ -120,6 +160,7 @@ def summarize_events(events, start, end, thermal, interval_ps):
     return dict(end_to_end_seconds=(end - start) * 1e-9,
                 roi_seconds=(roi[1] - roi[0]) * 1e-9,
                 roi_simulated_ps=ends[0]["sim_ps"] - starts[0]["sim_ps"],
+                power_accounting=counter,
                 phases_end_to_end=partition(events, start, end, roi),
                 phases_roi=partition(events, *roi, roi),
                 detail_seconds={key: sum(values) for key, values in durations.items()},
@@ -227,7 +268,7 @@ def figures(directory, stats, blocks, names):
     for ax, scope in zip(axes, ("phases_end_to_end", "phases_roi")):
         bottom = np.zeros(len(names))
         for phase in PHASES:
-            values = np.array([statistics.mean(b[n]["timing"][scope][phase] for b in blocks) for n in names])
+            values = np.array([statistics.mean(b[n]["timing"][scope].get(phase, 0.) for b in blocks) for n in names])
             ax.bar(labels, values, bottom=bottom, label=phase.replace("_", " "))
             bottom += values
         ax.set_ylabel("Host seconds"); ax.set_title(scope.replace("phases_", "").replace("_", " "))

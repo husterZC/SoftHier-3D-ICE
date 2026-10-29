@@ -20,11 +20,11 @@
         },
         "core/models/memory/dramsys.cpp": {
           "before": "519f57d26297dc1e1fbc5c4fcadea56a1b88801bc67d69915b714d03cdeab265",
-          "after": "d75ad6a596570722ee6cef002e42167294a9e9955ba995766441dca7d45eb80d"
+          "after": "c4812f0982373e45f499e6776c29028c30d9b73a81115404a1aa5014553496e7"
         },
         "core/models/memory/dramsys_v2.cpp": {
           "before": "63b7b87fbb47f5ef16fb1b62becbf731cd546fdba45de40f39467c15a46c23e0",
-          "after": "d58f562b56a82728137faec03f369b9913b89d88e9b745b81f1ab64d0ee323ff"
+          "after": "b46e87c93cc6b0473a92465d977b08b058635ec3b0e4866a0d1a2a593e9badb8"
         },
         "core/models/cpu/iss/src/ara/ara_vcompute.cpp": {
           "before": "9ab976763753ef6e9da1ca23486ec548aecf7a5cbb919918c7513e9d078c44f6",
@@ -32,20 +32,28 @@
         },
         "engine/engine/src/power/power_hook.cpp": {
           "before": "f181a7ae9ffed65e586773287477de622f52f769be5036dcab3f98538c8452e6",
-          "after": "eca81df949372586dd50270fb648f4efac5cc64caebe376c914f2b546352c533"
+          "after": "7f5521143befee1edb5063b3734a1f7a6a5eeb010b4ce2c879167fa781edea9d"
         },
         "pulp/pulp/chips/soft_hier_old/ctrl_registers.cpp": {
           "before": "69ce3271d24dc74b3153b0f8de6f4a9bcdc3cea5281050c7215dc7e6feb77371",
-          "after": "a9af47f475ca879b4801c647e34babc42c04c6ccef42ca009bba8300b8310e4f"
+          "after": "f0a1c54b7f28603f7f48e45fe1b2d1a99d72e4c0c86260af18ecd2a7e04a23bd"
+        },
+        "engine/engine/src/power/power_trace.cpp": {
+          "before": "1d2458b8487f37881b616d55cc0688d35a3bdc71f9f8a0e1e19a8abafbce5416",
+          "after": "1b5747f3019e625a2bfe5d8d46a3d7ae85fcff2e058982567bc38a534524d176"
+        },
+        "engine/engine/src/power/power_source.cpp": {
+          "before": "4357733170ef67696320df296a772d590904380e4e232f6f95a7bec86d387f58",
+          "after": "7b106dba158a2862e860399413b671d95906938a8435d4c5147830b41f80b389"
         }
       },
-      "patch_sha256": "fc6ac1d473fee35352fe5aef01fe1a929a454faccb12caef538335fee545bb29"
+      "patch_sha256": "e79d2d31672aadc737a7f9949fa2e71567fdb9a5365469513889cf5725bedb62"
     },
     "dramsys": {
       "files": {
         "src/DRAMSys/simulation/Dram.cpp": {
           "before": "49a3b03b60a6ab768b7003381432a4214096f880cfb45900f14d09fee2680d82",
-          "after": "dfe85ce1f6acc33b1c25cdc222de848bf766a13bfbbfe6c9d8292e76360fb956"
+          "after": "bf6bbbcb8e254ce1e89a19f7217f93c68a17374875a798b80302d12f96c48016"
         },
         "src/DRAMSys/simulation/Dram.h": {
           "before": "71704acc00106f67f90a5cf44f92d9b3cc4636ac74ae3036948e5b31d4edb9da",
@@ -68,7 +76,7 @@
           "after": "5e032b101def2ef522a5d98d4840322ae998126038ab586b1b22f260ec8230b2"
         }
       },
-      "patch_sha256": "a6ae0ca738aa11cd2d0ea635cc3e9a0adb98f1efe7552e002b8ac9024e999d45"
+      "patch_sha256": "51216ba6fbc394a96c9dd1c9dec8aca606dfdba586d003b277fc29734383515e"
     }
   }
 }

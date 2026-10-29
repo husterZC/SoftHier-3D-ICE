@@ -60,6 +60,8 @@ def parse_args(argv=None):
         p.add_argument("--replicates", type=positive_int, default=5)
         p.add_argument("--interval-ps", type=positive_int, default=20_000_000)
         p.add_argument("--coupling-mode", choices=("optimized", "legacy"), default="optimized")
+        p.add_argument("--power-accounting-timing", action="store_true", default=True,
+                       help="Direct inline-power timing (always enabled)")
         p.add_argument("--dice-poll-seconds", type=positive_float)
         p.add_argument("--adapter-poll-seconds", type=positive_float)
         p.add_argument("--seed", type=int, default=19, help="Workload and randomized schedule seed")
@@ -107,6 +109,7 @@ def settings(args):
                 grid_pitches_um=args.grid_pitches_um, replicates=args.replicates,
                 interval_ps=args.interval_ps, thermal_step_seconds=args.interval_ps * 1e-12,
                 cpus=select_cpus(args.cpus), thermal_threads=1, coupling_mode=args.coupling_mode,
+                power_accounting_timing=args.power_accounting_timing,
                 adapter_poll_seconds=args.adapter_poll_seconds or (.005 if args.coupling_mode == "optimized" else .02),
                 server_poll_seconds=args.dice_poll_seconds or (.005 if args.coupling_mode == "optimized" else 1.),
                 thermal_config=str(args.thermal_config.resolve()),
@@ -218,6 +221,9 @@ def native_artifacts():
     controllers = sorted((install / "models").rglob("gen_pulp_chips_soft_hier_old_ctrl_registers_cpp_*.so"))
     if not controllers or any(b"roi_start" not in p.read_bytes() for p in controllers):
         raise ValueError("native ROI instrumentation is missing; use --build-hardware")
+    symbols = capture(["nm", "-D", str(install / "lib/libpulpvp-profile.so")])
+    if symbols["returncode"] or " T clo_power_timing_abi_version" not in symbols["stdout"]:
+        raise ValueError("native inline-power instrumentation is missing; use --build-hardware")
     return [ROOT / "3D-ICE/bin/3D-ICE-Server", install / "native_build.json",
             ROOT / "SoftHier/.power_interface/dependencies/dramsys-install/native_build.json",
             install / "lib/libpulpvp.so", install / "lib/libpulpvp-profile.so", *controllers,
@@ -413,6 +419,7 @@ def run_locked(args, directory, config, modes):
         timing_dir.mkdir()
         pitch = modes[item["configuration"]]
         run_env = dict(env, CLO_TIMING_DIR=str(timing_dir), SIMULATOR_PLATFORM=case["preload"],
+                       CLO_POWER_ACCOUNTING_TIMING=str(int(config["power_accounting_timing"])),
                        SOFTHIER_BINARY=case["binary"], SOFTHIER_RUN_CWD=str(run_dir / "results/simulator"),
                        SOFTHIER_DRAMSYS_PATH=workload["dramsys_path"] if pitch is not None else str(baseline))
         command = ["taskset", "-c", ",".join(map(str, config["cpus"])),
@@ -422,6 +429,7 @@ def run_locked(args, directory, config, modes):
                       environment={k: run_env[k] for k in sorted(run_env) if k in
                                    ("PYTHON", "OPENBLAS_NUM_THREADS", "OMP_NUM_THREADS", "MKL_NUM_THREADS",
                                     "SOFTHIER_DRAMSYS_PATH", "SOFTHIER_CORE_MODEL", "SOFTHIER_PRELOAD_MODE")})
+        record["power_accounting_timing"] = config["power_accounting_timing"]
         write_json(record_path, record)
         try:
             log = run_dir / "logs" / ("driver.log" if pitch is not None else "simulator.log")
@@ -429,7 +437,8 @@ def run_locked(args, directory, config, modes):
             record.update(start_ns=start, end_ns=end)
             validation = parse_timing((run_dir / "logs/simulator.log").read_text(), case["manifest"],
                                       load_sdk_report(workload["source"]), 16, 1)
-            timing = summarize_events(read_events(timing_dir), start, end, pitch is not None, config["interval_ps"])
+            timing = summarize_events(read_events(timing_dir), start, end, pitch is not None, config["interval_ps"],
+                                      power_accounting_timing=config["power_accounting_timing"])
             record["effective_configuration"] = effective_configuration(run_dir, run_env["SOFTHIER_DRAMSYS_PATH"], pitch is not None)
             diagnostics = run_dir / "state/adapter_diagnostics.json"
             if diagnostics.exists():

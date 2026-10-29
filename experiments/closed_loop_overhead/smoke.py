@@ -56,8 +56,10 @@ SECTIONS {{
 
 
 def run(output, replicates=3, coupling_mode="optimized"):
+    from .validate_coupling import numerical_artifacts
     output, binary, env = prepare_smoke(output)
     rows, signature = [], None
+    reference_artifacts = None
     cpus = ",".join(map(str, select_cpus()))
     rng = random.Random(19)
     # First block warms files; it is kept in raw results but excluded from ratios.
@@ -69,10 +71,10 @@ def run(output, replicates=3, coupling_mode="optimized"):
             directory = output / f"b{block}_{mode}_{'on' if instrument else 'off'}"
             (directory / "logs").mkdir(parents=True)
             run_env = dict(env, SOFTHIER_BINARY=str(binary), SIMULATOR_PLATFORM="",
+                           CLO_POWER_ACCOUNTING_TIMING=str(int(instrument)),
                            SOFTHIER_RUN_CWD=str(directory / "results/simulator"))
-            if instrument:
-                (directory / "timing").mkdir()
-                run_env["CLO_TIMING_DIR"] = str(directory / "timing")
+            (directory / "timing").mkdir()
+            run_env["CLO_TIMING_DIR"] = str(directory / "timing")
             command = ["taskset", "-c", cpus, *command_for(pitch, directory, 20_000_000, coupling_mode)]
             start, end = execute(command, run_env, directory / "logs" /
                                  ("simulator.log" if pitch is None else "driver.log"), 300)
@@ -85,9 +87,13 @@ def run(output, replicates=3, coupling_mode="optimized"):
             signature = cycles[0]
             row = dict(mode=mode, coupling_mode=coupling_mode, instrumented=instrument, block=block, pilot=block == 0,
                        host_seconds=(end - start) * 1e-9, simulated_ns=int(signature), path=str(directory))
-            if instrument:
-                row["timing"] = summarize_events(read_events(directory / "timing"), start, end,
-                                                  pitch is not None, 20_000_000)
+            row["timing"] = summarize_events(read_events(directory / "timing"), start, end,
+                                              pitch is not None, 20_000_000, instrument)
+            if pitch is not None:
+                artifacts = numerical_artifacts(directory)
+                if reference_artifacts is not None and artifacts != reference_artifacts:
+                    raise ValueError("power/temperature/final-map artifacts changed with instrumentation")
+                reference_artifacts = artifacts
             config = json.loads((directory / "results/simulator/gvsoc_config.json").read_text())
             row["effective_gvsoc"] = {k: config["target"]["gvsoc"].get(k)
                                       for k in ("power", "debug-mode", "profile-mode")}
@@ -101,7 +107,8 @@ def run(output, replicates=3, coupling_mode="optimized"):
                  if r["mode"] == mode and r["instrumented"] == enabled and not r["pilot"])
                  for enabled in (False, True)}
         comparison[mode] = dict(mean_seconds=means, observed_on_off_ratio=means["True"] / means["False"])
-    result = dict(status="PASS", purpose="short integration and indicative instrumentation check, not B8 results",
+    result = dict(status="PASS", purpose="short native direct-power timing on/off check, not B8 results",
+                  numerical_artifacts_identical=True, comparison_scope="direct inline timer only; other phase timers on",
                   simulated_ns=int(signature), replicates=replicates, comparison=comparison, runs=rows)
     (output / "validation.json").write_text(json.dumps(result, indent=2) + "\n")
     print(f"Short native validation passed: {output}", flush=True)

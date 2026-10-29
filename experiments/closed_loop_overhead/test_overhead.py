@@ -210,6 +210,11 @@ class TimingTests(unittest.TestCase):
                 log.with_suffix(".resources.json").write_text("{}")
                 events = [dict(phase="roi_start", start_ns=100, end_ns=100, sim_ps=0, value=0),
                           dict(phase="roi_end", start_ns=900, end_ns=900, sim_ps=20_000_000, value=0)]
+                self.assertEqual(env["CLO_POWER_ACCOUNTING_TIMING"], "1")
+                events.append(dict(phase="inline_power_accounting", kind="counter", method_version=1,
+                    start_ns=900, end_ns=900, sim_ps=20_000_000, value=100, calls=10,
+                    window_start_ns=100, window_end_ns=900, window_start_ps=0,
+                    window_end_ps=20_000_000, scope="roi", dram_callbacks_registered=True))
                 if thermal:
                     events.extend(dict(phase=phase, start_ns=a, end_ns=b, sim_ps=20_000_000, value=value)
                                   for phase, a, b, value in (("exchange", 300, 700, 20_000_000),
@@ -244,6 +249,8 @@ class TimingTests(unittest.TestCase):
                 self.assertEqual(calls.count(name), 1)
             self.assertEqual(calls.count(failed), 2)
             self.assertEqual(len(list((directory / "runs").glob(failed + "_failed_*"))), 1)
+            with self.assertRaisesRegex(ValueError, "resume requires identical settings"):
+                runner.run_locked(args, directory, config | {"power_accounting_timing": False}, modes)
 
     def test_baseline_only_changes_the_active_dram_configuration(self):
         base = ROOT / "tmp/overhead_tests"

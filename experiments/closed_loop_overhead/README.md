@@ -16,6 +16,11 @@ python -m experiments.closed_loop_overhead plan --prefix b8_overhead
 
 Build the native timing probes and run the complete experiment:
 
+Inline power-accounting timing is always enabled in this runner.
+`--power-accounting-timing` remains accepted for existing commands; no flag is
+needed. Rebuild hardware once after updating the provider patches. For one
+measured block, use `--replicates 1`. Choose an unused prefix for a manual run.
+
 ```bash
 python -m experiments.closed_loop_overhead run \
   --prefix b8_overhead_optimized \
@@ -118,10 +123,37 @@ counts, factorization, source/RHS/solve times, ROI markers, and process exits.
 The phase analysis partitions wall time exactly once. Inside ROI, thermal
 advancement takes precedence over overlapping hook waits, followed by power
 capture and coupling/output. Remaining time is architecture execution,
-including inline power work and small unclassified instrumentation costs.
+from which the directly timed inline-power counter is subtracted. That duration
+becomes the separate `inline_power_accounting` phase; small unclassified
+instrumentation costs remain in architecture execution.
 Time before/after ROI is initialization/completion. `detail_seconds` retains
 nested diagnostic spans; those totals must not be added to the exclusive
 phase totals.
+
+`CLO_POWER_ACCOUNTING_TIMING=1` enables the direct native timer alongside
+`CLO_TIMING_DIR`; the experiment sets both automatically. The provider's staged
+patches time logic energy/leakage updates, power-source state checks,
+power-maintenance callbacks and their scheduler calls, and DRAMPower command
+processing. One shared accumulator counts only outermost calls, including
+callbacks across the DRAMSys library boundary. Hook exchanges are excluded so
+capture, energy snapshots, feedback updates, and blocked thermal waits retain
+their existing attribution. Generic scheduler dispatch outside power routines
+remains in architecture execution. This is direct time in the stated routines,
+not a causal estimate of every slowdown introduced by enabling power.
+
+Counters are accumulated in memory and written once at workload completion as
+zero-duration `inline_power_accounting` records (`kind=counter`, method version 1).
+Their `value` is accumulated nanoseconds, with call counts and matching host/guest
+window boundaries. `timing.power_accounting` preserves this information in each
+measurement. No per-call logging occurs. The timer requires the current single
+simulation-thread execution path; concurrent accounting threads are rejected
+instead of summing overlapping wall time. Timings include probe overhead; no
+estimated overhead correction is subtracted.
+
+Historical measurements lack this field; timer-off calibration runs record
+`power_accounting=null`. Their architecture phase still includes inline work.
+Missing counters are not interpreted as zero. Changed source or native build
+identities prevent resuming an incompatible study through the existing checks.
 
 The default `--coupling-mode optimized` retains the file-based thermal transport,
 but uses **5 host milliseconds** for both polling intervals. One persistent Python
@@ -146,8 +178,8 @@ python -m experiments.closed_loop_overhead run \
   --interval-ps 20000000 --replicates 5 --build-hardware
 ```
 
-The completed original `b8_overhead` study is legacy data. It remains readable;
-do not overwrite or resume it with changed sources. Run comparisons sequentially.
+Legacy result formats remain readable by the analyzer. Existing studies cannot
+be resumed with changed sources. Run comparisons sequentially.
 
 The compiled hook client and 3D-ICE client/server hashes are recorded alongside
 the native simulator hashes. Helper compilation occurs before timed runs.
@@ -158,8 +190,8 @@ runs restart with fresh thermal state through the existing study-resume workflow
 
 `timing.coupling_diagnostics` reports power-publication-to-solver delay and nested
 adapter stage times. Nested times and client/worker round trips overlap thermal
-work; do not add them to the exclusive phase totals. Inline power accounting is
-still included in architecture execution, not fully isolated by `power_capture`.
+work; do not add them to the exclusive phase totals. Direct inline timing is
+separate from `power_capture`, which includes deferred DRAM energy queries.
 
 Resources are per process. Do not sum independent peak RSS values and describe
 that sum as peak simultaneous memory. Exchange latency samples describe one
@@ -218,8 +250,143 @@ python -m experiments.closed_loop_overhead smoke \
   --replicates 3
 ```
 
-These short checks are not B8 performance results. Their on/off ratios include
+Both smoke variants retain the existing phase timers; the on/off comparison
+isolates the new inline timer. Guest cycles, power rows, temperature feedback,
+and final maps must match. These short checks are not B8 performance results.
+Their on/off ratios include
 host noise and polling effects; report them as a calibration, not a guaranteed
 instrumentation overhead bound. Main B8 measurements require numerical PASS,
 identical guest cycle counts, matching native/generated mesh counts, one
 factorization, and one thermal step per positive-duration power exchange.
+
+## Bounded diagnosis of inline power accounting
+
+Historical `SoftHier` timings include energy bookkeeping performed inside the
+simulator. To diagnose that cost separately from thermal coupling, reuse a completed B8 study and run
+four configurations with no power hook or 3D-ICE: architecture only, logic power
+only, DRAM power only, and both. These are intentionally partial executions;
+they do not reach the workload's final numerical validation.
+
+```bash
+python -m experiments.closed_loop_overhead.power_diagnosis \
+  --reference-study experiments/closed_loop_overhead/results/b8_overhead_optimized \
+  --output experiments/closed_loop_overhead/results/b8_power_diagnosis_new \
+  --start-us 1000 --window-us 100
+```
+
+Each case starts a fresh simulator with the recorded executable and preload.
+The default measures host wall and process CPU time for simulated time
+1.0–1.1 ms, excluding startup and warmup. It then samples native instructions
+during 1.1–1.2 ms in the same execution. The first window has no sampler;
+sampling overhead belongs only to the second window. All cases use the profile
+backend, disabled waveform output, identical CPU affinity, and the initial
+power-model temperature without thermal feedback. `logic_only` controls GVSoC's
+global power flag; `dram_only` controls DRAMSys `PowerAnalysis`. Some native
+models still perform bookkeeping with global power disabled, so the baseline
+need not contain zero power-function samples.
+
+The HBM2 backend queues command records during execution and integrates energy
+when queried. With no hook, these windows measure its inline command path;
+deferred integration happens at shutdown, outside both windows. Consequently
+DRAM-only timing is not the complete cost of DRAM energy estimation, and its
+queue history differs from closed-loop execution. The full study's
+`power_capture` spans already include deferred energy queries.
+
+The runner builds a small SystemC launcher in the output directory, linked to
+the installed profile engine with matching compile definitions. Its stepping
+loop follows the existing SystemC driver and adds exact simulated-time stops.
+It does not edit SoftHier sources or replace installed binaries. Boundary
+markers contain cycle counts and native clocks; the process pauses while the
+controller collects metadata. This diagnostic harness is shared by all four
+cases, but its absolute times should not replace the full study's timings.
+
+Requirements are the built, instrumented simulator, its staged source headers,
+a C++ compiler, `nm`, Linux x86-64, and permission to use `perf_event_open` for
+owned processes. No `perf` executable is needed. `--no-sampling` allows timing
+without perf permissions. `--timeout` limits each advancement to a boundary
+(default 900 host seconds), and the output directory must be new. Use `--modes`
+to choose or reorder cases; the default order is the four cases listed above.
+Run in isolation. Complete B8 benchmarks remain separate manual runs.
+
+`study.json` records arguments and source/binary hashes, and `source_snapshot/`
+preserves the diagnostic sources. Each case saves its
+configuration, DRAM environment, logs, `diagnostic_events.jsonl`, timing result,
+raw samples, memory mappings, and `profile.json`. `analysis.json` compares the
+four timing windows; `summary.csv` provides a compact timing table and
+`hotspots.csv` lists sampled functions and estimated CPU seconds in the separate
+profiling window. Sampler percentages are exclusive instruction-pointer
+samples, not inclusive call-stack times: inline work remains attributed to its
+containing function, unresolved samples stay in the denominator, and scheduling
+work caused by power accounting appears under scheduler functions. No samples
+or lost samples fail the profiled run rather than yielding a misleading report.
+
+Direct inline counters are always enabled for the first diagnostic window,
+using exact boundary resets independently of the guest ROI. They are inactive
+during warmup and the subsequent profiling window. The dedicated calibration
+mode compares timer-on/off windows internally; ordinary study and diagnostic
+runs always collect the direct counters.
+
+For matched B8 timer-on/off calibration without statistical sampling:
+
+```bash
+python -m experiments.closed_loop_overhead.power_diagnosis \
+  --reference-study experiments/closed_loop_overhead/results/b8_overhead_optimized \
+  --output experiments/closed_loop_overhead/results/b8_timer_calibration \
+  --modes architecture_only logic_and_dram \
+  --start-us 1000 --window-us 100 --calibrate-power-timing
+```
+
+This uses the existing executable/preload and rebuilt native libraries, runs one
+randomized-order on/off pair per mode, and reports observed runtime differences,
+direct inline seconds, and call counts in `analysis.json`. One pair is a
+calibration with host noise, not a confidence interval or full-workload PASS.
+
+A single window per case is a diagnosis, not a confidence interval. A small
+DRAM-only difference may be host noise; repeat with reversed case order or
+additional windows before claiming a precise DRAM overhead. Matching boundary
+cycles confirms equal simulated duration, not full numerical equivalence.
+
+Test ring decoding and ELF symbol attribution without starting B8:
+
+```bash
+python -m unittest experiments.closed_loop_overhead.test_native_profile
+```
+
+### Initial B8 diagnosis (historical)
+
+The four-case diagnostic completed on 2026-10-26 used the 1.0–1.1 ms timing
+window and a separate 1.1–1.2 ms profiling window, with CPUs 0, 2, 4, and 6.
+Its generated `results/b8_power_diagnosis` directory was removed during results
+cleanup. The following values are retained as a historical summary, with one
+observation per case:
+
+| Enabled accounting | Host wall time | Process CPU time | Wall-time increase |
+| --- | ---: | ---: | ---: |
+| Architecture only | 16.270 s | 16.230 s | — |
+| Logic only | 25.189 s | 25.129 s | 54.82% |
+| DRAM only | 16.547 s | 16.507 s | 1.70% |
+| Logic and DRAM | 25.502 s | 25.440 s | 56.74% |
+
+All cases reached the same clock boundaries and exited successfully at the
+intentional stop. The profiles contained 8,279 samples in total, with no lost
+records. The final B8 numerical check was not reached. These window-specific
+ratios do not replace the full B8 results, and the small DRAM difference has no
+confidence interval.
+
+The main additional hotspot is `vp::ClockEngine::enqueue`: 30.28% of logic-only
+samples and 29.07% with both power paths enabled. In the logic-only profile,
+751 of its 755 samples land in the linked-list traversal used to insert events.
+`PowerTrace::dump_vcd_trace` schedules next-cycle energy-maintenance events even
+when waveform output is disabled. The direct power arithmetic is therefore not
+the main optimization target; event insertion is. A focused scheduler change
+must preserve same-cycle ordering and cancellation behavior. Simply dropping
+the maintenance callbacks would also affect expiry of parent energy
+contributions and risks changing energy totals.
+
+`vp::Block::pause_all` is another large cost (45.95% of baseline samples), but
+its sampled absolute time stays near 7.2–7.5 seconds across the profiles. It
+walks the component tree after internal SystemC steps and is a separate
+optimization opportunity. This diagnosis left SoftHier sources and installed
+binaries unchanged. The former `queue_hotspot.json` and `validation.json`
+artifacts recorded instruction-level evidence and bounded checks; they are no
+longer available in the workspace.

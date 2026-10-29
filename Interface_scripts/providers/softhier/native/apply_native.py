@@ -9,7 +9,8 @@ import subprocess
 
 HERE = Path(__file__).resolve().parent
 REPO = HERE.parents[3]
-HEADERS = ("softhier_hbm2_core.hpp", "softhier_hbm2_power.hpp")
+HEADERS = ("softhier_hbm2_core.hpp", "softhier_hbm2_power.hpp", "dram_power_timing.hpp")
+ENGINE_HEADERS = ("closed_loop_timing.h", "power_accounting_timing.h", "power_accounting_timing_impl.hpp")
 
 
 def digest(path: Path) -> str:
@@ -18,7 +19,7 @@ def digest(path: Path) -> str:
 
 def fingerprint() -> str:
     value = hashlib.sha256()
-    for name in ("apply_native.py", "patch_manifest.json", "softhier.patch", "dramsys.patch", "closed_loop_timing.h", *HEADERS):
+    for name in ("apply_native.py", "patch_manifest.json", "softhier.patch", "dramsys.patch", *ENGINE_HEADERS, *HEADERS):
         value.update(name.encode())
         value.update((HERE / name).read_bytes())
     return value.hexdigest()
@@ -57,7 +58,8 @@ def apply(group: str, root: Path) -> dict:
         if digest(root / relative) != expected["after"]:
             raise ValueError(f"{relative}: patch postcondition failed")
     if group == "softhier":
-        shutil.copyfile(HERE / "closed_loop_timing.h", root / "engine/engine/include/vp/closed_loop_timing.h")
+        for name in ENGINE_HEADERS:
+            shutil.copyfile(HERE / name, root / "engine/engine/include/vp" / name)
     if group == "dramsys":
         for name in HEADERS:
             shutil.copyfile(HERE / name, root / "src/DRAMSys/simulation" / name)

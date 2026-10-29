@@ -1,6 +1,15 @@
 --- a/src/DRAMSys/simulation/Dram.cpp
 +++ b/src/DRAMSys/simulation/Dram.cpp
-@@ -55,6 +55,7 @@
+@@ -40,6 +40,8 @@
+  */
+ 
+ #include "Dram.h"
++#define CLO_DRAM_TIMING_IMPLEMENTATION
++#include "dram_power_timing.hpp"
+ 
+ #include "DRAMSys/common/DebugManager.h"
+ #include "DRAMSys/common/TlmRecorder.h"
+@@ -55,6 +57,7 @@
  
  #ifdef USE_DRAMPOWER
  #include <DRAMPower/command/Command.h>
@@ -8,7 +17,7 @@
  #endif
  
  using namespace sc_core;
-@@ -111,8 +112,12 @@
+@@ -111,8 +114,12 @@
      if (simConfig.powerAnalysis)
      {
  #ifdef USE_DRAMPOWER
@@ -23,7 +32,7 @@
              if (simConfig.togglingRate) {
                  DRAMPower->setToggleRate(0, simConfig.togglingRate);
              }
-@@ -192,8 +197,36 @@
+@@ -192,8 +199,36 @@
      }
  }
  
@@ -60,6 +69,14 @@
      if (!DRAMPower)
          return;
  
+@@ -231,6 +266,7 @@
+ 
+     if (DRAMPower)
+     {
++        CloDramPowerScope power_timing_scope;
+         auto rank = static_cast<std::size_t>(
+             ControllerExtension::getRank(trans)); // relaitve to the channel
+         auto bank_group_abs = static_cast<std::size_t>(
 --- a/src/DRAMSys/simulation/Dram.h
 +++ b/src/DRAMSys/simulation/Dram.h
 @@ -137,6 +137,7 @@
