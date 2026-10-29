@@ -103,6 +103,19 @@ transistor leakage. Thermal source power is their sum. Only `dram3d_chan_*`
 wrappers register this callback; ordinary off-chip memory settings remain
 independent.
 
+## Clock-event insertion
+
+The staged engine caches the last insertion position for one absolute clock
+cycle. Repeated insertions at that cycle append after its existing events
+without rescanning the delayed queue. Other deadlines use the original search.
+Cancellation, dequeue before callback execution, reset, and event deletion
+invalidate the cache. Event ordering, wake-up calculations, and power callbacks
+are preserved. The patch changes the clock-engine class layout, so rebuild the
+engine, models, and launchers together with `provider.sh build-hardware`.
+
+The cache is part of the normal provider build. Transport
+`COUPLING_MODE=legacy` does not select the original scheduler.
+
 ## Direct inline-power timing
 
 The overhead experiment enables `CLO_POWER_ACCOUNTING_TIMING=1` together with

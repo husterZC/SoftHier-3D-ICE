@@ -45,9 +45,17 @@
         "engine/engine/src/power/power_source.cpp": {
           "before": "4357733170ef67696320df296a772d590904380e4e232f6f95a7bec86d387f58",
           "after": "7b106dba158a2862e860399413b671d95906938a8435d4c5147830b41f80b389"
+        },
+        "engine/engine/src/clock/clock_engine.cpp": {
+          "before": "bf27c5e77ec32874bb6cc8567b5031fab73a262f903df887f763b4740b3c1684",
+          "after": "06597b504a1235ce210df8177abe3b58128b07f04e708b072695fd04934ded30"
+        },
+        "engine/engine/include/vp/clock/clock_engine.hpp": {
+          "before": "c30998514dfc59eb70c184a9e760dec85f63f9a11d35e8eec2c1dbbae4043be1",
+          "after": "02754eb0ed59e2343ff495c1ea6963f7cd9f3cd29ffafa813a68fe017a33d547"
         }
       },
-      "patch_sha256": "e79d2d31672aadc737a7f9949fa2e71567fdb9a5365469513889cf5725bedb62"
+      "patch_sha256": "b2070f89fd96f18346afa003177817071cdc432de3e8694bbdee0359776ee120"
     },
     "dramsys": {
       "files": {

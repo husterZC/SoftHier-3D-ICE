@@ -347,3 +347,92 @@
      bool leakage_power_is_on = this->is_on && this->is_leakage_power_started;
      bool dynamic_power_is_on = this->is_on && this->is_dynamic_power_started;
  
+--- a/engine/engine/src/clock/clock_engine.cpp
++++ b/engine/engine/src/clock/clock_engine.cpp
+@@ -298,12 +298,25 @@
+         }
+     }
+ 
+-    vp::ClockEvent *current = delayed_queue, *prev = NULL;
+-
+-    while (current && current->cycle <= full_cycle)
+-    {
+-        prev = current;
+-        current = current->next;
++    vp::ClockEvent *current, *prev;
++
++    // Equal-cycle events retain insertion order. The last insertion is the
++    // tail of its cycle, so another event for that cycle needs no list walk.
++    // Every removal invalidates this cursor before callbacks can enqueue again.
++    if (this->delayed_insert_tail && this->delayed_insert_cycle == full_cycle)
++    {
++        prev = this->delayed_insert_tail;
++        current = prev->next;
++    }
++    else
++    {
++        current = delayed_queue;
++        prev = NULL;
++        while (current && current->cycle <= full_cycle)
++        {
++            prev = current;
++            current = current->next;
++        }
+     }
+ 
+     if (prev)
+@@ -313,6 +326,9 @@
+     event->next = current;
+     event->cycle = full_cycle;
+ 
++    this->delayed_insert_tail = event;
++    this->delayed_insert_cycle = full_cycle;
++
+     this->next_delayed_cycle = this->delayed_queue->cycle;
+ 
+     return event;
+@@ -336,6 +352,8 @@
+ {
+     if (!event->is_enqueued())
+         return;
++
++    this->delayed_insert_tail = NULL;
+ 
+     // There is no way to know if the event is enqueued into the circular buffer
+     // or in the delayed queue so first go through the delayed queue and if it is
+@@ -488,6 +506,7 @@
+         }
+ 
+         ClockEvent *current = delayed_queue;
++        this->delayed_insert_tail = NULL;
+         current->enqueued = false;
+         delayed_queue = delayed_queue->next;
+ 
+@@ -578,6 +597,7 @@
+ 
+ void vp::ClockEngine::reset(bool active)
+ {
++    this->delayed_insert_tail = NULL;
+     this->clock_trace.set(this->period);
+ }
+ 
+--- a/engine/engine/include/vp/clock/clock_engine.hpp
++++ b/engine/engine/include/vp/clock/clock_engine.hpp
+@@ -183,6 +183,7 @@
+ 
+         void event_del(Block *comp, ClockEvent *event)
+         {
++            this->delayed_insert_tail = NULL;
+             delete event;
+         }
+ 
+@@ -229,6 +230,9 @@
+ 
+         int factor;
+         ClockEvent *delayed_queue = NULL;
++        // Live tail of the cycle most recently inserted into delayed_queue.
++        ClockEvent *delayed_insert_tail = NULL;
++        int64_t delayed_insert_cycle = 0;
+         ClockEvent *permanent_first = NULL;
+         ClockEvent *permanent_last = NULL;
+         int current_cycle = 0;
