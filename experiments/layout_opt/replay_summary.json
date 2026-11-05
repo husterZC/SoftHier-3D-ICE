@@ -1,0 +1,207 @@
+{
+  "campaign": "b8_opt26_h35000_replay1s",
+  "case": "decode_b8_kv1024",
+  "opt_step": 26,
+  "duration_s": 1.0,
+  "heat_transfer_coefficient_w_m2_k": 35000.0,
+  "allow_model_clamp": true,
+  "profiles": [
+    "constant",
+    "temperature_aware"
+  ],
+  "slots_per_run": 50000,
+  "thermal_step_us": 20,
+  "measured_blocks_completed": 154,
+  "repeated_block_ps": 6492009000,
+  "target_cells_per_die": 16384,
+  "actual_cells": {
+    "LOGIC_DIE": 16736,
+    "DRAM_DIE": 16384
+  },
+  "initial_temperature_k": 300,
+  "stack_order": "logic_on_dram",
+  "best_layout": "03_top_refinement",
+  "temperature_aware_peak_reduction_c": 5.608000000000004,
+  "results": [
+    {
+      "name": "00_baseline",
+      "profile": "constant",
+      "peak_native_cell_c": 82.423,
+      "peak_dram_cell_c": 79.01100000000002,
+      "hotspot": "chip/cluster_0/redmule",
+      "hotspot_time_s": 0.94692,
+      "redmule_peak_spread_c": 8.206878662099996,
+      "dynamic_energy_j": 10.57158742625943,
+      "leakage_background_energy_j": 1.4234530919373916,
+      "model_limit_first_seconds": null,
+      "metrics": "experiments/layout_opt/results/b8_opt26_h35000_replay1s/00_baseline/constant/metrics.json"
+    },
+    {
+      "name": "01_edge_inward_v2",
+      "profile": "constant",
+      "peak_native_cell_c": 81.238,
+      "peak_dram_cell_c": 77.96500000000003,
+      "hotspot": "chip/cluster_1/redmule",
+      "hotspot_time_s": 0.882,
+      "redmule_peak_spread_c": 6.857482910199991,
+      "dynamic_energy_j": 10.57158742625943,
+      "leakage_background_energy_j": 1.4234530919373916,
+      "model_limit_first_seconds": null,
+      "metrics": "experiments/layout_opt/results/b8_opt26_h35000_replay1s/01_edge_inward_v2/constant/metrics.json"
+    },
+    {
+      "name": "02_balanced_search",
+      "profile": "constant",
+      "peak_native_cell_c": 78.62300000000005,
+      "peak_dram_cell_c": 76.464,
+      "hotspot": "chip/cluster_13/redmule",
+      "hotspot_time_s": 0.88084,
+      "redmule_peak_spread_c": 2.2445068359000118,
+      "dynamic_energy_j": 10.57158742625943,
+      "leakage_background_energy_j": 1.4234530919373916,
+      "model_limit_first_seconds": null,
+      "metrics": "experiments/layout_opt/results/b8_opt26_h35000_replay1s/02_balanced_search/constant/metrics.json"
+    },
+    {
+      "name": "03_top_refinement",
+      "profile": "constant",
+      "peak_native_cell_c": 77.82000000000005,
+      "peak_dram_cell_c": 75.96900000000005,
+      "hotspot": "chip/cluster_8/redmule",
+      "hotspot_time_s": 0.91438,
+      "redmule_peak_spread_c": 1.4019470214999927,
+      "dynamic_energy_j": 10.57158742625943,
+      "leakage_background_energy_j": 1.4234530919373916,
+      "model_limit_first_seconds": null,
+      "metrics": "experiments/layout_opt/results/b8_opt26_h35000_replay1s/03_top_refinement/constant/metrics.json"
+    },
+    {
+      "name": "00_baseline",
+      "profile": "temperature_aware",
+      "peak_native_cell_c": 102.781,
+      "peak_dram_cell_c": 98.856,
+      "hotspot": "chip/cluster_0/redmule",
+      "hotspot_time_s": 0.99236,
+      "redmule_peak_spread_c": 10.016326903999996,
+      "dynamic_energy_j": 10.57158742625943,
+      "leakage_background_energy_j": 5.309540488504237,
+      "model_limit_first_seconds": null,
+      "metrics": "experiments/layout_opt/results/b8_opt26_h35000_replay1s/00_baseline/temperature_aware/metrics.json"
+    },
+    {
+      "name": "01_edge_inward_v2",
+      "profile": "temperature_aware",
+      "peak_native_cell_c": 101.21900000000005,
+      "peak_dram_cell_c": 97.55900000000003,
+      "hotspot": "chip/cluster_1/redmule",
+      "hotspot_time_s": 0.99236,
+      "redmule_peak_spread_c": 8.17269897460001,
+      "dynamic_energy_j": 10.57158742625943,
+      "leakage_background_energy_j": 5.3142651832661905,
+      "model_limit_first_seconds": null,
+      "metrics": "experiments/layout_opt/results/b8_opt26_h35000_replay1s/01_edge_inward_v2/temperature_aware/metrics.json"
+    },
+    {
+      "name": "02_balanced_search",
+      "profile": "temperature_aware",
+      "peak_native_cell_c": 98.178,
+      "peak_dram_cell_c": 95.78400000000005,
+      "hotspot": "chip/cluster_13/redmule",
+      "hotspot_time_s": 0.99876,
+      "redmule_peak_spread_c": 2.8765869141000024,
+      "dynamic_energy_j": 10.57158742625943,
+      "leakage_background_energy_j": 5.283230543667971,
+      "model_limit_first_seconds": null,
+      "metrics": "experiments/layout_opt/results/b8_opt26_h35000_replay1s/02_balanced_search/temperature_aware/metrics.json"
+    },
+    {
+      "name": "03_top_refinement",
+      "profile": "temperature_aware",
+      "peak_native_cell_c": 97.173,
+      "peak_dram_cell_c": 95.226,
+      "hotspot": "chip/cluster_15/redmule",
+      "hotspot_time_s": 0.99876,
+      "redmule_peak_spread_c": 1.8403320312999938,
+      "dynamic_energy_j": 10.57158742625943,
+      "leakage_background_energy_j": 5.282076614945071,
+      "model_limit_first_seconds": null,
+      "metrics": "experiments/layout_opt/results/b8_opt26_h35000_replay1s/03_top_refinement/temperature_aware/metrics.json"
+    }
+  ],
+  "validation": {
+    "all_eight_runs_complete": true,
+    "all_eight_analyses_complete": true,
+    "requested_settings_verified": true,
+    "native_and_archived_sources_unchanged": true,
+    "history_checks_passed": 268,
+    "dense_native_cells_and_peaks_verified": true,
+    "replayed_dynamic_activity_identical": true,
+    "dram_background_identical": true,
+    "model_clamp_triggered": false,
+    "gifs": [
+      {
+        "file": "logic_die_constant_comparison.gif",
+        "frames": 105,
+        "size": [
+          960,
+          860
+        ],
+        "all_frames_decoded": true,
+        "includes_every_true_peak": true,
+        "final_time_s": 1.0
+      },
+      {
+        "file": "dram_die_constant_comparison.gif",
+        "frames": 105,
+        "size": [
+          960,
+          860
+        ],
+        "all_frames_decoded": true,
+        "includes_every_true_peak": true,
+        "final_time_s": 1.0
+      },
+      {
+        "file": "logic_die_temperature_aware_comparison.gif",
+        "frames": 103,
+        "size": [
+          960,
+          860
+        ],
+        "all_frames_decoded": true,
+        "includes_every_true_peak": true,
+        "final_time_s": 1.0
+      },
+      {
+        "file": "dram_die_temperature_aware_comparison.gif",
+        "frames": 103,
+        "size": [
+          960,
+          860
+        ],
+        "all_frames_decoded": true,
+        "includes_every_true_peak": true,
+        "final_time_s": 1.0
+      }
+    ],
+    "panel_order": [
+      "00_baseline",
+      "01_edge_inward_v2",
+      "02_balanced_search",
+      "03_top_refinement"
+    ],
+    "all_static_images_decode": true,
+    "verifier_sha256": "887ef14bb34a160bb0f3e42fc77b01bf938d1786c4610d1b865114b643f7a35a"
+  },
+  "artifacts": "experiments/layout_opt/artifacts/b8_opt26_h35000_replay1s",
+  "comparison": "experiments/layout_opt/results/b8_opt26_h35000_replay1s/final_comparison",
+  "provenance": {
+    "server_sha256": "09be99c55e89e8165477e6a9d0bf041f8ee82513fb38a22aec8161360e6bacf7",
+    "study_sha256": "11b6e37f8abd808c63d2ceaa4b83bc06839a495cf8670c702aa3deadecfc2f60",
+    "comparison_sha256": "e238206fa355c28eace2c88c0ae6635ad778a4644715c7afa362971e5b59c2db",
+    "analysis_sources": {
+      "experiments/layout_opt/compare_replay.py": "2c60e718a1527628b36dbe56cb93e032347b00065f4e20d16a3d52886c471cee",
+      "experiments/layout_opt/measure_replay.py": "c1b2e8e83d29b52d8185a46fddd9b4c1f82a39bbcd32a81f1119e0985b6a3283"
+    }
+  }
+}

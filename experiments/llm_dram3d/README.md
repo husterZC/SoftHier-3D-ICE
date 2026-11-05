@@ -98,6 +98,21 @@ original placement. This experiment defaults to `--opt-step 0`; select any SDK
 decode step from 0–26, for example `--opt-step 25`. The choice is passed explicitly
 to compilation and checked against the simulator report. Prefill keeps its
 original kernels. `prepare_workload.py` accepts the same option.
+
+Both commands also accept these case-insensitive aliases:
+
+| OPT step | Alias | Name |
+| ---: | --- | --- |
+| 0 | OM | Owner Mapping |
+| 9 | DO | DMA Overlap |
+| 13 | DW | Distributing Workers |
+| 16 | SW | Striped Weights |
+| 17 | LC | Local Channels |
+
+For example, `--opt-step SW` is equivalent to `--opt-step 16`. Numeric steps
+0–26 remain supported. Manifests retain the numeric step and include its alias
+and name when one is defined.
+
 The SDK defaults to skipping final numerical validation
 (`LLM_DRAM3D_DONE`, `checked=0`). To enable it, prefix the study command with
 `VALIDATE=1`; the runner passes this environment setting to the SDK build.
@@ -201,7 +216,7 @@ simulating. Thermal placement is selected by `run_study.py --floorplan`.
 |---|---|---|
 | `--cases` | `decode_b1_kv1024` | One or more unique SDK presets: `decode_b{1,8,16}_kv{1024,2048,4096}`, `prefill_s64`, or `prefill_s128`. |
 | `--repeats` | `1` | Repeat the complete layer execution with the same input and KV-cache position; a positive 32-bit integer. |
-| `--opt-step` | `0` | SDK decode optimization step, 0–26; overrides the SDK's standalone default. |
+| `--opt-step` | `0` (OM) | SDK decode step 0–26 or OM/DO/DW/SW/LC; overrides the SDK's standalone default. |
 | `--thermal-replay BLOCKS` | Off | Replay one captured block this many times per profile; each block contains `--repeats` layers. |
 | `--thermal-replay-till [SECONDS]` | Off; bare flag uses `1s` | Replay until this simulated time per profile, rounded up to a thermal slot; accepts `0.1s`, `1s`, `2s`, or bare seconds. |
 | `--allow-model-clamp` | Off | Continue replay above 125 °C using the endpoint leakage factor; does not cap temperatures. |

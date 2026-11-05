@@ -1,0 +1,25 @@
+{
+  "schema_version": 1,
+  "base_rule": "square_bands",
+  "columns": 4,
+  "rows": 4,
+  "transforms": {
+    "cluster_0": "R0",
+    "cluster_1": "R0",
+    "cluster_2": "R0",
+    "cluster_3": "R0",
+    "cluster_4": "R0",
+    "cluster_5": "R0",
+    "cluster_6": "R0",
+    "cluster_7": "R0",
+    "cluster_8": "R0",
+    "cluster_9": "R0",
+    "cluster_10": "R0",
+    "cluster_11": "R0",
+    "cluster_12": "R0",
+    "cluster_13": "R0",
+    "cluster_14": "R0",
+    "cluster_15": "R0"
+  },
+  "rationale": "Unmodified square_bands reference."
+}

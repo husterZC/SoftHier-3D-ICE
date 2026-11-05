@@ -1,0 +1,209 @@
+{
+  "schema_version": 1,
+  "case": "decode_b8_kv1024",
+  "opt_step": 26,
+  "selected_layout": "layouts/03_top_refinement.json",
+  "layout": {
+    "schema_version": 1,
+    "base_rule": "square_bands",
+    "columns": 4,
+    "rows": 4,
+    "transforms": {
+      "cluster_0": "MY",
+      "cluster_1": "MY",
+      "cluster_2": "R270",
+      "cluster_3": "MD",
+      "cluster_4": "R180",
+      "cluster_5": "R180",
+      "cluster_6": "R180",
+      "cluster_7": "R180",
+      "cluster_8": "R180",
+      "cluster_9": "R180",
+      "cluster_10": "R180",
+      "cluster_11": "MY",
+      "cluster_12": "R90",
+      "cluster_13": "R180",
+      "cluster_14": "MA",
+      "cluster_15": "R90"
+    },
+    "rationale": "Target the measured upper-edge hotspot; change only clusters 12\u201315, minimizing a locally calibrated static score across all clusters and six scenarios. Full co-simulation required."
+  },
+  "fixed_settings": {
+    "layer": 1,
+    "seed": 19,
+    "repeats": 1,
+    "thermal_replay": false,
+    "heat_transfer_coefficient_w_m2_k": 25000,
+    "stack_order": "logic_on_dram",
+    "interval_ps": 20000000,
+    "thermal_step_ps": 20000000,
+    "target_cells_per_die": 16384,
+    "actual_cells": {
+      "DRAM_DIE": 16384,
+      "LOGIC_DIE": 16736
+    },
+    "final_numerical_check_enabled": false,
+    "estimate_scale": 1.0
+  },
+  "sdk_commit": "bd6f4df3a8f0a9fcf36e39fb71afd4cbc755211b",
+  "binary_sha256": "973a340c80752a04f82cae4bc318f79026cf43b98add5a6709feebeda33c996f",
+  "preload_sha256": "fc0cad38d250fcbe3168869c1dcd872317b1ea6e280e47b0f8619d224d47c582",
+  "stage_cycles": {
+    "norm1": 7859,
+    "qkv": 149859,
+    "rope_kv_append": 7700,
+    "attention": 312225,
+    "out_projection": 113256,
+    "attention_residual": 3156,
+    "norm2": 7940,
+    "router_projection": 29563,
+    "topk_softmax": 3256,
+    "experts_swiglu": 5836865,
+    "expert_combine_residual": 20317
+  },
+  "baseline_moe_redmule_power": {
+    "min_w": 0.4685556241578716,
+    "max_w": 0.6022995238907612,
+    "coefficient_of_variation": 0.09321908457575881
+  },
+  "objective": "maximum native thermal-cell temperature across both dies and all slots; temperature_aware",
+  "best_name": "03_top_refinement",
+  "baseline_peak_c": 43.928,
+  "best_peak_c": 40.36900000000003,
+  "reduction_c": 3.558999999999969,
+  "reduction_of_rise_above_ambient_pct": 20.839676777140003,
+  "ambient_c": 26.85,
+  "validation": [
+    {
+      "name": "00_baseline",
+      "max_dynamic_delta_w": {
+        "constant": 0.0,
+        "temperature_aware": 0.0
+      },
+      "matching_inputs": true,
+      "matching_timing": true,
+      "legal_rigid_transforms": true
+    },
+    {
+      "name": "01_edge_inward_v2",
+      "max_dynamic_delta_w": {
+        "constant": 0.0,
+        "temperature_aware": 0.0
+      },
+      "matching_inputs": true,
+      "matching_timing": true,
+      "legal_rigid_transforms": true
+    },
+    {
+      "name": "02_balanced_search",
+      "max_dynamic_delta_w": {
+        "constant": 0.0,
+        "temperature_aware": 0.0
+      },
+      "matching_inputs": true,
+      "matching_timing": true,
+      "legal_rigid_transforms": true
+    },
+    {
+      "name": "03_top_refinement",
+      "max_dynamic_delta_w": {
+        "constant": 0.0,
+        "temperature_aware": 0.0
+      },
+      "matching_inputs": true,
+      "matching_timing": true,
+      "legal_rigid_transforms": true
+    }
+  ],
+  "results": [
+    {
+      "name": "00_baseline",
+      "profile": "constant",
+      "peak_cell_c": 43.624000000000024,
+      "peak_logic_cell_c": 43.624000000000024,
+      "peak_dram_cell_c": 35.62700000000001,
+      "redmule_spread_c": 6.162000000000035,
+      "layer_time_us": 6491.996,
+      "dynamic_energy_j": 0.06863919740497756,
+      "leakage_energy_j": 0.00925969005690422
+    },
+    {
+      "name": "00_baseline",
+      "profile": "temperature_aware",
+      "peak_cell_c": 43.928,
+      "peak_logic_cell_c": 43.928,
+      "peak_dram_cell_c": 35.771000000000015,
+      "redmule_spread_c": 6.284999999999968,
+      "layer_time_us": 6491.996,
+      "dynamic_energy_j": 0.06863919740497756,
+      "leakage_energy_j": 0.01069692249597005
+    },
+    {
+      "name": "01_edge_inward_v2",
+      "profile": "constant",
+      "peak_cell_c": 42.99600000000004,
+      "peak_logic_cell_c": 42.99600000000004,
+      "peak_dram_cell_c": 35.161,
+      "redmule_spread_c": 5.646999999999991,
+      "layer_time_us": 6491.996,
+      "dynamic_energy_j": 0.06863919740497756,
+      "leakage_energy_j": 0.00925969005690422
+    },
+    {
+      "name": "01_edge_inward_v2",
+      "profile": "temperature_aware",
+      "peak_cell_c": 43.27800000000002,
+      "peak_logic_cell_c": 43.27800000000002,
+      "peak_dram_cell_c": 35.293000000000006,
+      "redmule_spread_c": 5.750999999999976,
+      "layer_time_us": 6491.996,
+      "dynamic_energy_j": 0.06863919740497756,
+      "leakage_energy_j": 0.010698331677560154
+    },
+    {
+      "name": "02_balanced_search",
+      "profile": "constant",
+      "peak_cell_c": 40.69,
+      "peak_logic_cell_c": 40.69,
+      "peak_dram_cell_c": 34.051000000000045,
+      "redmule_spread_c": 1.7160000000000082,
+      "layer_time_us": 6491.996,
+      "dynamic_energy_j": 0.06863919740497756,
+      "leakage_energy_j": 0.00925969005690422
+    },
+    {
+      "name": "02_balanced_search",
+      "profile": "temperature_aware",
+      "peak_cell_c": 40.938000000000045,
+      "peak_logic_cell_c": 40.938000000000045,
+      "peak_dram_cell_c": 34.17100000000005,
+      "redmule_spread_c": 1.7450000000000045,
+      "layer_time_us": 6491.996,
+      "dynamic_energy_j": 0.06863919740497756,
+      "leakage_energy_j": 0.010691827744671707
+    },
+    {
+      "name": "03_top_refinement",
+      "profile": "constant",
+      "peak_cell_c": 40.138000000000034,
+      "peak_logic_cell_c": 40.138000000000034,
+      "peak_dram_cell_c": 33.61400000000003,
+      "redmule_spread_c": 1.1260000000000332,
+      "layer_time_us": 6491.996,
+      "dynamic_energy_j": 0.06863919740497756,
+      "leakage_energy_j": 0.00925969005690422
+    },
+    {
+      "name": "03_top_refinement",
+      "profile": "temperature_aware",
+      "peak_cell_c": 40.36900000000003,
+      "peak_logic_cell_c": 40.36900000000003,
+      "peak_dram_cell_c": 33.72900000000004,
+      "redmule_spread_c": 1.141999999999996,
+      "layer_time_us": 6491.996,
+      "dynamic_energy_j": 0.06863919740497756,
+      "leakage_energy_j": 0.010691647864453655
+    }
+  ],
+  "limitation": "Best among the fully evaluated layouts; no global optimum claim."
+}

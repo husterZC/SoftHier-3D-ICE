@@ -20,6 +20,7 @@ CASES = tuple(f"decode_b{batch}_kv{past}" for batch in (1, 8, 16)
               for past in (1024, 2048, 4096)) + ("prefill_s64", "prefill_s128")
 MODEL = "gpt-oss-120b"
 sys.path.insert(0, str(ROOT))
+from experiments.llm_dram3d.opt_steps import opt_metadata, parse_opt_step
 
 
 def within_repo(path):
@@ -212,7 +213,7 @@ def prepare(sdk, output, cases, thermal_config=None, dram_power_config=None,
         arch=str(arch), arch_sha256=sha256(arch),
         upstream_arch_sha256=sha256(upstream_arch), cases={}, layer=layer, seed=seed,
         all_experts=all_experts, estimate_scale=estimate_scale, plan_only=plan_only, repeats=repeats,
-        opt_step=opt_step,
+        **opt_metadata(opt_step),
         preload_mode="direct", dram_power_temperature_dependence=False,
         scope="One complete transformer layer with deterministic synthetic weights")
     if resolved_inputs:
@@ -285,8 +286,8 @@ def main(argv=None):
                         help="top cooling boundary in W/(m² K) (default: 15000)")
     parser.add_argument("--layer", type=int, default=1)
     parser.add_argument("--seed", type=int, default=19)
-    parser.add_argument("--opt-step", type=int, choices=range(27), default=0, metavar="0..26",
-                        help="SDK decode optimization step (default: 0)")
+    parser.add_argument("--opt-step", type=parse_opt_step, default=0, metavar="STEP|ALIAS",
+                        help="SDK step 0..26 or OM/DO/DW/SW/LC (default: 0, OM)")
     parser.add_argument("--repeats", type=int, default=1,
                         help="repeat the complete layer with the same inputs and KV-cache position")
     parser.add_argument("--estimate-scale", type=float, default=1.0)

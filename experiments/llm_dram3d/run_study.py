@@ -16,6 +16,7 @@ from prepare_workload import (CASES, MODEL, ROOT, SDK, build, load_sdk_report,
     native_source_hashes, prepare, sha256, validate_inputs, validate_repeats,
     validate_settings, within_repo, write_json)
 from Interface_scripts.providers.softhier.floorplans import RULES
+from experiments.llm_dram3d.opt_steps import opt_metadata, parse_opt_step
 
 STUDY = ROOT / "experiments/llm_dram3d"
 PROVIDER = ROOT / "Interface_scripts/providers/softhier/provider.sh"
@@ -45,8 +46,8 @@ def parse_args(argv=None):
                         help="top cooling boundary in W/(m² K) (default: 15000)")
     parser.add_argument("--layer", type=int, default=1)
     parser.add_argument("--seed", type=int, default=19)
-    parser.add_argument("--opt-step", type=int, choices=range(27), default=0, metavar="0..26",
-                        help="SDK decode optimization step (default: 0)")
+    parser.add_argument("--opt-step", type=parse_opt_step, default=0, metavar="STEP|ALIAS",
+                        help="SDK step 0..26 or OM/DO/DW/SW/LC (default: 0, OM)")
     parser.add_argument("--repeats", type=int, default=1,
                         help="repeat the complete layer with the same inputs and KV-cache position")
     replay = parser.add_mutually_exclusive_group()
@@ -222,7 +223,7 @@ def main(argv=None):
     manifest = dict(experiment="llm_dram3d", version=1, prefix=args.prefix,
         llm_model=MODEL, cases=args.cases, layer=args.layer, seed=args.seed, repeats=args.repeats,
         all_experts=args.all_experts, interval_ps=args.interval_ps, thermal_step_ps=args.interval_ps,
-        target_cells=args.cells, opt_step=args.opt_step, thermal_replay=args.thermal_replay,
+        target_cells=args.cells, **opt_metadata(args.opt_step), thermal_replay=args.thermal_replay,
         thermal_replay_till=args.thermal_replay_till, allow_model_clamp=args.allow_model_clamp,
         estimate_scale=args.estimate_scale, floorplan_rule=args.floorplan,
         provider_sha256=sha256(frozen_provider), dram_power_temperature_dependence=False, runs=[])

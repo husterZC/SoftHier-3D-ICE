@@ -1,0 +1,25 @@
+{
+  "schema_version": 1,
+  "base_rule": "square_bands",
+  "columns": 4,
+  "rows": 4,
+  "transforms": {
+    "cluster_0": "R180",
+    "cluster_1": "MY",
+    "cluster_2": "MY",
+    "cluster_3": "MY",
+    "cluster_4": "MX",
+    "cluster_5": "R0",
+    "cluster_6": "R0",
+    "cluster_7": "R0",
+    "cluster_8": "MX",
+    "cluster_9": "R0",
+    "cluster_10": "R0",
+    "cluster_11": "R0",
+    "cluster_12": "MX",
+    "cluster_13": "R0",
+    "cluster_14": "R0",
+    "cluster_15": "R0"
+  },
+  "rationale": "Turn boundary RedMulE blocks away from the left and bottom die edges; test whether improved lateral spreading outweighs closer hot neighbors."
+}

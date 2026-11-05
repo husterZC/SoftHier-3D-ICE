@@ -1,0 +1,25 @@
+{
+  "schema_version": 1,
+  "base_rule": "square_bands",
+  "columns": 4,
+  "rows": 4,
+  "transforms": {
+    "cluster_0": "MY",
+    "cluster_1": "MY",
+    "cluster_2": "R270",
+    "cluster_3": "MD",
+    "cluster_4": "R180",
+    "cluster_5": "R180",
+    "cluster_6": "R180",
+    "cluster_7": "R180",
+    "cluster_8": "R180",
+    "cluster_9": "R180",
+    "cluster_10": "R180",
+    "cluster_11": "MY",
+    "cluster_12": "R180",
+    "cluster_13": "R180",
+    "cluster_14": "R270",
+    "cluster_15": "MY"
+  },
+  "rationale": "Minimize worst static heat-crowding score over two measured load summaries and three spatial scales; validate by fresh full co-simulation."
+}
