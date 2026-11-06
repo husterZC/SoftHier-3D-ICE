@@ -228,13 +228,15 @@ class TimingTests(unittest.TestCase):
                     event.update(actor="gvsoc", pid=1)
                 (directory / "timing/1.jsonl").write_text("\n".join(map(json.dumps, events)) + "\n")
                 return 0, 1000
-            for name, value in (("source_hashes", lambda: {}), ("host_info", lambda: {}),
+            for name, value in (("source_hashes", lambda *a: {}), ("host_info", lambda *a: {}),
                                 ("prepare", lambda *a, **k: workload), ("compatible_workload", lambda *a: None),
-                                ("native_artifacts", lambda: artifacts), ("execute", fake_execute),
+                                ("native_artifacts", lambda *a: artifacts), ("execute", fake_execute),
                                 ("load_sdk_report", lambda *a: None),
                                 ("parse_timing", lambda *a: dict(cycles=123, stage_cycles={"work": 123})),
                                 ("effective_configuration", lambda *a: {}), ("analyze", lambda *a: None)):
                 patches.enter_context(patch.object(runner, name, value))
+            config["thermal_backend"]["server"] = str(artifacts[0])
+            patches.enter_context(patch.object(runner.backend, "verify_run", return_value={}))
             directory = folder / "study"
             with self.assertRaises(subprocess.TimeoutExpired):
                 runner.run_locked(args, directory, config, modes)
@@ -251,6 +253,9 @@ class TimingTests(unittest.TestCase):
             self.assertEqual(len(list((directory / "runs").glob(failed + "_failed_*"))), 1)
             with self.assertRaisesRegex(ValueError, "resume requires identical settings"):
                 runner.run_locked(args, directory, config | {"power_accounting_timing": False}, modes)
+            changed_backend = dict(config["thermal_backend"], solver_threads=2)
+            with self.assertRaisesRegex(ValueError, "resume requires identical settings"):
+                runner.run_locked(args, directory, config | {"thermal_backend": changed_backend}, modes)
 
     def test_baseline_only_changes_the_active_dram_configuration(self):
         base = ROOT / "tmp/overhead_tests"

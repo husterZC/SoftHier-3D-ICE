@@ -35,6 +35,35 @@ The smoke interval is 10 µs. It is deliberately larger than a high-resolution
 production interval because version 1 starts the Python hook executable once
 per exchange.
 
+## Selecting the optional CPU backend
+
+The original `3D-ICE` backend remains the default. Build the new CPU backend with:
+
+```bash
+make 3dice-build DICE_DIR="$PWD/3D-ICE_30_Oct" DICE_BUILD_TARGET=cpu
+```
+
+Add `DICE_DIR="$PWD/3D-ICE_30_Oct" DICE_BUILD_TARGET=cpu` to your usual
+`make coupled-run` command. These settings also work with `make bootstrap`
+and `make co-simulation`. The selected executables are `3D-ICE-Server-cpu`
+and `3D-ICE-Client-cpu`; no GPU libraries are needed.
+
+The new backend defaults to one-thread SuperLU. Optional solver settings are:
+
+| Setting | Default with CPU backend | Optional CG configuration |
+| --- | --- | --- |
+| `ICE_SOLVER_TYPE` | `cpu_direct_lu` | `cpu_amgcl_cg_amg` |
+| `ICE_SOLVER_THREADS` | `1` | `4` |
+| `ICE_SOLVER_TOLERANCE` | Not used | `1e-6` absolute residual |
+
+Thermal thread settings apply only to the thermal child process; BLAS uses one
+thread. The chosen server hash and solver controls are recorded in
+`generated/thermal_solver.json`. These options change the numerical solver,
+while grid, material, leakage, and integration settings remain independently
+controlled by their existing options. The overhead study runner accepts explicit
+backend/solver arguments, and replay overhead inherits them from its completed
+reference study. See [the overhead experiment instructions](experiments/closed_loop_overhead/README.md#new-cpu-backend-with-one-thread-amgcl-cg).
+
 ## Separation of Responsibilities
 
 The architecture side owns:

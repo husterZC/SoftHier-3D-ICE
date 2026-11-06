@@ -7,6 +7,7 @@ import numpy as np
 
 from .activity import LeakageModel, load_contract, load_recording, read_trace, thermal_components, write_json
 from .replay import Mapping
+from Interface_scripts.thermal_solver import settings as solver_settings
 
 
 def validate_leakage(constant_run, aware_run):
@@ -68,6 +69,9 @@ def compare_replay(replay_output, reference_run, single_pass=False):
         text = re.sub(r"\b\w+\b", lambda m: substitutions.get(m[0], m[0]), text)
         before, stack = re.split(r"\bstack\s*:", text, maxsplit=1)
         stack, solver = re.split(r"\bsolver\s*:", stack, maxsplit=1)
+        # Solver algorithms and convergence controls are reported separately;
+        # integration steps and initial temperatures remain part of physics.
+        solver = re.sub(r"\b(?:type|tolerance)\s+[^;]+;", "", solver)
         stack = re.sub(r"\b(layer|die)\s+\w+\s+(\w+)", r"\1 INSTANCE \2", stack)
         text = before + "stack:" + stack + "solver:" + solver
         return "".join(text.split())
@@ -126,6 +130,9 @@ def compare_replay(replay_output, reference_run, single_pass=False):
             per_die[die["id"]] = result
     peak_error = max(d["peak_temperature_error_c"] for d in per_die.values())
     report = {"replay_output": str(replay_output.resolve()), "reference_run": str(reference_run.resolve()),
+              "solver_configuration": {
+                  "reference": solver_settings((reference_run / "generated/3dice/ice.stk").read_text()),
+                  "replay": solver_settings((replay_output / "ice.stk").read_text())},
               "reference_energy_j": reference_energy, "replay_energy_j": replay_energy,
               "relative_energy_error": energy_error, "peak_temperature_error_c": peak_error,
               "reference_duration_seconds": float(edges[-1]) * 1e-12,

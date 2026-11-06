@@ -4,6 +4,10 @@ ROOT_DIR := $(abspath .)
 SOFTHIER_DIR ?= $(ROOT_DIR)/SoftHier
 DICE_DIR ?= $(ROOT_DIR)/3D-ICE
 DICE_BIN_DIR ?= $(DICE_DIR)/bin
+DICE_BUILD_TARGET ?= all
+ICE_SOLVER_TYPE ?= $(if $(filter cpu,$(DICE_BUILD_TARGET)),cpu_direct_lu,)
+ICE_SOLVER_THREADS ?= $(if $(filter cpu,$(DICE_BUILD_TARGET)),1,)
+ICE_SOLVER_TOLERANCE ?=
 SIMULATOR_PROVIDER ?= $(ROOT_DIR)/Interface_scripts/providers/softhier/provider.sh
 CO_SIMULATION_SCRIPT_DIR ?= $(ROOT_DIR)/Interface_scripts/co-simulation
 GEOMETRY_SCRIPT_DIR ?= $(ROOT_DIR)/Interface_scripts/geometry_generator
@@ -129,6 +133,9 @@ help:
 		'  POWER_INTERVAL_PS=$(POWER_INTERVAL_PS)' \
 		'  ICE_SLOT_SECONDS=$(ICE_SLOT_SECONDS)' \
 		'  ICE_STEP_SECONDS=$(ICE_STEP_SECONDS)' \
+		'  DICE_DIR=$(DICE_DIR) DICE_BUILD_TARGET=$(DICE_BUILD_TARGET) [all|cpu]' \
+		'  ICE_SOLVER_TYPE=$(ICE_SOLVER_TYPE) ICE_SOLVER_THREADS=$(ICE_SOLVER_THREADS)' \
+		'  ICE_SOLVER_TOLERANCE=$(ICE_SOLVER_TOLERANCE)' \
 		'  ICE_TARGET_TOP_DIE_CELLS=$(ICE_TARGET_TOP_DIE_CELLS)' \
 		'  ICE_GRID_PITCH_UM=$(ICE_GRID_PITCH_UM)' \
 		'  ICE_MAP_OUTPUT=$(ICE_MAP_OUTPUT)' \
@@ -156,6 +163,7 @@ bootstrap:
 	SOFTHIER_DIR="$(SOFTHIER_DIR)" \
 	DICE_DIR="$(DICE_DIR)" \
 	DICE_BIN_DIR="$(DICE_BIN_DIR)" \
+	DICE_BUILD_TARGET="$(DICE_BUILD_TARGET)" \
 	BUILD_3DICE="$(BUILD_3DICE)" \
 	PYTHON="$(PYTHON)" \
 	"$(CO_SIMULATION_SCRIPT_DIR)/bootstrap.sh"
@@ -166,12 +174,9 @@ dirs:
 	mkdir -p "$(GENERATED_DIR)" "$(TRACE_DIR)" "$(RESULT_DIR)" "$(STATE_DIR)" "$(RUN_3DICE_GEN_DIR)" "$(RUN_3DICE_DIR)" "$(LOG_DIR)" "$(PID_DIR)"
 
 3dice-build:
-	@if [[ "$(BUILD_3DICE)" == "1" && ( ! -x "$(DICE_BIN_DIR)/3D-ICE-Server" || ! -x "$(DICE_BIN_DIR)/3D-ICE-Client" ) ]]; then \
-		SRC_DIR="$(DICE_DIR)" "$(CO_SIMULATION_SCRIPT_DIR)/3dice_client_server.sh" install; \
-	fi
-	@test -x "$(DICE_BIN_DIR)/3D-ICE-Server"
-	@test -x "$(DICE_BIN_DIR)/3D-ICE-Client"
-	@printf '3D-ICE server/client are available in %s\n' "$(DICE_BIN_DIR)"
+	@DICE_DIR="$(DICE_DIR)" DICE_BIN_DIR="$(DICE_BIN_DIR)" \
+	DICE_BUILD_TARGET="$(DICE_BUILD_TARGET)" BUILD_3DICE="$(BUILD_3DICE)" \
+	bash "$(CO_SIMULATION_SCRIPT_DIR)/dice_backend.sh"
 
 simulator-init:
 	@ROOT_DIR="$(ROOT_DIR)" SOFTHIER_DIR="$(SOFTHIER_DIR)" \
@@ -207,6 +212,9 @@ ice-inputs: dirs
 	args+=(--map-output "$(ICE_MAP_OUTPUT)"); \
 	if [[ -n "$(ICE_SLOT_SECONDS)" ]]; then args+=(--slot-seconds "$(ICE_SLOT_SECONDS)"); fi; \
 	if [[ -n "$(ICE_STEP_SECONDS)" ]]; then args+=(--step-seconds "$(ICE_STEP_SECONDS)"); fi; \
+	if [[ -n "$(ICE_SOLVER_TYPE)" ]]; then args+=(--solver-type "$(ICE_SOLVER_TYPE)"); fi; \
+	if [[ -n "$(ICE_SOLVER_THREADS)" ]]; then args+=(--solver-threads "$(ICE_SOLVER_THREADS)"); fi; \
+	if [[ -n "$(ICE_SOLVER_TOLERANCE)" ]]; then args+=(--solver-tolerance "$(ICE_SOLVER_TOLERANCE)"); fi; \
 	"$(PYTHON)" "$${args[@]}"
 
 simulator-build:
@@ -250,6 +258,7 @@ coupled-run:
 	GEOMETRY_SCRIPT_DIR="$(GEOMETRY_SCRIPT_DIR)" \
 	DICE_DIR="$(DICE_DIR)" \
 	DICE_BIN_DIR="$(DICE_BIN_DIR)" \
+	DICE_BUILD_TARGET="$(DICE_BUILD_TARGET)" \
 	PORT="$(PORT)" \
 	SERVER_HOST="$(SERVER_HOST)" \
 	DICE_RUN_MODE="$(DICE_RUN_MODE)" \
@@ -259,6 +268,9 @@ coupled-run:
 	SOFTHIER_POWER_PROFILE="$(SOFTHIER_POWER_PROFILE)" \
 	ICE_SLOT_SECONDS="$(ICE_SLOT_SECONDS)" \
 	ICE_STEP_SECONDS="$(ICE_STEP_SECONDS)" \
+	ICE_SOLVER_TYPE="$(ICE_SOLVER_TYPE)" \
+	ICE_SOLVER_THREADS="$(ICE_SOLVER_THREADS)" \
+	ICE_SOLVER_TOLERANCE="$(ICE_SOLVER_TOLERANCE)" \
 	ICE_TARGET_TOP_DIE_CELLS="$(ICE_TARGET_TOP_DIE_CELLS)" \
 	ICE_GRID_PITCH_UM="$(ICE_GRID_PITCH_UM)" \
 	ICE_MAP_OUTPUT="$(ICE_MAP_OUTPUT)" \

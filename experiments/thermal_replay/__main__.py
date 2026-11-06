@@ -46,8 +46,12 @@ def main():
                         help="thermal integration step in seconds (default: equal to the recorded power slot)")
     replay.add_argument("--dense-maps", action="store_true", help="also write dense Tmap at every power interval")
     replay.add_argument("--timeout", type=float, default=180., help="native server startup/socket timeout")
-    replay.add_argument("--factorization-threads", type=int, default=1,
-                        help="SuperLU factorization threads (default: 1; see native stability note)")
+    replay.add_argument("--solver-type", choices=("cpu_direct_lu", "cpu_amgcl_cg_amg"),
+                        help="override the archived solver (requires the new CPU backend)")
+    replay.add_argument("--solver-tolerance", type=float,
+                        help="absolute residual tolerance for AMGCL CG (default: 1e-6)")
+    replay.add_argument("--solver-threads", "--factorization-threads", dest="solver_threads", type=int, default=1,
+                        help="thermal solver threads (default: 1; SuperLU uses these during factorization)")
     check = commands.add_parser("validate", help="compare replay/leakage against saved co-simulation results")
     check.add_argument("--output", type=Path, required=True)
     for option in ("constant-run", "aware-run", "replay-output", "reference-run"):

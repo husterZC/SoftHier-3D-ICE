@@ -207,6 +207,8 @@ right :
 
 @unittest.skipUnless(SERVER.is_file() and CLIENT.is_file(), "requires built 3D-ICE binaries")
 class PowerTraceTransportTests(unittest.TestCase):
+    poll_seconds = None
+
     def setUp(self):
         temporary = tempfile.TemporaryDirectory(prefix="power-transport-tests-")
         self.addCleanup(temporary.cleanup)
@@ -252,6 +254,8 @@ class PowerTraceTransportTests(unittest.TestCase):
                 args = ["ice.stk", "--power-trace", "power.txt", "--until-minus-one"]
                 if fragmented or invalid:
                     args.append("--follow")
+                if self.poll_seconds is not None:
+                    args.extend(["--poll", str(self.poll_seconds)])
                 reader = launch(SERVER, args, "server.log")
                 reader_log = directory / "server.log"
             else:
@@ -262,6 +266,8 @@ class PowerTraceTransportTests(unittest.TestCase):
                 self.wait_log(directory / "server.log", "Waiting for client", processes)
                 args = ["2", "127.0.0.1", port] if random else [
                     "127.0.0.1", port, "power.txt", "--follow", "--until-minus-one"]
+                if self.poll_seconds is not None and not random:
+                    args.extend(["--poll", str(self.poll_seconds)])
                 reader = launch(CLIENT, args, "client.log")
                 reader_log = directory / "client.log"
 

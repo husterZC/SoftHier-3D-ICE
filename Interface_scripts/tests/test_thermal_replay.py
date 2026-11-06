@@ -3,6 +3,7 @@
 import gzip
 import csv
 import json
+import os
 from pathlib import Path
 import re
 import socket
@@ -10,7 +11,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
@@ -278,25 +279,61 @@ class ReplayIntegrationTests(unittest.TestCase):
         record(self.source, output)
         self.assertEqual((output / "floorplan.flp").read_text(), FLOORPLAN)
 
-    def test_startup_retries_a_self_connected_socket(self):
-        echoed = socket.socket()
-        self.addCleanup(echoed.close)
-        echoed.settimeout(1)
-        echoed.bind(("127.0.0.1", 0))
-        echoed.connect(echoed.getsockname())
-        original_connect = socket.create_connection
-        attempts = 0
+    def test_client_rejects_server_port_before_connecting(self):
+        candidate = Mock()
+        candidate.getsockname.return_value = ("127.0.0.1", 50000)
+        with patch("experiments.thermal_replay.ice.socket.socket", return_value=candidate):
+            self.assertIsNone(IceClient.connect(50000))
+        candidate.connect.assert_not_called()
+        candidate.close.assert_called_once()
 
-        def connect(*args, **kwargs):
-            nonlocal attempts
-            attempts += 1
-            return echoed if attempts == 1 else original_connect(*args, **kwargs)
-
-        with patch("experiments.thermal_replay.ice.socket.create_connection", side_effect=connect):
-            result = run(self.recording, self.directory / "startup_retry", cycles=1)
+    def test_startup_retries_bind_conflict_and_preserves_failed_timing(self):
+        occupied = socket.socket()
+        self.addCleanup(occupied.close)
+        occupied.bind(("0.0.0.0", 0))
+        port = occupied.getsockname()[1]
+        original_select = IceClient.select_port
+        choices = []
+        def select():
+            choices.append(port if not choices else original_select())
+            return choices[-1]
+        timing = self.directory / "timing"
+        timing.mkdir()
+        output = self.directory / "startup_retry"
+        with patch.object(IceClient, "select_port", side_effect=select), \
+                patch.dict(os.environ, {"CLO_TIMING_DIR": str(timing)}):
+            result = run(self.recording, output, cycles=1)
         self.assertEqual(result["status"], "complete")
-        self.assertGreater(attempts, 1)
-        self.assertEqual(echoed.fileno(), -1)
+        self.assertEqual(len(choices), 2)
+        failures = result["server_startup_failures"]
+        self.assertEqual(len(failures), 1)
+        self.assertIn("Address already in use", Path(failures[0]["log"]).read_text())
+        read = lambda paths: [json.loads(line) for path in paths for line in path.read_text().splitlines()]
+        events = read(timing.glob("*.jsonl"))
+        failed = read((timing / "startup_failed").glob("*.jsonl"))
+        self.assertEqual(sum(e["phase"] == "factorization" for e in events), 1)
+        self.assertEqual(sum(e["phase"] == "factorization" for e in failed), 1)
+        self.assertFalse(any(e["phase"] == "thermal_step" for e in failed))
+
+    def test_startup_does_not_retry_unrelated_errors(self):
+        client = IceClient(SERVER, self.directory)
+        with patch.object(client, "start_server", side_effect=RuntimeError("invalid stack")) as start:
+            with self.assertRaisesRegex(RuntimeError, "invalid stack"):
+                client.__enter__()
+        start.assert_called_once()
+
+    def test_client_waits_for_its_own_server_before_connecting(self):
+        client = IceClient(SERVER, self.directory)
+        process = Mock()
+        process.poll.side_effect = [None, None, 1]
+        with patch("experiments.thermal_replay.ice.subprocess.Popen", return_value=process), \
+                patch("experiments.thermal_replay.ice.time.sleep"), patch.object(client, "connect") as connect:
+            try:
+                with self.assertRaisesRegex(RuntimeError, "exited during startup"):
+                    client.start_server({}, float("inf"))
+            finally:
+                client.close()
+        connect.assert_not_called()
 
     def test_persistent_socket_matches_native_trace_mode_and_preserves_package(self):
         output = self.directory / "single"

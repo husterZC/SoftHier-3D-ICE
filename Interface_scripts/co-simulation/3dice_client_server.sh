@@ -363,6 +363,14 @@ distclean() {
 
 parse_args "$@"
 
+# The modern CPU tree owns its optimized SuperLU settings; do not rewrite them.
+if [[ "${DICE_BUILD_TARGET:-all}" == cpu && ( "$CMD" == install || "$CMD" == build ) ]]; then
+    exec make -C "$SRC_DIR" -j2 cpu
+fi
+if [[ -f "$SRC_DIR/sources/cpu_amgcl_solver.cpp" && ( "$CMD" == install || "$CMD" == build ) ]]; then
+    die "select DICE_BUILD_TARGET=cpu for the new 3D-ICE backend"
+fi
+
 case "$CMD" in
     install)
         install_all

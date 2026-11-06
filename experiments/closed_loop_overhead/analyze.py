@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 import random
 import statistics
+from . import backend
 
 PHASES = ("initialization", "architecture", "inline_power_accounting", "power_capture", "thermal_advancement",
           "coupling_output", "completion")
@@ -120,7 +121,8 @@ def partition(events, start, end, roi):
     return {key: value * 1e-9 for key, value in result.items()}
 
 
-def summarize_events(events, start, end, thermal, interval_ps, power_accounting_timing=None):
+def summarize_events(events, start, end, thermal, interval_ps, power_accounting_timing=None,
+                     solver_type=backend.LU):
     starts = [e for e in events if e["phase"] == "roi_start"]
     ends = [e for e in events if e["phase"] == "roi_end"]
     if len(starts) != 1 or len(ends) != 1:
@@ -147,12 +149,15 @@ def summarize_events(events, start, end, thermal, interval_ps, power_accounting_
     exchanges = [e for e in events if e["phase"] == "exchange" and e["value"] > 0]
     steps = [e for e in events if e["phase"] == "thermal_step"]
     factor = [e for e in events if e["phase"] == "factorization"]
+    preconditioners = [e for e in events if e["phase"] == "preconditioner_setup"]
     cells = [e["value"] for e in events if e["phase"] == "mesh_cells"]
     nnz = [e["value"] for e in events if e["phase"] == "matrix_nnz"]
-    if thermal and (not exchanges or len(steps) != len(exchanges) or len(factor) != 1
+    if thermal:
+        backend.setup_events(events, solver_type, start, roi[0])
+    if thermal and (not exchanges or len(steps) != len(exchanges)
                     or len(cells) != 1 or len(nnz) != 1):
-        raise ValueError("missing native thermal instrumentation or steps/exchanges/factorizations disagree")
-    if not thermal and (exchanges or steps or cells):
+        raise ValueError("missing native thermal instrumentation or steps/exchanges disagree")
+    if not thermal and (exchanges or steps or cells or factor or preconditioners):
         raise ValueError("architecture-only run performed power/thermal exchanges")
     if any(e["value"] > interval_ps for e in exchanges):
         raise ValueError("power exchange exceeded the configured interval")
@@ -165,6 +170,7 @@ def summarize_events(events, start, end, thermal, interval_ps, power_accounting_
                 phases_roi=partition(events, *roi, roi),
                 detail_seconds={key: sum(values) for key, values in durations.items()},
                 exchange_count=len(exchanges), thermal_steps=len(steps), factorizations=len(factor),
+                preconditioner_setups=len(preconditioners),
                 native_cells=cells[0] if cells else 0, matrix_nnz=nnz[0] if nnz else 0,
                 mean_exchange_seconds=statistics.mean(latency) if latency else 0,
                 p95_exchange_seconds=percentile(latency, .95) if latency else 0,
@@ -235,7 +241,8 @@ def analyze(directory):
         record["coupling_mode"] = manifest["settings"].get("coupling_mode", "legacy")
         timing = row.get("timing", {})
         record.update({key: timing.get(key) for key in ("end_to_end_seconds", "roi_seconds", "native_cells",
-                       "matrix_nnz", "exchange_count", "thermal_steps", "factorizations", "solver_seconds_per_step")})
+                       "matrix_nnz", "exchange_count", "thermal_steps", "factorizations", "preconditioner_setups",
+                       "solver_seconds_per_step")})
         flat.append(record)
     with (directory / "runs.csv").open("w") as stream:
         writer = csv.DictWriter(stream, fieldnames=list(flat[0])); writer.writeheader(); writer.writerows(flat)

@@ -134,6 +134,7 @@ class MultiDieReplayTests(unittest.TestCase):
         class HotDramClient:
             count = len(layout.entries)
             state_calls = 0
+            startup_failures = []
             def __init__(self, *args, **kwargs):
                 self.slots = 0
             def __enter__(self):

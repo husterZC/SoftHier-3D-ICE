@@ -96,8 +96,14 @@ MANIFEST_FILE="${MANIFEST_FILE:-$RUN_DIR/run.env}"
 SUMMARY_FILE="${SUMMARY_FILE:-$RUN_DIR/summary.txt}"
 SIMULATOR_LOG_FILE="${SIMULATOR_LOG_FILE:-$LOG_DIR/simulator.log}"
 
-SERVER_BIN="$DICE_BIN_DIR/3D-ICE-Server"
-CLIENT_BIN="$DICE_BIN_DIR/3D-ICE-Client"
+source "$SCRIPT_DIR/dice_backend.sh"
+ICE_SOLVER_TYPE="${ICE_SOLVER_TYPE:-}"
+ICE_SOLVER_THREADS="${ICE_SOLVER_THREADS:-}"
+ICE_SOLVER_TOLERANCE="${ICE_SOLVER_TOLERANCE:-}"
+if [[ "$DICE_BUILD_TARGET" == cpu ]]; then
+    ICE_SOLVER_TYPE="${ICE_SOLVER_TYPE:-cpu_direct_lu}"
+    ICE_SOLVER_THREADS="${ICE_SOLVER_THREADS:-1}"
+fi
 
 log() {
     printf '[coupled] %s\n' "$*"
@@ -366,34 +372,9 @@ reset_runtime_files() {
 }
 
 build_or_verify_3dice() {
-    local need_build=0
     local need_client=0
-
-    if [[ "$DICE_RUN_MODE" == "client-server" ]]; then
-        need_client=1
-    fi
-
-    if [[ ! -x "$SERVER_BIN" ]]; then
-        need_build=1
-    fi
-
-    if [[ "$need_client" == "1" && ! -x "$CLIENT_BIN" ]]; then
-        need_build=1
-    fi
-
-    if [[ "$BUILD_3DICE" == "1" && "$need_build" == "1" ]]; then
-        log "Building 3D-ICE binaries"
-        SRC_DIR="$DICE_DIR" "$SCRIPT_DIR/3dice_client_server.sh" install
-    fi
-
-    if [[ "$BUILD_3DICE" == "1" && "$need_build" == "0" ]]; then
-        "$MAKE_CMD" -C "$DICE_DIR" -j2
-    fi
-    require_executable "$SERVER_BIN"
-
-    if [[ "$need_client" == "1" ]]; then
-        require_executable "$CLIENT_BIN"
-    fi
+    if [[ "$DICE_RUN_MODE" == client-server ]]; then need_client=1; fi
+    dice_build_or_verify "$need_client" 1
 }
 
 prepare_system_config() {
@@ -431,6 +412,9 @@ generate_ice_inputs() {
         args+=("--step-seconds" "$ICE_STEP_SECONDS")
     fi
 
+    if [[ -n "$ICE_SOLVER_TYPE" ]]; then args+=(--solver-type "$ICE_SOLVER_TYPE"); fi
+    if [[ -n "$ICE_SOLVER_THREADS" ]]; then args+=(--solver-threads "$ICE_SOLVER_THREADS"); fi
+    if [[ -n "$ICE_SOLVER_TOLERANCE" ]]; then args+=(--solver-tolerance "$ICE_SOLVER_TOLERANCE"); fi
     "$PYTHON" "${args[@]}"
 }
 
@@ -484,6 +468,10 @@ prepare_power_hook_config() {
 }
 
 write_manifest() {
+    if [[ "$DICE_BUILD_TARGET" == cpu ]]; then
+        "$PYTHON" "$ROOT_DIR/Interface_scripts/thermal_solver.py" describe \
+            --stack "$ICE_RUNTIME_STK_FILE" --server "$SERVER_BIN" > "$GENERATED_DIR/thermal_solver.json"
+    fi
     {
         kv RUN_CREATED_AT_LOCAL "$(date '+%Y-%m-%dT%H:%M:%S%z')"
         kv RUN_CREATED_AT_UTC "$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
@@ -504,6 +492,12 @@ write_manifest() {
         kv PORT "$PORT"
         kv SERVER_HOST "$SERVER_HOST"
         kv DICE_RUN_MODE "$DICE_RUN_MODE"
+        kv DICE_DIR "$DICE_DIR"
+        kv DICE_BUILD_TARGET "$DICE_BUILD_TARGET"
+        kv SERVER_BIN "$SERVER_BIN"
+        kv ICE_SOLVER_TYPE "$ICE_SOLVER_TYPE"
+        kv ICE_SOLVER_THREADS "$ICE_SOLVER_THREADS"
+        kv ICE_SOLVER_TOLERANCE "$ICE_SOLVER_TOLERANCE"
         kv COUPLING_MODE "$COUPLING_MODE"
         kv DICE_POLL_SECONDS "$DICE_POLL_SECONDS"
         kv POWER_HOOK_SOCKET "$POWER_HOOK_SOCKET"
@@ -702,6 +696,15 @@ stop_simulator_log_tail() {
     fi
 }
 
+run_thermal_server() {
+    if [[ "$DICE_BUILD_TARGET" == cpu ]]; then
+        exec "$PYTHON" "$ROOT_DIR/Interface_scripts/thermal_solver.py" run \
+            --stack "$ICE_RUNTIME_STK_FILE" --server "$SERVER_BIN" -- "$@"
+    else
+        exec "$SERVER_BIN" "$@"
+    fi
+}
+
 start_server() {
     local wait_pattern
 
@@ -709,7 +712,7 @@ start_server() {
         log "Starting 3D-ICE server in local power-trace mode"
         (
             cd "$RUN_3DICE_DIR"
-            "$SERVER_BIN" "$(basename "$ICE_RUNTIME_STK_FILE")" \
+            run_thermal_server "$(basename "$ICE_RUNTIME_STK_FILE")" \
                 --power-trace "$DICE_POWER_TRACE" \
                 --follow \
                 --until-minus-one --poll "$DICE_POLL_SECONDS"
@@ -719,7 +722,7 @@ start_server() {
         log "Starting 3D-ICE server on port $PORT"
         (
             cd "$RUN_3DICE_DIR"
-            "$SERVER_BIN" "$(basename "$ICE_RUNTIME_STK_FILE")" "$PORT"
+            run_thermal_server "$(basename "$ICE_RUNTIME_STK_FILE")" "$PORT"
         ) > "$LOG_DIR/3dice_server.log" 2>&1 &
         wait_pattern="Waiting for client"
     fi
@@ -1052,6 +1055,7 @@ run_all() {
         SOFTHIER_POWER_PROFILE="$SOFTHIER_POWER_PROFILE" \
         DICE_DIR="$DICE_DIR" \
         DICE_BIN_DIR="$DICE_BIN_DIR" \
+        DICE_BUILD_TARGET="$DICE_BUILD_TARGET" \
         BUILD_3DICE="$BUILD_3DICE" \
         PYTHON="$PYTHON" \
         "$SCRIPT_DIR/bootstrap.sh"

@@ -1,5 +1,6 @@
 """Persistent local 3D-ICE socket client (native-endian, four-byte words)."""
 
+import errno
 import os
 from pathlib import Path
 import re
@@ -14,10 +15,12 @@ import numpy as np
 from .activity import load_contract
 from .layout import Layout
 from thermal_manifest import copy_inputs
+from Interface_scripts.thermal_solver import configure as configure_solver, environment as solver_environment
 EXIT, OUTPUT, COUNT, POWERS, SLOT, STATE = 0, 2, 4, 5, 6, 10
 
 
-def prepare_stack(recording, output, dense_maps=False, factorization_threads=1, thermal_step=None):
+def prepare_stack(recording, output, dense_maps=False, factorization_threads=1, thermal_step=None,
+                  solver_type=None, solver_tolerance=None):
     """Prepare replay inputs, defaulting to one thermal step per power slot."""
     recording, output = Path(recording), Path(output)
     # prepare_stack is also used directly by legacy callers with only stack/FLP.
@@ -44,6 +47,7 @@ def prepare_stack(recording, output, dense_maps=False, factorization_threads=1, 
                                     f"numofcores {factorization_threads} ;", source)
     if thread_fields != 1:
         raise ValueError("missing or ambiguous factorization thread setting")
+    source = configure_solver(source, solver_type, factorization_threads, solver_tolerance)
     solver = re.search(r"transient\s+step\s+([\deE.+-]+)\s*,\s*slot\s+([\deE.+-]+)", source)
     if not solver:
         raise ValueError("replay requires a transient stack")
@@ -65,41 +69,102 @@ def prepare_stack(recording, output, dense_maps=False, factorization_threads=1, 
 
 
 class IceClient:
-    def __init__(self, server, directory, timeout=180.):
+    def __init__(self, server, directory, timeout=180., solver_threads=None):
         self.server = str(Path(server).resolve())
         self.directory = Path(directory)
         self.timeout = timeout
+        self.solver_threads = solver_threads
         self.process = self.sock = self.log = None
+        self.startup_failures = []
+
+    @staticmethod
+    def select_port():
+        with socket.socket() as reservation:
+            # Match the native server's wildcard bind, not just loopback.
+            reservation.bind(("0.0.0.0", 0))
+            return reservation.getsockname()[1]
+
+    @staticmethod
+    def connect(port):
+        candidate = socket.socket()
+        try:
+            candidate.settimeout(.2)
+            candidate.bind(("127.0.0.1", 0))
+            # Reject the server port BEFORE connecting. Detecting a self-
+            # connection afterwards leaves TIME_WAIT and can prevent the
+            # native server from binding after its lengthy factorization.
+            if candidate.getsockname()[1] == port:
+                candidate.close()
+                return None
+            candidate.connect(("127.0.0.1", port))
+            return candidate
+        except BaseException:
+            candidate.close()
+            raise
+
+    def start_server(self, environment, deadline):
+        self.port = self.select_port()
+        self.log = (self.directory / "server.log").open("w")
+        self.process = subprocess.Popen([self.server, "ice.stk", str(self.port)],
+                                        cwd=self.directory, env=environment, stdout=self.log,
+                                        stderr=subprocess.STDOUT, start_new_session=True)
+        ready = False
+        while self.sock is None:
+            if self.process.poll() is not None:
+                log = self.directory / "server.log"
+                message = log.read_text()
+                if "ERROR :: server bind: Address already in use" in message:
+                    raise OSError(errno.EADDRINUSE, f"3D-ICE port {self.port} is occupied; see {log}")
+                raise RuntimeError(f"3D-ICE exited during startup; see {log}")
+            # This marker is flushed by 3D-ICE only after bind/listen succeeds.
+            # Do not connect to a different service that claimed the port
+            # while our own server was still preparing its thermal matrix.
+            ready = ready or "Waiting for client ..." in (self.directory / "server.log").read_text()
+            if ready:
+                try:
+                    self.sock = self.connect(self.port)
+                except (ConnectionRefusedError, TimeoutError):
+                    pass
+            if self.sock is None:
+                if time.monotonic() >= deadline:
+                    raise TimeoutError("3D-ICE startup timed out")
+                time.sleep(.02)
+
+    def archive_startup_failure(self, attempt, started, error):
+        pid, port = self.process.pid, self.port
+        self.close()
+        log = self.directory / f"server_startup_failed_{attempt:02d}.log"
+        (self.directory / "server.log").rename(log)
+        failure = dict(attempt=attempt, pid=pid, port=port, error=str(error), log=str(log),
+                       host_seconds=time.monotonic() - started)
+        timing_dir = os.environ.get("CLO_TIMING_DIR")
+        if timing_dir:
+            timing = Path(timing_dir) / f"{pid}.jsonl"
+            if timing.is_file():
+                # Preserve failed setup evidence outside the successful
+                # session's top-level step/factorization timing stream.
+                archive = Path(timing_dir) / "startup_failed"
+                archive.mkdir(exist_ok=True)
+                saved = archive / f"{pid}_{attempt:02d}.jsonl"
+                timing.rename(saved)
+                failure["timing"] = str(saved)
+        self.startup_failures.append(failure)
 
     def __enter__(self):
         try:
-            with socket.socket() as reservation:
-                reservation.bind(("127.0.0.1", 0))
-                port = reservation.getsockname()[1]
-            environment = os.environ.copy()
+            environment = (solver_environment(self.solver_threads) if self.solver_threads is not None
+                           else os.environ.copy())
             environment.setdefault("OPENBLAS_NUM_THREADS", "1")
-            self.log = (self.directory / "server.log").open("w")
-            self.process = subprocess.Popen([self.server, "ice.stk", str(port)],
-                                            cwd=self.directory, env=environment, stdout=self.log,
-                                            stderr=subprocess.STDOUT, start_new_session=True)
             deadline = time.monotonic() + self.timeout
-            while self.sock is None:
-                if self.process.poll() is not None:
-                    raise RuntimeError(f"3D-ICE exited during startup; see {self.directory / 'server.log'}")
+            for attempt in range(1, 4):
+                started = time.monotonic()
                 try:
-                    self.sock = socket.create_connection(("127.0.0.1", port), timeout=.2)
-                    # Before the server listens, Linux can assign the client
-                    # this same ephemeral port and connect it to itself. Such
-                    # a socket echoes requests instead of returning replies.
-                    if self.sock.getsockname() == self.sock.getpeername():
-                        self.sock.close()
-                        self.sock = None
-                except (ConnectionRefusedError, TimeoutError):
-                    pass
-                if self.sock is None:
-                    if time.monotonic() >= deadline:
-                        raise TimeoutError("3D-ICE startup timed out")
-                    time.sleep(.02)
+                    self.start_server(environment, deadline)
+                    break
+                except OSError as error:
+                    if error.errno != errno.EADDRINUSE or attempt == 3 or time.monotonic() >= deadline:
+                        raise
+                    self.archive_startup_failure(attempt, started, error)
             self.sock.settimeout(self.timeout)
             self.sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
             self.count = self.word(self.exchange(COUNT))

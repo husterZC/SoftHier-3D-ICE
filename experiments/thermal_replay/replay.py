@@ -12,6 +12,8 @@ import numpy as np
 from .activity import ROOT, LeakageModel, digest, load_recording, write_json
 from .ice import IceClient, prepare_stack
 from .layout import Layout
+from Interface_scripts import overhead_timing as timing
+from Interface_scripts.thermal_solver import describe as describe_solver
 
 sys.path.insert(0, str(ROOT / "Interface_scripts/co-simulation"))
 from ice_trace_adapter import build_power_sources, validate_floorplan_entries  # noqa: E402
@@ -54,7 +56,12 @@ class Mapping:
 
 def run(recording, output, server=ROOT / "3D-ICE/bin/3D-ICE-Server", profile="temperature_aware",
         cycles=None, max_seconds=1.,
-        single_pass=False, dense_maps=False, timeout=180., factorization_threads=1, thermal_step=None):
+        single_pass=False, dense_maps=False, timeout=180., factorization_threads=1, thermal_step=None,
+        solver_type=None, solver_threads=None, solver_tolerance=None):
+    if solver_threads is not None:
+        if factorization_threads != 1 and factorization_threads != solver_threads:
+            raise ValueError("conflicting solver and factorization thread counts")
+        factorization_threads = solver_threads
     manifest, document, activity = load_recording(recording)
     paths = manifest["component_paths"]
     layers_per_cycle = manifest.get("layers_per_cycle", 1)
@@ -91,7 +98,9 @@ def run(recording, output, server=ROOT / "3D-ICE/bin/3D-ICE-Server", profile="te
                "factorization_threads": factorization_threads}
     write_json(output / "summary.json", summary)
     try:
-        step_ps, slot_ps = prepare_stack(recording, output, dense_maps, factorization_threads, thermal_step)
+        step_ps, slot_ps = prepare_stack(recording, output, dense_maps, factorization_threads, thermal_step,
+                                         solver_type, solver_tolerance)
+        summary.update(describe_solver(output / "ice.stk", server))
         if slot_ps != manifest["power_interval_ps"]:
             raise ValueError("archived thermal slot differs from the recorded power interval")
         if np.any(np.diff(activity.edges)[:-1] != slot_ps) or np.diff(activity.edges)[-1] > slot_ps:
@@ -126,7 +135,9 @@ def run(recording, output, server=ROOT / "3D-ICE/bin/3D-ICE-Server", profile="te
             cycle_file = stack.enter_context((output / "cycles.csv").open("w", newline=""))
             cycle_writer = csv.DictWriter(cycle_file, fieldnames=["cycle", "time_ps", "layers_completed"])
             cycle_writer.writeheader()
-            ice = stack.enter_context(IceClient(server, output, timeout))
+            ice = stack.enter_context(IceClient(server, output, timeout, solver_threads=factorization_threads))
+            if ice.startup_failures:
+                summary["server_startup_failures"] = ice.startup_failures
             if ice.count != len(mapping.entries):
                 raise ValueError("server floorplan size differs from the recording")
             initial_state = ice.state()  # Also detect an old server before doing any work.
@@ -135,8 +146,11 @@ def run(recording, output, server=ROOT / "3D-ICE/bin/3D-ICE-Server", profile="te
                 raise ValueError("stack initial temperature differs from the system contract")
             histories["component_temperatures_c"].writerow([0, *temperatures])
             summary["thermal_cells"] = len(initial_state)
+            loop_start = timing.now()
+            timing.emit("replay", "replay_start", loop_start, loop_start)
             for index, t0 in enumerate(range(0, end_ps, slot_ps)):
                 t1 = t0 + slot_ps
+                power_start = timing.now()
                 if single_pass:
                     dynamic = activity.dynamic[index]
                     reference_leakage = activity.leakage[index]
@@ -146,7 +160,9 @@ def run(recording, output, server=ROOT / "3D-ICE/bin/3D-ICE-Server", profile="te
                     energy_duration = slot_ps * 1e-12
                 leakage = reference_leakage * (leakage_model.factors(temperatures)
                                                if profile == "temperature_aware" else 1.)
-                ice.advance(mapping.powers(dynamic + leakage))
+                powers = mapping.powers(dynamic + leakage)
+                timing.emit("replay", "replay_power", power_start, sim_ps=t0)
+                ice.advance(powers)
                 new_temperatures = mapping.temperatures(ice.temperatures(mapping.layout.outputs))
                 energy_dynamic += dynamic * energy_duration
                 energy_leakage += leakage * energy_duration
@@ -195,6 +211,9 @@ def run(recording, output, server=ROOT / "3D-ICE/bin/3D-ICE-Server", profile="te
                           f"{summary['cycles_completed']} cycles / {summary['layers_completed']} layers, "
                           f"peak {temperatures.max():.3f} C", flush=True)
                     last_progress = time.monotonic()
+            loop_end = timing.now()
+            timing.emit("replay", "replay_end", loop_end, loop_end,
+                        sim_ps=summary["slots"] * slot_ps)
             if summary["status"] == "running":
                 summary["status"] = ("complete" if requested_end <= round(max_seconds * 1e12)
                                      and (single_pass or cycles is not None) else "time_limit")

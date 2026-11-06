@@ -9,16 +9,18 @@ import sys
 
 from .runner import ROOT, HERE, CONFIGS, PROVIDER, command_for, environment, execute, select_cpus
 from .analyze import read_events, summarize_events
+from . import backend
+from experiments.thermal_replay.activity import digest
 from Interface_scripts.providers.softhier.export_system_config import import_architecture
 
 
-def prepare_smoke(output):
+def prepare_smoke(output, arch_source=None):
     output = Path(output).resolve()
     output.relative_to(ROOT)
     output.mkdir(parents=True, exist_ok=False)
     sdk = ROOT / "SoftHier/soft_hier_sdk"
     arch = output / "arch.py"
-    shutil.copy2(sdk / "apps_dram3d/config/arch.py", arch)
+    shutil.copy2(arch_source or sdk / "apps_dram3d/config/arch.py", arch)
     architecture = import_architecture(arch)
     workload = dict(arch=str(arch), source=str(output), thermal_config=str(CONFIGS / "dram3d_thermal.json"),
                     dram_power_config=str(CONFIGS / "dram3d_power.json"),
@@ -55,19 +57,21 @@ SECTIONS {{
     return output, binary, env
 
 
-def run(output, replicates=3, coupling_mode="optimized"):
+def run(output, replicates=3, coupling_mode="optimized", thermal_backend=None, grid_pitches=(100.,)):
     from .validate_coupling import numerical_artifacts
+    selected = thermal_backend or backend.from_settings({})
+    checksum = digest(selected["server"])
     output, binary, env = prepare_smoke(output)
     rows, signature = [], None
-    reference_artifacts = None
+    reference_artifacts = {}
     cpus = ",".join(map(str, select_cpus()))
     rng = random.Random(19)
     # First block warms files; it is kept in raw results but excluded from ratios.
     for block in range(replicates + 1):
-        modes = [(pitch, instrument) for pitch in (None, 100.) for instrument in (False, True)]
+        modes = [(pitch, instrument) for pitch in (None, *grid_pitches) for instrument in (False, True)]
         rng.shuffle(modes)
         for pitch, instrument in modes:
-            mode = "architecture" if pitch is None else "closed_loop_100"
+            mode = "architecture" if pitch is None else f"closed_loop_{pitch:g}"
             directory = output / f"b{block}_{mode}_{'on' if instrument else 'off'}"
             (directory / "logs").mkdir(parents=True)
             run_env = dict(env, SOFTHIER_BINARY=str(binary), SIMULATOR_PLATFORM="",
@@ -75,7 +79,8 @@ def run(output, replicates=3, coupling_mode="optimized"):
                            SOFTHIER_RUN_CWD=str(directory / "results/simulator"))
             (directory / "timing").mkdir()
             run_env["CLO_TIMING_DIR"] = str(directory / "timing")
-            command = ["taskset", "-c", cpus, *command_for(pitch, directory, 20_000_000, coupling_mode)]
+            command = ["taskset", "-c", cpus, *command_for(pitch, directory, 20_000_000, coupling_mode,
+                                                         thermal_backend=selected)]
             start, end = execute(command, run_env, directory / "logs" /
                                  ("simulator.log" if pitch is None else "driver.log"), 300)
             text = (directory / "logs/simulator.log").read_text()
@@ -88,12 +93,17 @@ def run(output, replicates=3, coupling_mode="optimized"):
             row = dict(mode=mode, coupling_mode=coupling_mode, instrumented=instrument, block=block, pilot=block == 0,
                        host_seconds=(end - start) * 1e-9, simulated_ns=int(signature), path=str(directory))
             row["timing"] = summarize_events(read_events(directory / "timing"), start, end,
-                                              pitch is not None, 20_000_000, instrument)
+                                              pitch is not None, 20_000_000, instrument,
+                                              solver_type=selected["solver_type"])
             if pitch is not None:
+                row["thermal_backend"] = backend.verify_run(directory, selected, checksum)
+                mesh = json.loads((directory / "generated/3dice/mesh.json").read_text())
+                if mesh["total_cells"] != row["timing"]["native_cells"]:
+                    raise ValueError("native and generated thermal cell counts disagree")
                 artifacts = numerical_artifacts(directory)
-                if reference_artifacts is not None and artifacts != reference_artifacts:
+                if pitch in reference_artifacts and artifacts != reference_artifacts[pitch]:
                     raise ValueError("power/temperature/final-map artifacts changed with instrumentation")
-                reference_artifacts = artifacts
+                reference_artifacts[pitch] = artifacts
             config = json.loads((directory / "results/simulator/gvsoc_config.json").read_text())
             row["effective_gvsoc"] = {k: config["target"]["gvsoc"].get(k)
                                       for k in ("power", "debug-mode", "profile-mode")}
@@ -102,7 +112,7 @@ def run(output, replicates=3, coupling_mode="optimized"):
             rows.append(row)
             (output / "raw.json").write_text(json.dumps(rows, indent=2) + "\n")
     comparison = {}
-    for mode in ("architecture", "closed_loop_100"):
+    for mode in ("architecture", *(f"closed_loop_{pitch:g}" for pitch in grid_pitches)):
         means = {str(enabled): statistics.mean(r["host_seconds"] for r in rows
                  if r["mode"] == mode and r["instrumented"] == enabled and not r["pilot"])
                  for enabled in (False, True)}

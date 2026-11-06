@@ -18,6 +18,7 @@ from system_contract import (  # noqa: E402
     load_contract, thermal_die_ids, power_order_elements, flattened_floorplan_name,
 )
 from multi_die_stack import write_stack  # noqa: E402
+from thermal_solver import SOLVERS, configure as configure_solver  # noqa: E402
 
 
 GEOGEN = SCRIPT_DIR / "geogen.py"
@@ -43,6 +44,9 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Generate geometry, floorplan, and stack files for 3D-ICE."
     )
+    parser.add_argument("--solver-type", choices=SOLVERS)
+    parser.add_argument("--solver-threads", type=positive_int)
+    parser.add_argument("--solver-tolerance", type=positive_float)
     parser.add_argument(
         "--system-config",
         required=True,
@@ -129,6 +133,7 @@ def main() -> int:
             run([sys.executable, str(ROI2ICE_FLOORPLAN), str(system_config), str(geo), str(path),
                  "--die", die_id, *mesh_args])
         write_stack(document, floorplans, stk, slot_seconds, step_seconds, args.grid_pitch_um, args.map_output)
+        stk.write_text(configure_solver(stk.read_text(), args.solver_type, args.solver_threads, args.solver_tolerance))
         write_manifest(document, floorplans, stk)
         from mesh_report import write_mesh_report
         write_mesh_report(document, floorplans, stk, args.grid_pitch_um)
@@ -161,6 +166,7 @@ def main() -> int:
         ]
     )
 
+    stk.write_text(configure_solver(stk.read_text(), args.solver_type, args.solver_threads, args.solver_tolerance))
     print(f"Generated geometry: {geo}")
     print(f"Generated floorplan: {floorplan}")
     print(f"Generated stk: {stk}")

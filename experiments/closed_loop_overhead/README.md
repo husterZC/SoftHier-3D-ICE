@@ -63,6 +63,74 @@ python -m experiments.closed_loop_overhead analyze \
   experiments/closed_loop_overhead/results/b8_overhead_optimized
 ```
 
+### New CPU backend with one-thread AMGCL CG
+
+The original server and SuperLU remain the default. To use the new backend,
+select it through the experiment's arguments; the runner intentionally clears
+inherited `DICE_*` and `ICE_*` environment variables. The new CPU server can be
+built separately before any measurement:
+
+```bash
+make 3dice-build DICE_DIR="$PWD/3D-ICE_30_Oct" DICE_BUILD_TARGET=cpu
+```
+
+Run the closed-loop study first:
+
+```bash
+/home/kzhu/miniconda3/envs/py312/bin/python \
+  -m experiments.closed_loop_overhead run \
+  --prefix b8_overhead_amgcl1 \
+  --dice-dir "$PWD/3D-ICE_30_Oct" --dice-build-target cpu \
+  --solver-type cpu_amgcl_cg_amg --solver-threads 1 \
+  --solver-tolerance 1e-6 \
+  --grid-pitches-um 100 50 20 --interval-ps 20000000 \
+  --replicates 1
+```
+
+This schedules four pilots and four measured executions: architecture only,
+then the three thermal configurations in randomized order within each block.
+They use 18,107, 67,139, and 396,347 cells. All thermal configurations use
+temperature-aware leakage and a 20 µs step equal to the power-update interval.
+BLAS uses one thread. `1e-6` is an absolute linear-system residual tolerance,
+not a bound on temperature error. Full grid-accuracy analysis remains separate.
+
+After that study completes, run the matching capture/replay overhead experiment:
+
+```bash
+/home/kzhu/miniconda3/envs/py312/bin/python \
+  -m experiments.closed_loop_overhead.replay_overhead run \
+  --reference-study experiments/closed_loop_overhead/results/b8_overhead_amgcl1 \
+  --prefix b8_replay_amgcl1_50um_1s \
+  --max-seconds 1 --replicates 1
+```
+
+Replay inherits the selected CPU server, AMGCL CG, one thread, and tolerance
+from the reference study. It runs 50,000 steps on the 67,139-cell mesh. One
+pilot workflow and one measured workflow each perform a fresh SoftHier capture
+followed by replay; only the measured workflow contributes to the results, and
+its capture cost is charged once. Use an unused prefix; old results are kept.
+
+Replace `run` with `plan` to preview either command without starting a study.
+The replay plan requires the completed reference. Add `--resume` to the same
+run command to continue an identical study. Changed binaries, sources, or
+solver controls require a new study. `--build-hardware` on the closed-loop
+runner also builds the selected thermal target; replay never rebuilds its
+reference binaries.
+
+Backend/solver arguments are also accepted by the closed-loop `smoke` command.
+For a bounded check of all three grids, use the same five backend/solver options
+with `smoke --output runs/overhead_amgcl_smoke --replicates 1
+--grid-pitches-um 100 50 20`. Replay smoke inherits the reference selection:
+`python -m experiments.closed_loop_overhead.replay_overhead smoke
+--reference-study experiments/closed_loop_overhead/results/b8_overhead_amgcl1
+--output runs/overhead_amgcl_replay_smoke`.
+
+The study records the selected sources, native binary hashes, and effective
+solver controls. AMGCL emits one `preconditioner_setup` event instead of an LU
+`factorization`. Both are initialization costs, excluded from the workload/replay
+bars and included in end-to-end time. Reports retain separate factorization and
+preconditioner counts/durations. Existing SuperLU studies remain readable.
+
 ## Fixed physical and numerical settings
 
 The default is the current 17-layer `dram_on_logic` stack with `square_bands`
@@ -118,7 +186,8 @@ ordinary runs. Each process has a separate file, uses `CLOCK_MONOTONIC` /
 `time.monotonic_ns`, and records its PID, simulated time, CPU use, and peak RSS.
 Power exchanges additionally record their window duration; thermal steps
 record native simulated time. The native event files contain matrix cell/NNZ
-counts, factorization, source/RHS/solve times, ROI markers, and process exits.
+counts, factorization or preconditioner setup, source/RHS/solve times, ROI
+markers, and process exits.
 
 The phase analysis partitions wall time exactly once. Inside ROI, thermal
 advancement takes precedence over overlapping hook waits, followed by power
@@ -241,7 +310,7 @@ font caches beside this script and the layer-stack plot, plus installed fonts;
 `--font-dir` supplies a different font directory. PDF fonts are embedded and SVG
 text is outlined for portability.
 
-The layout is 3.6 × 2.85 inches for a single journal column. Muted solid fills,
+The layout is 3.6 × 2.15 inches for a single journal column. Muted solid fills,
 light gridlines, and a shared label for the three closed-loop grids keep the
 breakdown readable at that size. Bar labels show total minutes in bold and
 relative overhead underneath. Fill colors and the style version are recorded
@@ -249,9 +318,9 @@ in the JSON metadata; all segment heights remain proportional to measured time.
 
 The figure shows workload execution time in minutes, excluding initialization
 and finalization. Percentages use the architecture-only workload baseline.
-The legend contains four workload phases: SoftHier execution (blue), power
-estimation (yellow), 3D-ICE thermal steps (orange), and coordination/output
-(green). Yellow combines directly measured inline accounting with capture and
+The legend labels are SoftHier/GVSoC (blue), Power estimation (yellow), 3D-ICE
+(orange), and Others (green). Others contains coordination and output time.
+Yellow combines directly measured inline accounting with capture and
 mapping. Raw mapping intervals are repartitioned using the original overlap
 priorities; nested durations are never added twice. CSV/JSON also retain the
 inline and capture/mapping durations separately. Baseline bookkeeping is plotted
@@ -447,3 +516,135 @@ optimization opportunity. This diagnosis left SoftHier sources and installed
 binaries unchanged. The former `queue_hotspot.json` and `validation.json`
 artifacts recorded instruction-level evidence and bounded checks; they are no
 longer available in the workspace.
+
+## One-time capture plus 1-second replay overhead
+
+This additional experiment measures **one fresh SoftHier recording plus a
+1-second temperature-aware replay** on the completed study's **67,139-cell
+(50 µm) mesh**. It reuses that study's executable, preload, architecture,
+electrical configuration, stack, CPU affinity, and optimized native binaries.
+It does not build hardware or rerun the four closed-loop cases.
+
+First, inspect the configuration without starting a simulation:
+
+```bash
+/home/kzhu/miniconda3/envs/py312/bin/python -m experiments.closed_loop_overhead.replay_overhead plan
+```
+
+Run the full experiment manually:
+
+```bash
+/home/kzhu/miniconda3/envs/py312/bin/python -m experiments.closed_loop_overhead.replay_overhead run \
+  --reference-study experiments/closed_loop_overhead/results/b8_overhead_optimized \
+  --prefix b8_replay_50um_1s \
+  --max-seconds 1 \
+  --replicates 1
+```
+
+This runs **one pilot workflow and one measured workflow**: two B8 captures and
+two 1-second replays in total. Each workflow creates its own recording. The
+capture uses constant-profile logic/DRAM power accounting and the existing
+recording hook, with no thermal solver. Its numerical result and architecture
+cycle signature must match the completed B8 study. Replay recomputes logic
+leakage from temperature; DRAM uses its fixed electrical characterization.
+Power updates and thermal steps are both **20 µs**, so a successful replay has
+**50,000 steps**, **67,139 cells**, and **one solver setup** (LU factorization
+or CG preconditioner setup, inherited from the reference). Reaching the
+requested time limit is successful; stopping early at the model limit is not.
+The full replay thermal timeline is 1 second; capture is preparation for this
+timeline, not an additional thermal prefix.
+
+The main execution-time breakdown uses the same four categories as the figure:
+
+| Category | Capture contribution | Replay contribution |
+|---|---|---|
+| SoftHier execution | Workload ROI, excluding directly timed inline power routines | Zero |
+| Power accounting + capture | Inline accounting and power capture/mapping | Activity lookup/resampling, leakage recomputation, power mapping |
+| 3D-ICE thermal steps | Zero | Native source/RHS updates and linear solves |
+| Coordination + output | Hook coordination and output inside ROI | Communication, feedback, bookkeeping, and histories inside the replay loop |
+
+The combined bar is **capture ROI + replay loop**, with the capture charged
+exactly once. Startup, shutdown, and recording preparation are excluded from
+that bar, as initialization/finalization are excluded from the original bars.
+They are retained separately, and all categories reconcile with the full
+workflow wall time. Recording preparation includes validation and conversion
+of the capture trace before replay starts. Build time and post-run analysis are
+excluded. Timings include instrumentation overhead without a correction.
+
+Results are saved under `results/b8_replay_50um_1s/`. Each workflow retains
+`capture/`, `recording/`, `replay/`, raw timing events, and `measurement.json`.
+`analysis.json`, `summary.csv`, and `runs.csv` contain capture, replay, and
+combined costs, excluded setup/finalization costs, and host seconds per
+simulated second with and without capture. The pilot is excluded. With one
+measured workflow there is no confidence interval; additional measured
+workflows use independent workflow bootstrap intervals, not pairing with the
+older closed-loop study. Normal replay histories and final state are written;
+dense maps at every interval are disabled.
+
+To resume, rerun the same command with `--resume`. Completed workflows are
+validated and skipped. A failed/interrupted workflow is preserved under a
+`*_failed_*` directory and restarted from capture. Settings, source files,
+reference inputs, and native artifact hashes must match. The runner shares the
+closed-loop study lock to prevent simultaneous benchmark jobs.
+
+If replay startup fails after a successful **pilot** capture, prepare recovery
+without repeating that capture:
+
+```bash
+python -m experiments.closed_loop_overhead.replay_overhead recover-pilot \
+  experiments/closed_loop_overhead/results/b8_replay_50um_1s
+```
+
+Then rerun the original `run` command with `--resume`. Preparation runs no
+simulation. It rechecks numerical PASS, raw capture timing, recording hashes,
+power configuration, reference inputs, and native binaries. Original sources,
+measurement, and failed replay outputs are preserved under `recoveries/`;
+capture files stay in place. Source changes are limited to the replay/recovery
+code and documentation, with unchanged capture setup and command settings.
+Recovery is allowed only before any measured workflow starts. Measured
+workflows always use fresh captures. The recovered pilot remains excluded from
+performance statistics, and its elapsed interruption is labeled
+`pilot_recovery_gap`, not recording preparation.
+
+The socket client prevents local source/destination port collisions before
+connecting. A confirmed server bind conflict retries on a new port (up to
+three attempts); unrelated startup errors still stop the run. Failed startup
+logs and native timing are archived separately. The successful thermal session
+still has one solver setup; any retries contribute to initialization wall
+time and are listed in `replay/summary.json`.
+
+After completion, append the measured fifth bar:
+
+```bash
+/home/kzhu/miniconda3/envs/py312/bin/python \
+  plot_script/experiment_4_closed_loop_overhead/plot_closed_loop_overhead.py \
+  --replay-study experiments/closed_loop_overhead/results/b8_replay_50um_1s
+```
+
+The fifth bar is labeled **Replay (1 s)** and includes the one-time architecture
+capture plus thermal replay; the closed-loop bars cover 25.6 ms. The replay bar
+has no baseline-relative overhead percentage because the simulated
+durations differ. This measures repeated recorded activity, not a fresh
+1-second architectural simulation. Omitting `--replay-study` keeps the original
+four-bar figure. Incomplete studies and short validation runs cannot supply
+the fifth bar. With replay included, the figure is 4.5 × 2.15 inches.
+
+Recompute reports without running simulations:
+
+```bash
+python -m experiments.closed_loop_overhead.replay_overhead analyze \
+  experiments/closed_loop_overhead/results/b8_replay_50um_1s
+```
+
+Short validation, independent of the full benchmark:
+
+```bash
+python -m unittest experiments.closed_loop_overhead.test_replay_overhead
+python -m experiments.closed_loop_overhead.replay_overhead smoke \
+  --output experiments/closed_loop_overhead/results/replay_overhead_smoke_new
+```
+
+The native check runs a small arithmetic kernel with accounting timing on/off,
+then replays each recording for **1 ms / 50 steps** at the actual 67,139-cell
+mesh. It requires identical capture power, replay power, energy, and thermal
+state. These checks do not run B8 or establish full-workload performance.

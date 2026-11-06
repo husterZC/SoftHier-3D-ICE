@@ -171,9 +171,44 @@ Changing the integration step changes numerical accuracy.
 The native solver assembles and factorizes its thermal system once. The Python
 client sends power and reads component temperatures through a persistent local
 socket. Full package-state requests occur only at initialization and final
-export. `--factorization-threads 1` is the default because native validation
+export. `--solver-threads 1` is the default because native validation
 found intermittent incorrect zero-power solutions with eight SuperLU threads.
-The client defaults `OPENBLAS_NUM_THREADS` to 1 unless already set.
+`--factorization-threads` remains an alias. The client sets the thermal child's
+OpenMP thread count to the requested value and its OpenBLAS thread count to one;
+it does not change the parent process environment.
+
+### Optional new CPU backend
+
+Build the new backend from the repository root:
+
+```bash
+make 3dice-build DICE_DIR="$PWD/3D-ICE_30_Oct" DICE_BUILD_TARGET=cpu
+```
+
+Select its CPU server explicitly when replaying the completed B8 recording:
+
+```bash
+/home/kzhu/miniconda3/envs/py312/bin/python -m experiments.thermal_replay replay \
+  --recording experiments/closed_loop_overhead/results/b8_replay_50um_1s/runs/block01/recording \
+  --output runs/thermal_replay/b8_cpu_superlu_1s \
+  --server "$PWD/3D-ICE_30_Oct/bin/3D-ICE-Server-cpu" \
+  --profile temperature_aware \
+  --solver-type cpu_direct_lu --solver-threads 1 \
+  --thermal-step 2e-05 --max-seconds 1
+```
+
+For the optional faster CG solver, use a separate output directory and replace
+the solver arguments with `--solver-type cpu_amgcl_cg_amg --solver-threads 4
+--solver-tolerance 1e-6`. The tolerance bounds the absolute linear-system
+residual, not temperature error. These solver types require the new backend;
+the original server remains the default when `--server` is omitted. CG is for
+symmetric positive definite stacks such as the solid logic/DRAM configuration.
+
+The recording is reused without another SoftHier capture. Runtime solver type,
+tolerance, threads, and executable hash are saved in `summary.json`. Validation
+reports solver differences separately from thermal physics and integration
+steps. Short validation does not establish long-duration CG accuracy; the
+one-second command above is left for manual execution.
 
 ## Capture or import another recording
 
@@ -253,6 +288,18 @@ excluded. Ten-layer blocks preserve activity variation across the observed
 repeat loop. They do not model changed future tokens, temperature-dependent
 timing, throttling, DVFS, or changed power models. Leakage uses linear
 interpolation between the archived model's temperature samples.
+
+For exclusive host-time measurements including the one-time SoftHier capture,
+use the [capture/replay overhead experiment](../closed_loop_overhead/README.md#one-time-capture-plus-1-second-replay-overhead).
+It enables optional replay-loop and power-calculation timing through
+`CLO_TIMING_DIR`, alongside the existing native solver events. Ordinary replay
+commands leave these probes disabled.
+
+The local client rejects source-port collisions before connecting and retries
+confirmed server bind conflicts up to three times. Failed attempts retain
+`server_startup_failed_*.log` and, when timing is enabled, their timing files
+under `startup_failed/`. Successful replay summaries list these retries;
+physics and thermal stepping are unchanged.
 
 Replay outputs include:
 

@@ -28,6 +28,7 @@ from prepare_workload import (prepare, build, load_sdk_report, sha256, write_jso
                               source_hashes as workload_source_hashes)
 from run_study import parse_timing
 from .analyze import analyze, read_events, summarize_events
+from . import backend
 
 
 def positive_int(value):
@@ -53,6 +54,8 @@ def parse_args(argv=None):
     smoke.add_argument("--output", type=Path, required=True)
     smoke.add_argument("--replicates", type=positive_int, default=3)
     smoke.add_argument("--coupling-mode", choices=("optimized", "legacy"), default="optimized")
+    smoke.add_argument("--grid-pitches-um", nargs="+", type=positive_float, default=[100.])
+    backend.add_arguments(smoke, positive_int, positive_float)
     for command in ("plan", "run"):
         p = commands.add_parser(command, help="Print configuration only" if command == "plan" else "Execute the study")
         p.add_argument("--prefix", default=datetime.now(timezone.utc).strftime("b8_%Y%m%dT%H%M%SZ"))
@@ -73,6 +76,7 @@ def parse_args(argv=None):
         p.add_argument("--build-hardware", action="store_true", help="Build native dependencies/GVSoC and 3D-ICE before pilots")
         p.add_argument("--resume", action="store_true", help="Resume an identical study, retaining failed attempts")
         p.add_argument("--max-host-seconds", type=positive_float, help="Optional per-run timeout; failures are excluded")
+        backend.add_arguments(p, positive_int, positive_float)
     args = parser.parse_args(argv)
     if args.command in ("plan", "run"):
         if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", args.prefix):
@@ -104,11 +108,13 @@ def select_cpus(spec=None):
 
 
 def settings(args):
+    thermal_backend = backend.from_args(args)
     return dict(case=CASE, layer=args.layer, seed=args.seed, workload_repeats=1,
                 floorplan="square_bands", profile="temperature_aware",
                 grid_pitches_um=args.grid_pitches_um, replicates=args.replicates,
                 interval_ps=args.interval_ps, thermal_step_seconds=args.interval_ps * 1e-12,
-                cpus=select_cpus(args.cpus), thermal_threads=1, coupling_mode=args.coupling_mode,
+                cpus=select_cpus(args.cpus), thermal_threads=thermal_backend["solver_threads"],
+                thermal_backend=thermal_backend, coupling_mode=args.coupling_mode,
                 power_accounting_timing=args.power_accounting_timing,
                 adapter_poll_seconds=args.adapter_poll_seconds or (.005 if args.coupling_mode == "optimized" else .02),
                 server_poll_seconds=args.dice_poll_seconds or (.005 if args.coupling_mode == "optimized" else 1.),
@@ -140,7 +146,7 @@ def capture(command, cwd=ROOT):
                 stdout=result.stdout.strip(), stderr=result.stderr.strip())
 
 
-def host_info():
+def host_info(thermal_backend=None):
     return dict(platform=platform.platform(), python=sys.version, executable=sys.executable,
                 affinity=sorted(os.sched_getaffinity(0)), cpu=capture(["lscpu", "-J"]),
                 compilers={name: capture([name, "--version"]) for name in
@@ -156,16 +162,26 @@ def host_info():
                     Path("/sys/devices/system/cpu").glob("cpu*/cpufreq/scaling_governor")},
                 revisions={name: capture(["git", "rev-parse", "HEAD"], ROOT / name)
                            for name in (".", "SoftHier", "SoftHier/engine", "SoftHier/pulp",
-                                        "SoftHier/core", "SoftHier/soft_hier_sdk", "3D-ICE")})
+                                        "SoftHier/core", "SoftHier/soft_hier_sdk",
+                                        str(Path((thermal_backend or backend.from_settings({}))["dice_dir"]).relative_to(ROOT)))})
 
 
-def source_files():
-    files = [ROOT / "Makefile", ROOT / "3D-ICE/bin/3D-ICE-Server.c",
-             ROOT / "3D-ICE/sources/thermal_data.c", ROOT / "3D-ICE/include/closed_loop_timing.h",
-             ROOT / "3D-ICE/bin/3D-ICE-Client.c", ROOT / "3D-ICE/bin/power_trace_reader.c",
-             ROOT / "3D-ICE/bin/power_trace_reader.h",
+def source_files(thermal_backend=None):
+    dice = Path((thermal_backend or backend.from_settings({}))["dice_dir"])
+    files = [ROOT / "Makefile", dice / "bin/3D-ICE-Server.c",
+             dice / "sources/thermal_data.c", dice / "include/closed_loop_timing.h",
+             dice / "bin/3D-ICE-Client.c", dice / "bin/power_trace_reader.c",
+             dice / "bin/power_trace_reader.h",
              ROOT / "Interface_scripts/overhead_timing.py", ROOT / "Interface_scripts/system_contract.py",
-             ROOT / "Interface_scripts/thermal_manifest.py"]
+             ROOT / "Interface_scripts/thermal_manifest.py", ROOT / "Interface_scripts/thermal_solver.py"]
+    if thermal_backend is not None:
+        files.extend(p for p in (dice / "Makefile", dice / "makefile.def", dice / "superlu_mt-4.0.0/make.inc")
+                     if p.is_file())
+        # Parser outputs are build artifacts; snapshot grammar inputs instead.
+        for folder in ("bin", "sources", "include", "bison", "flex", "third_party/amgcl"):
+            files.extend(p for p in (dice / folder).rglob("*") if p.is_file()
+                         and (p.name == "Makefile" or p.suffix in
+                              ((".y", ".l") if folder in ("bison", "flex") else (".c", ".cpp", ".h", ".hpp"))))
     for directory in (HERE, PROVIDER.parent, ROOT / "Interface_scripts/geometry_generator",
                       ROOT / "Interface_scripts/co-simulation", ROOT / "experiments/llm_dram3d"):
         files.extend(p for p in directory.rglob("*") if p.is_file()
@@ -174,8 +190,8 @@ def source_files():
     return sorted(set(files))
 
 
-def source_hashes():
-    return {str(p.relative_to(ROOT)): sha256(p) for p in source_files()}
+def source_hashes(thermal_backend=None):
+    return {str(p.relative_to(ROOT)): sha256(p) for p in source_files(thermal_backend)}
 
 
 def no_power_environment(source, destination):
@@ -194,7 +210,7 @@ def no_power_environment(source, destination):
 
 def environment(workload):
     # Keep toolchain/environment activation, but isolate experiment-owned knobs.
-    prefixes = ("SOFTHIER_", "SIMULATOR_", "ICE_", "DICE_", "POWER_HOOK_", "RUN_", "CLO_", "COUPLING_")
+    prefixes = ("SOFTHIER_", "SIMULATOR_", "ICE_", "DICE_", "TDICE_", "POWER_HOOK_", "RUN_", "CLO_", "COUPLING_")
     paths = {"ROOT_DIR", "GENERATED_DIR", "TRACE_DIR", "RESULT_DIR", "STATE_DIR", "LOG_DIR", "PID_DIR",
              "SYSTEM_CONFIG_FILE", "GEO_FILE", "DEFAULT_POWER_W", "OTHERS_POWER", "PWR_INTERVAL_PS"}
     base = {k: v for k, v in os.environ.items() if not k.startswith(prefixes) and k not in paths}
@@ -216,7 +232,8 @@ def environment(workload):
     return env
 
 
-def native_artifacts():
+def native_artifacts(thermal_backend=None):
+    selected = thermal_backend or backend.from_settings({})
     install = ROOT / "SoftHier/.power_interface/install"
     controllers = sorted((install / "models").rglob("gen_pulp_chips_soft_hier_old_ctrl_registers_cpp_*.so"))
     if not controllers or any(b"roi_start" not in p.read_bytes() for p in controllers):
@@ -224,13 +241,14 @@ def native_artifacts():
     symbols = capture(["nm", "-D", str(install / "lib/libpulpvp-profile.so")])
     if symbols["returncode"] or " T clo_power_timing_abi_version" not in symbols["stdout"]:
         raise ValueError("native inline-power instrumentation is missing; use --build-hardware")
-    return [ROOT / "3D-ICE/bin/3D-ICE-Server", install / "native_build.json",
+    return [Path(selected["server"]), install / "native_build.json",
             ROOT / "SoftHier/.power_interface/dependencies/dramsys-install/native_build.json",
             install / "lib/libpulpvp.so", install / "lib/libpulpvp-profile.so", *controllers,
-            ROOT / "3D-ICE/bin/3D-ICE-Client", build_hook_client()]
+            Path(selected["client"]), build_hook_client()]
 
 
-def command_for(pitch, run_dir, interval, coupling_mode="optimized", server_poll=None, adapter_poll=None, profile="temperature_aware"):
+def command_for(pitch, run_dir, interval, coupling_mode="optimized", server_poll=None, adapter_poll=None,
+                profile="temperature_aware", thermal_backend=None):
     if pitch is None:
         return ["bash", str(PROVIDER), "run-uncoupled"]
     seconds = f"{interval * 1e-12:.12g}"
@@ -241,7 +259,8 @@ def command_for(pitch, run_dir, interval, coupling_mode="optimized", server_poll
             f"POWER_HOOK_POLL_SECONDS={adapter_poll if adapter_poll is not None else (.005 if coupling_mode == 'optimized' else .02)}",
             f"POWER_INTERVAL_PS={interval}", f"ICE_SLOT_SECONDS={seconds}", f"ICE_STEP_SECONDS={seconds}",
             f"ICE_GRID_PITCH_UM={pitch:g}", "ICE_TARGET_TOP_DIE_CELLS=", "ICE_MAP_OUTPUT=final",
-            "DICE_RUN_MODE=local-server", "ICE_GENERATE_GIF=0", "WAIT_TIMEOUT=3600"]
+            "DICE_RUN_MODE=local-server", "ICE_GENERATE_GIF=0", "WAIT_TIMEOUT=3600",
+            *backend.make_arguments(thermal_backend or backend.from_settings({}))]
 
 
 def execute(command, env, log, timeout=None):
@@ -331,14 +350,15 @@ def run(args):
 
 
 def run_locked(args, directory, config, modes):
-    hashes = source_hashes()
+    selected = backend.from_settings(config)
+    hashes = source_hashes(selected)
     if args.resume:
         manifest = json.loads((directory / "study.json").read_text())
         if manifest["settings"] != config or manifest["source_sha256"] != hashes:
             raise ValueError("resume requires identical settings and source files")
     else:
         directory.mkdir(exist_ok=False)
-        manifest = dict(schema_version=1, settings=config, configurations=modes, host=host_info(),
+        manifest = dict(schema_version=1, settings=config, configurations=modes, host=host_info(selected),
                         source_sha256=hashes, schedule=schedule(modes, args.seed, args.replicates),
                         status="preparing", created_utc=datetime.now(timezone.utc).isoformat())
         for relative in hashes:
@@ -361,7 +381,7 @@ def run_locked(args, directory, config, modes):
     env = environment(workload)
     if args.build_hardware:
         execute(["bash", str(PROVIDER), "build-hardware"], env, directory / "hardware_build.log")
-        execute(["make", "-C", str(ROOT / "3D-ICE"), "-j4"], env, directory / "ice_build.log")
+        execute(["make", "3dice-build", *backend.make_arguments(selected)], env, directory / "ice_build.log")
     if "binary" not in workload["cases"][CASE]:
         with (directory / "software_build.log").open("w") as log:
             workload = build(workload, log=log)
@@ -379,7 +399,7 @@ def run_locked(args, directory, config, modes):
     case = workload["cases"][CASE]
     manifest["binary_sha256"] = case["binary_sha256"]
     manifest["preload_sha256"] = case["preload_sha256"]
-    artifacts = native_artifacts()
+    artifacts = native_artifacts(selected)
     current = {str(p.relative_to(ROOT)): sha256(p) for p in artifacts}
     if "native_artifact_sha256" in manifest and manifest["native_artifact_sha256"] != current:
         raise ValueError("native artifacts changed; start a new study")
@@ -405,7 +425,7 @@ def run_locked(args, directory, config, modes):
         record_path = run_dir / "measurement.json"
         if record_path.exists() and json.loads(record_path.read_text())["status"] == "complete":
             continue
-        if source_hashes() != hashes or any(sha256(p) != current[str(p.relative_to(ROOT))] for p in artifacts):
+        if source_hashes(selected) != hashes or any(sha256(p) != current[str(p.relative_to(ROOT))] for p in artifacts):
             raise ValueError("sources or native artifacts changed during the study")
         compatible_workload(workload, config)
         if (workload_source_hashes(baseline) != environments["architecture_only"] or
@@ -424,7 +444,8 @@ def run_locked(args, directory, config, modes):
                        SOFTHIER_DRAMSYS_PATH=workload["dramsys_path"] if pitch is not None else str(baseline))
         command = ["taskset", "-c", ",".join(map(str, config["cpus"])),
                    *command_for(pitch, run_dir, config["interval_ps"], config["coupling_mode"],
-                                config["server_poll_seconds"], config["adapter_poll_seconds"])]
+                                config["server_poll_seconds"], config["adapter_poll_seconds"],
+                                thermal_backend=selected)]
         record = dict(item, status="running", command=command, loadavg_start=os.getloadavg(),
                       environment={k: run_env[k] for k in sorted(run_env) if k in
                                    ("PYTHON", "OPENBLAS_NUM_THREADS", "OMP_NUM_THREADS", "MKL_NUM_THREADS",
@@ -438,7 +459,8 @@ def run_locked(args, directory, config, modes):
             validation = parse_timing((run_dir / "logs/simulator.log").read_text(), case["manifest"],
                                       load_sdk_report(workload["source"]), 16, 1)
             timing = summarize_events(read_events(timing_dir), start, end, pitch is not None, config["interval_ps"],
-                                      power_accounting_timing=config["power_accounting_timing"])
+                                      power_accounting_timing=config["power_accounting_timing"],
+                                      solver_type=selected["solver_type"])
             record["effective_configuration"] = effective_configuration(run_dir, run_env["SOFTHIER_DRAMSYS_PATH"], pitch is not None)
             diagnostics = run_dir / "state/adapter_diagnostics.json"
             if diagnostics.exists():
@@ -451,10 +473,14 @@ def run_locked(args, directory, config, modes):
             if "architectural_signature" in manifest and manifest["architectural_signature"] != signature:
                 raise ValueError("architectural cycles changed between configurations")
             if pitch is not None:
+                record["thermal_backend"] = backend.verify_run(run_dir, selected,
+                    current[str(Path(selected["server"]).relative_to(ROOT))])
                 mesh = json.loads((run_dir / "generated/3dice/mesh.json").read_text())
                 if mesh["total_cells"] != timing["native_cells"]:
                     raise ValueError("native and generated thermal cell counts disagree")
                 record["mesh"] = mesh
+            if source_hashes(selected) != hashes or any(sha256(p) != current[str(p.relative_to(ROOT))] for p in artifacts):
+                raise ValueError("sources or native artifacts changed during the study")
             manifest["architectural_signature"] = signature
             record.update(status="complete", validation=validation, timing=timing,
                           output_bytes=sum(p.stat().st_size for p in run_dir.rglob("*") if p.is_file()),
@@ -479,6 +505,7 @@ def main(argv=None):
         print(json.dumps(analyze(args.study), indent=2))
     elif args.command == "smoke":
         from .smoke import run as smoke_run
-        smoke_run(args.output, args.replicates, args.coupling_mode)
+        smoke_run(args.output, args.replicates, args.coupling_mode,
+                  backend.from_args(args), args.grid_pitches_um)
     else:
         run(args)

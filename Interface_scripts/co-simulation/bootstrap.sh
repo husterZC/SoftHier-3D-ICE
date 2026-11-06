@@ -10,6 +10,7 @@ BUILD_3DICE="${BUILD_3DICE:-1}"
 PYTHON="${PYTHON:-python3}"
 MAKE_CMD="${MAKE:-make}"
 CHECK_ONLY=0
+source "$SCRIPT_DIR/dice_backend.sh"
 
 
 log() {
@@ -93,26 +94,17 @@ run_provider() {
 
 
 init_3dice() {
-    log "Initializing 3D-ICE submodule"
-    git -C "$ROOT_DIR" submodule update --init 3D-ICE
+    if [[ "$DICE_DIR" == "$ROOT_DIR/3D-ICE" ]]; then
+        log "Initializing 3D-ICE submodule"
+        git -C "$ROOT_DIR" submodule update --init 3D-ICE
+    else
+        [[ -f "$DICE_DIR/Makefile" ]] || die "missing selected 3D-ICE source: $DICE_DIR"
+    fi
 }
 
 
 build_or_verify_3dice() {
-    if [[ -x "$DICE_BIN_DIR/3D-ICE-Server" && -x "$DICE_BIN_DIR/3D-ICE-Client" ]]; then
-        log "3D-ICE client/server binaries already exist in $DICE_BIN_DIR"
-        return
-    fi
-    if [[ "$BUILD_3DICE" != "1" ]]; then
-        die "3D-ICE binaries are missing and BUILD_3DICE=$BUILD_3DICE"
-    fi
-
-    log "Installing/building 3D-ICE client/server"
-    SRC_DIR="$DICE_DIR" "$SCRIPT_DIR/3dice_client_server.sh" install
-    [[ -x "$DICE_BIN_DIR/3D-ICE-Server" ]] ||
-        die "missing 3D-ICE server after build"
-    [[ -x "$DICE_BIN_DIR/3D-ICE-Client" ]] ||
-        die "missing 3D-ICE client after build"
+    dice_build_or_verify 1
 }
 
 
