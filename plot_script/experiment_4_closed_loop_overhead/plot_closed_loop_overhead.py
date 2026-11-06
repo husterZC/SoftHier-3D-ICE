@@ -23,14 +23,14 @@ DEFAULT_STUDY = ROOT / "experiments/closed_loop_overhead/results/b8_overhead_opt
 FONT_FAMILY = "Times New Roman"
 STEM = "closed_loop_overhead"
 SCOPES = ("roi_seconds",)
-FIGURE_SIZE = (3.6, 2.85)
-STYLE_VERSION = "closed-loop-overhead-publication-v2"
+FIGURE_SIZE = (3.6, 2.15)
+STYLE_VERSION = "closed-loop-overhead-publication-v11"
 # Flat, restrained fills: outlines/hatching can obscure sub-minute segments.
 PHASE_STYLE = {
-    "architecture": ("SoftHier execution", "#4C7594", ""),
+    "architecture": ("SoftHier/GVSoC", "#4C7594", ""),
     "power_estimation": ("Power estimation", "#E7BC55", ""),
-    "thermal_advancement": ("3D-ICE thermal steps", "#C2764B", ""),
-    "coupling_output": ("Coordination + output", "#315D54", ""),
+    "thermal_advancement": ("3D-ICE", "#C2764B", ""),
+    "coupling_output": ("Others", "#315D54", ""),
 }
 PHASES = tuple(PHASE_STYLE)
 
@@ -228,15 +228,51 @@ def register_fonts(font_directory):
     return fonts
 
 
+def append_replay(report, study):
+    from experiments.closed_loop_overhead.replay_analysis import load_results, require
+    from experiments.closed_loop_overhead.backend import from_settings
+    replay = load_results(study, require_complete=True)
+    settings = replay["settings"]
+    require(Path(replay["reference"]["directory"]).resolve() == Path(report["study"])
+            and replay["architectural_signature"] == report["architectural_signature"],
+            "capture/replay belongs to a different reference study")
+    reference_manifest = str(Path(report["study"]) / "study.json")
+    require(replay["reference"]["input_sha256"][reference_manifest] == report["input_sha256"][reference_manifest],
+            "capture/replay reference study changed")
+    require(settings["native_cells"] == 67139 and settings["grid_pitch_um"] == 50
+            and settings["replay_simulated_ps"] == 10**12
+            and settings["interval_ps"] == report["settings"]["interval_ps"]
+            and settings["cpus"] == report["settings"]["cpus"]
+            and settings["thermal_threads"] == report["settings"]["thermal_threads"],
+            "figure requires a matching 67,139-cell, 1-second capture/replay measurement")
+    require(from_settings(settings) == from_settings(report["settings"]),
+            "figure requires matching thermal backends and solver settings")
+    total = replay["combined"]
+    report["data"].append(dict(configuration="capture_replay_50", scope=replay["measurement_scope"],
+        grid_pitch_um=50, native_cells=settings["native_cells"], complete_blocks=replay["complete_blocks"],
+        runtime_seconds=total["runtime_seconds"], runtime_minutes=total["runtime_seconds"] / 60,
+        slowdown=None, overhead_percent=None, runtime_ci95_seconds=replay["runtime_ci95_seconds"],
+        overhead_ci95_percent=None, phases_seconds=total["phases_seconds"],
+        power_components_seconds=total["power_components_seconds"],
+        replay_simulated_seconds=1., capture_count=1))
+    report["replay"] = {k: v for k, v in replay.items() if k not in ("rows", "input_sha256")}
+    report["input_sha256"].update(replay["input_sha256"])
+    report["configurations"].append("capture_replay_50")
+    report["measurement_scope"] = "closed_loop_roi_and_capture_roi_plus_replay_loop"
+    return report
+
+
 def caption(report):
     w, settings, n = report["workload"], report["settings"], report["complete_blocks"]
     grids = [r for r in report["data"] if r["scope"] == SCOPES[0] and r["grid_pitch_um"] is not None]
     meshes = ", ".join(f"{r['grid_pitch_um']:g} µm ({r['native_cells']:,} cells)" for r in grids)
     repetitions = ("One measured repetition per configuration; no confidence intervals are shown."
                    if n == 1 else f"Means of {n} complete measured blocks; whiskers show 95% paired-block bootstrap confidence intervals (10,000 resamples).")
-    return (f"Closed-loop simulation overhead for B{w['batch']} LLM decode with KV-cache length {w['past_kv']} "
+    text = (f"Closed-loop simulation overhead for B{w['batch']} LLM decode with KV-cache length {w['past_kv']} "
             f"and layer {w['layer']}, using optimized coupling. Architecture-only execution is compared with "
-            f"thermal grids of {meshes}. Thermal steps and power updates both use {settings['interval_ps'] / 1e6:g} µs. "
+            f"thermal grids of {meshes}. Horizontal labels give total thermal-cell counts across the stack. "
+            f"The architecture-only and closed-loop cases simulate {report['architectural_signature']['roi_simulated_ps'] / 1e9:.6f} ms of workload execution. "
+            f"Thermal steps and power updates both use {settings['interval_ps'] / 1e6:g} µs. "
             "Bars show exclusive host wall-clock durations during workload execution, excluding "
             "initialization and finalization. Labels give runtime in minutes "
             "and percentage overhead relative to architecture-only workload execution, calculated as "
@@ -246,8 +282,30 @@ def caption(report):
             "and excludes hook exchanges. Blue is the remaining SoftHier execution, including scheduler "
             "work outside these routines. Timings include measurement overhead without an estimated correction. "
             "Mapping overlaps are resolved using the original timing "
-            f"partition priorities. {repetitions} Pilots are excluded. All included runs passed numerical "
-            "validation and share the same architectural cycle signature.\n")
+            f"partition priorities. {repetitions} Pilots are excluded. All included architecture runs passed numerical "
+            "validation and share the same architectural cycle signature.")
+    if "thermal_backend" in settings:
+        selected = settings["thermal_backend"]
+        name = "AMGCL CG" if selected["solver_type"] == "cpu_amgcl_cg_amg" else "SuperLU"
+        text += (f" The thermal solver is {name} with {selected['solver_threads']} thread(s) "
+                 f"and {selected['blas_threads']} BLAS thread(s).")
+        if selected["solver_tolerance"] is not None:
+            text += f" Its absolute residual tolerance is {selected['solver_tolerance']:g}."
+    if "replay" in report:
+        replay = report["replay"]
+        text += (" The fifth bar measures one constant-profile SoftHier capture ROI plus a 1-second "
+                 "temperature-aware replay at 67,139 cells (50,000 steps). Capture is charged once, "
+                 "not once per repeated block. Blue is capture-stage SoftHier execution; yellow adds "
+                 "capture accounting to replay activity lookup, leakage recomputation, and power mapping; "
+                 "orange is native replay thermal advancement; green combines coordination/output from both stages. "
+                 "Initialization, recording preparation, and finalization are excluded from the bar and reported "
+                 "in the end-to-end results. The simulated durations differ, so no baseline-relative overhead "
+                 "percentage is assigned to replay. This is repeated recorded activity, not a new 1-second "
+                 "architectural execution. ")
+        n_replay = replay["complete_blocks"]
+        text += ("One measured capture/replay workflow; no confidence interval."
+                 if n_replay == 1 else f"Mean of {n_replay} measured workflows; independent workflow bootstrap 95% confidence interval.")
+    return text + "\n"
 
 
 def write_table(path, data):
@@ -262,7 +320,7 @@ def write_table(path, data):
         row.update({phase + "_seconds": value for phase, value in record["power_components_seconds"].items()})
         rows.append(row)
     with path.open("w", newline="") as stream:
-        writer = csv.DictWriter(stream, fieldnames=list(rows[0]))
+        writer = csv.DictWriter(stream, fieldnames=list(dict.fromkeys(k for row in rows for k in row)))
         writer.writeheader()
         writer.writerows(rows)
 
@@ -285,15 +343,17 @@ def draw(report, font_directory=None):
         "xtick.color": "#343B40", "ytick.color": "#525B62",
     }
     with plt.rc_context(style):
-        fig, ax = plt.subplots(figsize=FIGURE_SIZE)
-        fig.subplots_adjust(left=.16, right=.985, bottom=.24, top=.81)
+        has_replay = "replay" in report
+        fig, ax = plt.subplots(figsize=(4.5, 2.15) if has_replay else FIGURE_SIZE)
+        left_margin = .13 if has_replay else .16
+        fig.subplots_adjust(left=left_margin, right=.985, bottom=.28, top=.77)
         largest = max(max(r["runtime_ci95_seconds"] or [r["runtime_seconds"]]) / 60
                       for r in report["data"])
-        ymax = math.ceil(largest * 1.16 / 10) * 10
+        ymax = math.ceil(largest * (1.25 if has_replay else 1.16) / 10) * 10
         annotations = []
         records = report["data"]
-        # A small gap separates the architecture baseline from the three grids.
-        positions = [0., *[i + .15 for i in range(1, len(records))]]
+        # Use the same small separation on both sides of the three grids.
+        positions = [0., 1.15, 2.15, 3.15] + ([4.30] if has_replay else [])
         bottom = [0.] * len(records)
         for phase in PHASES:
             _, color, hatch = PHASE_STYLE[phase]
@@ -312,15 +372,17 @@ def draw(report, font_directory=None):
                 ax.vlines(x, low, high, color="#252A2E", linewidth=.65, zorder=4)
                 ax.hlines([low, high], x - .06, x + .06, color="#252A2E", linewidth=.65, zorder=4)
                 top = max(top, high)
-            overhead = "baseline" if record["configuration"] == "architecture_only" else f"{record['overhead_percent']:+.1f}%"
+            overhead = ("" if record["configuration"] == "architecture_only" else
+                        f"{record['overhead_percent']:+.1f}%" if record["overhead_percent"] is not None else "")
             annotations.append(ax.annotate(f"{record['runtime_minutes']:.1f}", (x, top),
-                xytext=(0, 12), textcoords="offset points", ha="center", va="bottom",
+                xytext=(0, 12 if overhead else 4), textcoords="offset points", ha="center", va="bottom",
                 fontsize=8.6, fontweight="bold", color="#252A2E", annotation_clip=False))
-            annotations.append(ax.annotate(overhead, (x, top),
-                xytext=(0, 2.5), textcoords="offset points", ha="center", va="bottom",
-                fontsize=7.2, color="#626A70", annotation_clip=False))
-        labels = ["Architecture\nonly" if r["grid_pitch_um"] is None else
-                  f"{r['grid_pitch_um']:g} µm" for r in records]
+            if overhead:
+                annotations.append(ax.annotate(overhead, (x, top),
+                    xytext=(0, 2.5), textcoords="offset points", ha="center", va="bottom",
+                    fontsize=7.2, color="#626A70", annotation_clip=False))
+        labels = ["Architecture only" if r["grid_pitch_um"] is None else
+                  f"{r['native_cells']:,} cells" for r in records]
         ax.set_xticks(positions, labels)
         ax.set(xlim=(positions[0] - .58, positions[-1] + .58), ylim=(0, ymax))
         ticks = MaxNLocator(nbins=5, steps=[1, 2, 2.5, 5, 10]).tick_values(0, ymax)
@@ -335,7 +397,7 @@ def draw(report, font_directory=None):
         ax.spines["left"].set_color("#A3ABB1")
         ax.spines["bottom"].set_linewidth(.6)
         ax.spines["bottom"].set_color("#59636B")
-        ax.set_ylabel("Host wall time (min)", fontsize=8.2, labelpad=5)
+        ax.set_ylabel("Wall time (min)", fontsize=8.2, labelpad=5)
         # Matplotlib fills legend columns first; reorder for stack order by row.
         order = [PHASES[i] for i in (0, 2, 1, 3)]
         handles = [Patch(facecolor=PHASE_STYLE[p][1], edgecolor="none",
@@ -344,14 +406,24 @@ def draw(report, font_directory=None):
                    frameon=False, fontsize=7.4, handlelength=1.1, handleheight=.8,
                    handletextpad=.55, columnspacing=1.6, labelspacing=.6, borderpad=0)
         transform = ax.get_xaxis_transform()
-        left, right = positions[1] - .31, positions[-1] + .31
-        ax.plot([left, left, right, right], [-.105, -.135, -.135, -.105],
+        axis_height_points = ax.get_position().height * fig.get_figheight() * 72
+        left, right = positions[1] - .31, positions[3] + .31
+        ax.plot([left, left, right, right],
+                [offset / axis_height_points for offset in (-14, -17, -17, -14)],
                 transform=transform, color="#969FA6", linewidth=.45, clip_on=False)
-        group_label = ax.text((left + right) / 2, -.17, "Closed loop", transform=transform,
+        simulated_ms = report["architectural_signature"]["roi_simulated_ps"] / 1e9
+        group_label = ax.text((left + right) / 2, -21 / axis_height_points,
+                             f"Closed loop ({simulated_ms:.1f} ms simulated)", transform=transform,
                              ha="center", va="top", fontsize=7.5, color="#525B62")
+        group_labels = [group_label]
+        if has_replay:
+            group_labels.append(ax.text(positions[-1], -21 / axis_height_points, "Replay (1 s)",
+                                transform=transform, ha="center", va="top", fontsize=7.5, color="#525B62"))
         w, settings, n = report["workload"], report["settings"], report["complete_blocks"]
         note = "n = 1 per case" if n == 1 else f"n = {n}; 95% CIs"
-        fig.text(.16, .025, f"B{w['batch']} · KV {w['past_kv']} · Δt = {settings['interval_ps'] / 1e6:g} µs",
+        if has_replay and report["replay"]["complete_blocks"] != n:
+            note = f"n = {n} reference; {report['replay']['complete_blocks']} replay"
+        fig.text(left_margin, .025, f"B{w['batch']} · KV {w['past_kv']} · Δt = {settings['interval_ps'] / 1e6:g} µs",
                  fontsize=6.8, color="#626A70", va="bottom")
         fig.text(.985, .025, note, ha="right", va="bottom", fontsize=6.8, color="#626A70")
         fig.canvas.draw()
@@ -369,18 +441,29 @@ def draw(report, font_directory=None):
         if any(box.overlaps(legend.get_window_extent(renderer)) for box in boxes):
             plt.close(fig)
             raise ValueError("runtime annotations overlap the legend")
-        if any(group_label.get_window_extent(renderer).overlaps(t.get_window_extent(renderer))
-               for t in ax.get_xticklabels()):
+        tick_boxes = [text.get_window_extent(renderer) for text in ax.get_xticklabels()]
+        if any(a.overlaps(b) for i, a in enumerate(tick_boxes) for b in tick_boxes[i + 1:]):
+            plt.close(fig)
+            raise ValueError("case labels overlap")
+        if any(label.get_window_extent(renderer).overlaps(t.get_window_extent(renderer))
+               for label in group_labels for t in ax.get_xticklabels()):
             plt.close(fig)
             raise ValueError("closed-loop group label overlaps case labels")
+        if len(group_labels) > 1 and group_labels[0].get_window_extent(renderer).overlaps(
+                group_labels[1].get_window_extent(renderer)):
+            plt.close(fig)
+            raise ValueError("closed-loop and replay group labels overlap")
     return fig, fonts
 
 
-def render(study, output, dpi=600, font_directory=None):
+def render(study, output, dpi=600, font_directory=None, replay_study=None):
     if dpi <= 0:
         raise ValueError("dpi must be positive")
     report = load_study(study)
+    if replay_study is not None:
+        append_replay(report, replay_study)
     fig, fonts = draw(report, font_directory)
+    figure_size = list(fig.get_size_inches())
     output = Path(output).resolve()
     output.mkdir(parents=True, exist_ok=True)
     stem = output / STEM
@@ -399,7 +482,7 @@ def render(study, output, dpi=600, font_directory=None):
                 fig.savefig(stem.with_suffix("." + extension), dpi=dpi, facecolor="white", metadata=metadata)
     finally:
         plt.close(fig)
-    report.update(figure_size_inches=list(FIGURE_SIZE), png_dpi=dpi, font_family=FONT_FAMILY,
+    report.update(figure_size_inches=figure_size, png_dpi=dpi, font_family=FONT_FAMILY,
                   style_version=STYLE_VERSION,
                   phase_style={key: dict(label=value[0], color=value[1]) for key, value in PHASE_STYLE.items()},
                   font_files=fonts, svg_text_as_paths=True, matplotlib_version=matplotlib.__version__,
@@ -417,12 +500,13 @@ def render(study, output, dpi=600, font_directory=None):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--study", type=Path, default=DEFAULT_STUDY, help="completed optimized study directory")
+    parser.add_argument("--replay-study", type=Path, help="completed capture + 1-second replay overhead study")
     parser.add_argument("--output-dir", type=Path, default=HERE)
     parser.add_argument("--dpi", type=int, default=600)
     parser.add_argument("--font-dir", type=Path, help="directory containing Times New Roman font files")
     args = parser.parse_args()
     try:
-        render(args.study, args.output_dir, args.dpi, args.font_dir)
+        render(args.study, args.output_dir, args.dpi, args.font_dir, args.replay_study)
     except (ValueError, FileNotFoundError, KeyError) as error:
         parser.exit(2, f"error: {error}\n")
 

@@ -1,0 +1,12 @@
+# Local font installation; keep font binaries out of version control.
+.font-cache/
+__pycache__/
+
+# Generated figures, metadata, and local reference artwork.
+layer_stack_*.pdf
+layer_stack_*.png
+layer_stack_*.svg
+layer_stack_*.json
+Picture1.pdf
+Picture1.png
+figure_caption.txt
